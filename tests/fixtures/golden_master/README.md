@@ -54,7 +54,7 @@ re-runnable realization of the legacy's random training; the ported Trainer
 
 ## The world cache
 
-Loading the data through the legacy classes costs ~15 minutes of pure CPU
+Loading the data through the legacy classes costs ~25 minutes of pure CPU
 (88 speed files re-read, plus a pure-Python parse of the 907 MB
 `all_shortest_paths.csv`). Capture and verification therefore pickle the built
 world objects (`DataCalculations`, `shortest_path_memory`) to
@@ -65,3 +65,9 @@ parameters (horizon, max congestion duration) or the Python/numpy/pandas
 versions. It stores the pristine post-`__init__` state, so a cache hit is
 state-identical to a fresh build. To force a cold rebuild: delete the cache
 file, or pass `--no-cache` to the capture script.
+
+Known limitation (accepted): the data signature records byte sizes, not
+content hashes — a same-size in-place edit of a data CSV would go unnoticed by
+both the cache key and `test_dataset_matches_captured_signature`, and a warm
+cache skips the legacy load path entirely. After any deliberate data change,
+delete the cache and re-verify cold.

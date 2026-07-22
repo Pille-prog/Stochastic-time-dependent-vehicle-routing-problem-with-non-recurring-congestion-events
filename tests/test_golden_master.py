@@ -10,21 +10,15 @@ untouched legacy script and requires bit-exact float equality (ADR-0001). Skips
 when the local dataset is absent (e.g. CI).
 """
 
-import importlib.util
+import hashlib
 import json
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "golden_master" / "chengdu_full.json"
-
-spec = importlib.util.spec_from_file_location(
-    "capture_golden_master", REPO_ROOT / "scripts" / "capture_golden_master.py"
-)
-assert spec is not None and spec.loader is not None
-capture = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(capture)
 
 pytestmark = pytest.mark.golden
 
@@ -37,7 +31,7 @@ def golden() -> dict:
 
 
 @pytest.fixture(scope="module")
-def data_dir() -> Path:
+def data_dir(capture: ModuleType) -> Path:
     directory = capture.default_data_dir()
     missing = capture.missing_data_files(directory)
     if missing:
@@ -48,14 +42,14 @@ def data_dir() -> Path:
     return directory
 
 
-def test_dataset_matches_captured_signature(golden: dict, data_dir: Path) -> None:
+def test_dataset_matches_captured_signature(
+    capture: ModuleType, golden: dict, data_dir: Path
+) -> None:
     """If this fails, the data changed — value mismatches below would be explained."""
     assert capture.data_signature(data_dir) == golden["meta"]["data_signature"]
 
 
-def test_legacy_script_unchanged_since_capture(golden: dict) -> None:
-    import hashlib
-
+def test_legacy_script_unchanged_since_capture(capture: ModuleType, golden: dict) -> None:
     current = hashlib.sha256(capture.LEGACY_SCRIPT.read_bytes()).hexdigest()
     assert current == golden["meta"]["legacy_sha256"], (
         "the legacy monolith changed since the golden master was captured; "
@@ -63,7 +57,9 @@ def test_legacy_script_unchanged_since_capture(golden: dict) -> None:
     )
 
 
-def test_rerun_reproduces_golden_master_exactly(golden: dict, data_dir: Path) -> None:
+def test_rerun_reproduces_golden_master_exactly(
+    capture: ModuleType, golden: dict, data_dir: Path
+) -> None:
     legacy = capture.load_legacy()
     # The world cache only skips re-parsing the CSVs (state-identical objects);
     # delete the cache file to force a fully cold verification.

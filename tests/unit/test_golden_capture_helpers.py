@@ -5,7 +5,6 @@ uses the real dataset lives in tests/test_golden_master.py behind the `golden`
 marker.
 """
 
-import importlib.util
 import json
 import math
 from pathlib import Path
@@ -15,16 +14,6 @@ import numpy as np
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-@pytest.fixture(scope="module")
-def capture():
-    spec = importlib.util.spec_from_file_location(
-        "capture_golden_master", REPO_ROOT / "scripts" / "capture_golden_master.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 class TestToJsonable:

@@ -31,7 +31,7 @@ Usage (writes tests/fixtures/golden_master/chengdu_full.json):
 The golden pytest test (tests/test_golden_master.py, marker ``golden``) re-runs
 this protocol from the stored file and requires exact equality.
 
-Loading the data through the legacy classes costs ~15 minutes of pure CPU
+Loading the data through the legacy classes costs ~25 minutes of pure CPU
 (88 speed files re-read plus a pure-Python parse of the 907 MB
 ``all_shortest_paths.csv``), so the built world objects are pickled to a local
 cache (outside the repo/OneDrive; see ``default_cache_path``) keyed by the
@@ -185,8 +185,18 @@ def missing_data_files(data_dir: Path) -> list[str]:
 
 
 def data_signature(data_dir: Path) -> dict[str, int]:
-    """Cheap drift detector: byte size of every consumed data file."""
+    """Cheap drift detector: byte size of every consumed data file.
+
+    Deliberately size-only — hashing the ~3 GB of CSVs on every run is not worth
+    it for research data that only ever changes by regeneration. A same-size
+    in-place edit would slip through; after any deliberate data change, delete
+    the world cache and re-verify cold.
+    """
     return {name: (data_dir / name).stat().st_size for name in consumed_data_files()}
+
+
+def legacy_sha256() -> str:
+    return hashlib.sha256(LEGACY_SCRIPT.read_bytes()).hexdigest()
 
 
 def default_data_dir() -> Path:
@@ -211,7 +221,7 @@ def load_legacy() -> ModuleType:
     return module
 
 
-# --- World cache: skip the ~15-minute legacy data load on repeat runs ----------
+# --- World cache: skip the ~25-minute legacy data load on repeat runs ----------
 
 CACHE_FORMAT = 1
 
@@ -232,7 +242,7 @@ def world_cache_key(data_dir: Path, protocol: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "cache_format": CACHE_FORMAT,
-        "legacy_sha256": hashlib.sha256(LEGACY_SCRIPT.read_bytes()).hexdigest(),
+        "legacy_sha256": legacy_sha256(),
         "data_signature": data_signature(data_dir),
         "world_params": {
             "horizon_start_time": protocol["horizon_start_time"],
@@ -584,7 +594,7 @@ def capture_document(
     results = run_capture(legacy, data_dir, protocol, cache_path)
     meta = {
         "legacy_script": LEGACY_SCRIPT.name,
-        "legacy_sha256": hashlib.sha256(LEGACY_SCRIPT.read_bytes()).hexdigest(),
+        "legacy_sha256": legacy_sha256(),
         "data_signature": data_signature(data_dir),
         "versions": {
             "python": platform.python_version(),
