@@ -68,3 +68,9 @@ warn_unreachable = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The golden-master test needs the full local Chengdu dataset and takes minutes;
+# opt in with `uv run pytest -m golden`.
+addopts = "-m 'not golden'"
+markers = [
+    "golden: exact legacy golden-master equality; needs the full local dataset",
+]
