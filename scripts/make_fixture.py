@@ -35,17 +35,12 @@ from pathlib import Path
 import networkx as nx
 import pandas as pd
 
+from stdvrp.traffic import period_start_minute
+
 # Mirrors the legacy `Minute_start >= 300` filter. There is deliberately no upper
 # cut: the legacy keeps periods past the 780 horizon end (vehicles finish trips,
 # and speed interpolation reads periods, beyond it).
 MIN_PERIOD_START_MINUTE = 300
-
-
-def period_start_minute(period: str) -> int:
-    """Minutes since 03:00 of a Period's start, as the legacy pipeline defines it."""
-    start = period.split("-")[0]
-    hour, minute = map(int, start.split(":"))
-    return (hour - 3) * 60 + minute
 
 
 def select_nodes(link: pd.DataFrame, target_nodes: int, min_nodes: int) -> list[int]:

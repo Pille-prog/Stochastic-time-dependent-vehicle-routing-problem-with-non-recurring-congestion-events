@@ -12,6 +12,8 @@ import networkx as nx
 import pandas as pd
 import pytest
 
+from stdvrp.traffic import period_start_minute
+
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "chengdu_mini"
 
 LINK_COLUMNS = [
@@ -38,13 +40,6 @@ DATA_FILES = [
 # Mirrors the legacy `Minute_start >= 300` filter. No upper bound: the legacy keeps
 # periods past the 780 Horizon end (trips finish, and interpolation reads, beyond it).
 MIN_PERIOD_START_MINUTE = 300
-
-
-def period_start_minute(period: str) -> int:
-    """Minutes since 03:00 of a Period's start, as the legacy pipeline defines it."""
-    start = period.split("-")[0]
-    hour, minute = map(int, start.split(":"))
-    return (hour - 3) * 60 + minute
 
 
 @pytest.fixture(scope="module")

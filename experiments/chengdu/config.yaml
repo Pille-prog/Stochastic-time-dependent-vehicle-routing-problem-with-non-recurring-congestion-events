@@ -1,0 +1,42 @@
+# Chengdu full-data experiment. Data files live in the "Mega city" folder one
+# level above the repository (see data/README.md); traffic_days lists the 44
+# archive days the legacy monolith hardcoded (601-630 and 701-714).
+# Training values mirror a representative legacy run; ticket 04's golden-master
+# capture pins the exact argv combination to reproduce.
+
+data_dir: ../../..
+links_file: link.csv
+shortest_paths_file: all_shortest_paths.csv
+instance_day: 601
+traffic_days: [601, 602, 603, 604, 605, 606, 607, 608, 609, 610,
+               611, 612, 613, 614, 615, 616, 617, 618, 619, 620,
+               621, 622, 623, 624, 625, 626, 627, 628, 629, 630,
+               701, 702, 703, 704, 705, 706, 707, 708, 709, 710,
+               711, 712, 713, 714]
+
+horizon_start_minute: 300
+horizon_end_minute: 780
+
+mean_number_clients: 150
+time_window_spread: 60
+client_universe_seed: 0
+client_universe_size: 150
+client_universe_node_range: [1, 1900]
+
+congestion_lower_bound: 0.3
+congestion_upper_bound: 0.4
+max_congestion_duration: 120
+
+total_train_iterations: 100
+test_frequency: 10
+learning_rate: 1.0e-5
+warmup_learning_rate: 1.0e-6
+epsilon: 0.1
+n_observed_arcs: 3
+first_train_seed: 1000
+evaluation_seed_start: 100000
+evaluation_seed_count: 50
+test_episodes: 50
+
+# Legacy plot baseline for upper bound 0.4, duration 120, 150 mean clients.
+static_policy_mean_cost: 2490

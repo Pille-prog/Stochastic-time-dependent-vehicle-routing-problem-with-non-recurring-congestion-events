@@ -56,5 +56,15 @@ disallow_incomplete_defs = true
 module = ["networkx.*", "matplotlib.*"]
 ignore_missing_imports = true
 
+# Strict on the new core interfaces (ADR-0002 seams and the experiment config).
+# mypy does not accept `strict` per-module, so its component flags are set instead.
+[[tool.mypy.overrides]]
+module = ["stdvrp.config", "stdvrp.traffic.datasource"]
+disallow_any_generics = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+strict_equality = true
+warn_unreachable = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
