@@ -70,7 +70,7 @@ Exact call-graph confirmation of which shadowed variants are live happens during
 4. Minimal shim so the ORIGINAL script runs on the fixture (parameterize the 3 hardcoded file paths — nothing else).
 5. Capture golden master: episode costs / trajectories for fixed seeds on the fixture.
 
-**Acceptance**: original script runs on fixture reproducibly; golden-master values stored under `tests/fixtures/`.
+**Acceptance** (amended 2026-07-21 by the ADR-0001 addendum, discovery in ticket 03): committed mini fixture + structural tests in CI; the original script runs reproducibly on the **full local dataset** instead of the fixture — the legacy's hardcoded 1,900-node client universe, 60-client floor and 88-file aggregation make a sub-megabyte legacy-runnable fixture impossible. Golden-master values stored under `tests/fixtures/`; the exact-equality test skips when local data is absent.
 
 ### Phase 1 — Structural refactor (golden master stays green)
 1. Scaffold: pyproject (uv), ruff, mypy, pytest+hypothesis, GitHub Actions.

@@ -18,10 +18,12 @@ script resolves those names against its working directory). Node ids are
 renumbered to a contiguous 0..N-1 range (depot stays 0); original ``Link`` ids
 and the fixture→Chengdu node mapping are preserved for provenance.
 
-``all_shortest_paths.csv`` is recomputed on the sub-network with the legacy
-semantics: arc weight = average travel time in minutes, using the mean speed
-over the selected days' files (speeds are km/h at source; the legacy pipeline
-works in km and minutes, dividing speeds by 60).
+``all_shortest_paths.csv`` is recomputed on the sub-network: arc weight =
+length_km / (mean day-601 speed / 60), i.e. average travel time in minutes.
+NOTE: these values are self-consistent within the fixture but are NOT the
+legacy file's values — the real ``all_shortest_paths.csv`` was precomputed
+from 44-day aggregated speeds. Tickets that compare against legacy outputs
+must not assume equivalence (see ticket 03 comments).
 """
 
 from __future__ import annotations
@@ -33,8 +35,10 @@ from pathlib import Path
 import networkx as nx
 import pandas as pd
 
-HORIZON_START_MINUTE = 300
-HORIZON_END_MINUTE = 782  # last 2-minute period starting before the 780 horizon end
+# Mirrors the legacy `Minute_start >= 300` filter. There is deliberately no upper
+# cut: the legacy keeps periods past the 780 horizon end (vehicles finish trips,
+# and speed interpolation reads periods, beyond it).
+MIN_PERIOD_START_MINUTE = 300
 
 
 def period_start_minute(period: str) -> int:
@@ -50,10 +54,13 @@ def select_nodes(link: pd.DataFrame, target_nodes: int, min_nodes: int) -> list[
     graph.add_edges_from(zip(link["Node_Start"], link["Node_End"], strict=True))
     undirected = graph.to_undirected()
 
+    # Grow well past the target: the SCC step below can discard a large share
+    # of a BFS ball (one-way streets), so we oversample before trimming.
+    ball_budget = 4 * target_nodes
     ball = [0]
     seen = {0}
     frontier = [0]
-    while frontier and len(ball) < 4 * target_nodes:
+    while frontier and len(ball) < ball_budget:
         next_frontier: list[int] = []
         for node in frontier:
             for neighbour in sorted(undirected.neighbors(node)):
@@ -146,8 +153,7 @@ def main() -> None:
         for half in (0, 1):
             speed = pd.read_csv(args.source / f"speed[{day}]_[{half}].csv")
             minutes = speed["Period"].map(period_start_minute)
-            in_horizon = (minutes >= HORIZON_START_MINUTE) & (minutes < HORIZON_END_MINUTE)
-            mini = speed[in_horizon & speed["Link"].isin(link_ids)].copy()
+            mini = speed[(minutes >= MIN_PERIOD_START_MINUTE) & speed["Link"].isin(link_ids)].copy()
             mini["Speed"] = mini["Speed"].round(3)
             mini.to_csv(args.out / f"speed[{day}]_[{half}].csv", index=False)
             mini_speeds.append(mini)

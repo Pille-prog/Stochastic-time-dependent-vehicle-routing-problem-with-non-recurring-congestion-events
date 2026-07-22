@@ -35,9 +35,9 @@ DATA_FILES = [
     "node_map.csv",
 ]
 
-# The simulated Horizon is [300, 780]; periods are 2-minute intervals.
-HORIZON_START_MINUTE = 300
-HORIZON_END_MINUTE = 782
+# Mirrors the legacy `Minute_start >= 300` filter. No upper bound: the legacy keeps
+# periods past the 780 Horizon end (trips finish, and interpolation reads, beyond it).
+MIN_PERIOD_START_MINUTE = 300
 
 
 def period_start_minute(period: str) -> int:
@@ -101,8 +101,10 @@ def test_speed_files_cover_every_link_and_horizon_period(
     for half, speed in speeds.items():
         assert set(speed["Link"]) == link_ids, f"half {half}: link coverage mismatch"
         minutes = speed["Period"].map(period_start_minute)
-        assert (minutes >= HORIZON_START_MINUTE).all()
-        assert (minutes < HORIZON_END_MINUTE).all()
+        assert (minutes >= MIN_PERIOD_START_MINUTE).all()
+        # Every link carries the identical period set. The set itself is inherited
+        # from the real day-601 data, whose periods are not contiguous 2-minute
+        # slots — completeness against a synthetic grid would reject real data.
         periods = set(speed["Period"])
         per_link = speed.groupby("Link")["Period"].apply(set)
         assert (per_link == periods).all(), f"half {half}: some link misses periods"
