@@ -96,7 +96,7 @@ Exact call-graph confirmation of which shadowed variants are live happens during
 
 ## Open questions (blockers marked)
 
-1. **[BLOCKS ticket 03]** Where do `link.csv`, `speed[601]_[0].csv`, `speed[601]_[1].csv` live today, and how large are they? Asked three times; still unanswered.
+1. ~~Data location~~ — resolved 2026-07-21: the CSVs live in the `Mega city` folder one level above the repo. `link.csv` 0.4 MB; speed files ~23 MB each (days 601–715, morning/afternoon); `all_shortest_paths.csv` 907 MB (precomputed path cache, relevant to ticket 06). Ticket 03 is unblocked.
 2. ~~Package name~~ — resolved 2026-07-21: `stdvrp`.
 3. ~~Repo directory typo~~ — resolved 2026-07-21: rename to `stdvrp_orchestrator`, executed as part of ticket 02.
 
