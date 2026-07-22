@@ -17,7 +17,12 @@ traffic_days: [601, 602, 603, 604, 605, 606, 607, 608, 609, 610,
 horizon_start_minute: 300
 horizon_end_minute: 780
 
+# The legacy ClientGenerator hardcoded gauss stddev 30, a 60-client floor and a
+# vehicle-ratio table (28 clients per vehicle at mean 150, 29 at mean 250).
 mean_number_clients: 150
+client_count_stddev: 30.0
+min_number_clients: 60
+clients_per_vehicle: 28
 time_window_spread: 60
 client_universe_seed: 0
 client_universe_size: 150

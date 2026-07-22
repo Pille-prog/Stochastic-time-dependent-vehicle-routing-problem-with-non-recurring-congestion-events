@@ -35,7 +35,7 @@ ARC_START, ARC_END, ARC_LINK = 0, 4, 1
 
 @pytest.fixture(scope="module")
 def data_source() -> CsvDataSource:
-    return CsvDataSource(FIXTURE_DIR, "link.csv", 601, (601,))
+    return CsvDataSource(FIXTURE_DIR, "link.csv", 601, (601,), "all_shortest_paths.csv")
 
 
 @pytest.fixture(scope="module")
@@ -220,3 +220,10 @@ def test_entry_script_builds_the_instance_and_prints_a_summary(
     assert "road network: 116 arcs" in output
     assert "instance day 601" in output
     assert "event probabilities: 116 arcs" in output
+    assert "shortest path cache: 2025 node-client pairs" in output
+    assert "demand (seed 1000):" in output
+
+
+def test_data_source_loads_the_shortest_path_cache(data_source: CsvDataSource) -> None:
+    cache = data_source.load_shortest_path_cache()
+    assert len(cache) == 45 * 45

@@ -48,6 +48,10 @@ _Avoid_: unexpected event creator
 A demand point with a location on the RoadNetwork and a time window, to be served by a vehicle within the horizon.
 _Avoid_: customer, node (a Client sits on a node but is not the node)
 
+**EpisodeDemand**:
+What one Episode must serve: the Clients drawn for it (in draw order) and the vehicle fleet size, both produced by the ClientGenerator from the episode seed.
+_Avoid_: client list, instance (reserved for the problem instance)
+
 **ShortestPathCache**:
 Precomputed shortest paths from network nodes to Clients.
 _Avoid_: shortest_path_memory

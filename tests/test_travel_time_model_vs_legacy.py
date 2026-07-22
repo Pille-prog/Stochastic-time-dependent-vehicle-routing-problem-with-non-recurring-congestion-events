@@ -71,7 +71,7 @@ def legacy_spine(legacy_module: ModuleType, legacy_world: Path) -> tuple[object,
 
 @pytest.fixture(scope="module")
 def ported_model(legacy_world: Path) -> TravelTimeModel:
-    source = CsvDataSource(legacy_world, "link.csv", 601, LEGACY_DAYS)
+    source = CsvDataSource(legacy_world, "link.csv", 601, LEGACY_DAYS, "all_shortest_paths.csv")
     return TravelTimeModel(
         source.load_road_network(),
         source.load_traffic_history(),

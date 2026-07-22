@@ -32,9 +32,14 @@ class ExperimentConfig:
     horizon_start_minute: int
     horizon_end_minute: int
 
-    # Demand (former argv: mean_number_clients, diff_TW; former main() hardcodes:
+    # Demand (former argv: mean_number_clients, diff_TW; former ClientGenerator
+    # hardcodes: gauss stddev 30, 60-client floor, the {150: 28, 250: 29}
+    # vehicle-ratio table, range(1, 1900); former main() hardcodes:
     # random.seed(0); random.sample(range(1, 1900), 150)).
     mean_number_clients: int
+    client_count_stddev: float
+    min_number_clients: int
+    clients_per_vehicle: int
     time_window_spread: int
     client_universe_seed: int
     client_universe_size: int
@@ -69,11 +74,19 @@ class ExperimentConfig:
             raise ValueError("horizon must satisfy 0 <= horizon_start_minute < horizon_end_minute")
         if self.mean_number_clients <= 0:
             raise ValueError("mean_number_clients must be positive")
-        if self.time_window_spread < 0:
-            raise ValueError("time_window_spread must be >= 0")
+        if self.client_count_stddev < 0:
+            raise ValueError("client_count_stddev must be >= 0")
+        if not 0 <= self.time_window_spread <= self.horizon_end_minute - self.horizon_start_minute:
+            raise ValueError("time_window_spread must fit within the horizon")
         lo, hi = self.client_universe_node_range
         if lo >= hi:
             raise ValueError("client_universe_node_range must be (low, high) with low < high")
+        # The sample of client nodes must at least fit the floor; a gauss draw above
+        # hi - lo still fails at generation time, exactly as the legacy would.
+        if not 0 < self.min_number_clients <= hi - lo:
+            raise ValueError(
+                f"min_number_clients must be in 1..{hi - lo} for node range ({lo}, {hi})"
+            )
         if not 0 < self.client_universe_size <= hi - lo:
             raise ValueError(
                 f"client_universe_size must be in 1..{hi - lo} for node range ({lo}, {hi})"
@@ -84,6 +97,7 @@ class ExperimentConfig:
         if self.max_congestion_duration < 30:
             raise ValueError("max_congestion_duration must be >= 30 minutes")
         for name in (
+            "clients_per_vehicle",
             "total_train_iterations",
             "test_frequency",
             "test_episodes",
@@ -138,6 +152,7 @@ class ExperimentConfig:
             raise ValueError(f"{path}: client_universe_node_range must have exactly 2 entries")
         values["client_universe_node_range"] = (node_range[0], node_range[1])
         for name in (
+            "client_count_stddev",
             "congestion_lower_bound",
             "congestion_upper_bound",
             "learning_rate",
@@ -157,6 +172,8 @@ class ExperimentConfig:
             "horizon_start_minute",
             "horizon_end_minute",
             "mean_number_clients",
+            "min_number_clients",
+            "clients_per_vehicle",
             "time_window_spread",
             "client_universe_seed",
             "client_universe_size",

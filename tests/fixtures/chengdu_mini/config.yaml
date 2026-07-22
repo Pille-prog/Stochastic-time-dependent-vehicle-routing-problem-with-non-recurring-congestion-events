@@ -1,7 +1,7 @@
 # Experiment config for the committed mini fixture (45 nodes, day 601).
 # Used by the test suite and by `experiments/chengdu/run.py --config <this file>`.
-# Demand values are provisional until ticket 06 makes the ClientGenerator
-# config-driven (the legacy hardcodes range(1, 1900) and a 60-client floor).
+# Demand values are scaled to the 44-node client universe (nodes 1..44): a
+# gauss(20, 4) draw stays far below 44, so client generation cannot exhaust it.
 
 data_dir: .
 links_file: link.csv
@@ -12,7 +12,10 @@ traffic_days: [601]
 horizon_start_minute: 300
 horizon_end_minute: 780
 
-mean_number_clients: 150
+mean_number_clients: 20
+client_count_stddev: 4.0
+min_number_clients: 8
+clients_per_vehicle: 4
 time_window_spread: 60
 client_universe_seed: 0
 client_universe_size: 10

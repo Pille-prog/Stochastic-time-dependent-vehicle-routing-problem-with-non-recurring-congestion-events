@@ -1,7 +1,8 @@
 """Build the Chengdu instance from an experiment config and print a summary.
 
-Ticket 05 scope: config -> DataSource -> RoadNetwork + TrafficHistory ->
-TravelTimeModel. Later tickets extend this into full training/evaluation runs.
+Tickets 05-06 scope: config -> DataSource -> RoadNetwork + TrafficHistory ->
+TravelTimeModel, plus the ShortestPathCache and one ClientGenerator draw. Later
+tickets extend this into full training/evaluation runs.
 
     uv run python experiments/chengdu/run.py [--config path/to/config.yaml]
 """
@@ -13,6 +14,7 @@ import math
 from pathlib import Path
 
 from stdvrp.config import ExperimentConfig
+from stdvrp.demand import ClientGenerator
 from stdvrp.traffic import CsvDataSource, TravelTimeModel
 
 
@@ -27,9 +29,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     config = ExperimentConfig.from_yaml(args.config)
-    source = CsvDataSource(
-        config.data_dir, config.links_file, config.instance_day, config.traffic_days
-    )
+    source = CsvDataSource.from_config(config)
     road_network = source.load_road_network()
     traffic_history = source.load_traffic_history()
     travel_time_model = TravelTimeModel(
@@ -53,6 +53,15 @@ def main(argv: list[str] | None = None) -> None:
         f"({nan_stds} NaN — expected with a single traffic day)"
     )
     print(f"event probabilities: {len(travel_time_model.event_probability)} arcs")
+
+    shortest_path_cache = source.load_shortest_path_cache()
+    print(f"shortest path cache: {len(shortest_path_cache)} node-client pairs")
+
+    demand = ClientGenerator.from_config(config).generate(config.first_train_seed)
+    print(
+        f"demand (seed {config.first_train_seed}): "
+        f"{len(demand.clients)} clients, {demand.vehicle_count} vehicles"
+    )
 
 
 if __name__ == "__main__":
