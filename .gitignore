@@ -1,0 +1,23 @@
+# Instance data (see data/README.md for how to obtain it)
+data/*
+!data/README.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Experiment outputs
+Training_Graph_Folder/
+runs/
+Results_*.txt
+Results_*.png
