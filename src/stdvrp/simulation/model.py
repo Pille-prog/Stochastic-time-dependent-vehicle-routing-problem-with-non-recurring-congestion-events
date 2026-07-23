@@ -15,15 +15,20 @@ the global ``np.random`` stream via the CongestionGenerator; call order is behav
 fresh per Episode — the legacy reset both at every episode boundary, so a fresh
 Model starts from the identical state.
 
-Preserved legacy quirks (do not fix before Phase 2; ADR-0001):
+Preserved legacy quirks (ADR-0001):
 
 - Hardcoded emergency-horizon constants 1150/1198 and the ``40000 - 200 * served``
   abort penalty (they ignore the configured horizon).
-- ``terminate_state_if_all_vehicles_come_back`` charges late Clients ``1150 - due``
-  while ``terminate_state_passing_horizon`` charges ``tau - due``.
 - Congestion is rolled only on epochs where ``(tau + 178) / 60`` is an exact float
   multiple of ``max_congestion_duration / 60`` hours.
 - Congested-velocity samples are *not* memoized; normal samples are.
+
+Phase-2 deliberate fixes (ticket 12, ADR-0001 change log):
+
+- Both termination paths charge late Clients from the actual clock (``tau -
+  due``); the legacy hardcoded ``1150 - due`` in the all-vehicles-back path.
+- Training episodes keep their real ``total_distance_cost`` (the legacy zeroed
+  the accumulator every step; reporting only).
 """
 
 from __future__ import annotations
@@ -448,14 +453,19 @@ class Model:
         self.total_cost += self.transition_cost
 
     def terminate_state_if_all_vehicles_come_back(self) -> None:
-        """Ports ``terminate_state_if_all_vehicles_come_back`` — 1150 hardcode included."""
+        """Ports ``terminate_state_if_all_vehicles_come_back``.
+
+        Phase-2 fix (ticket 12, ADR-0001 change log): late unserved Clients are
+        charged from the actual clock (``tau - due``) like the passing-horizon
+        sibling — the legacy hardcoded its 1150 emergency horizon here.
+        """
         self.state.terminal = True
         self.end_transition_function = 2
         delay_costs: float = 0
         for client in self.state.clients_not_visited:
             client_due_time = self.time_windows[client][1]
             if self.state.tau_episode > client_due_time:
-                delay_costs += (1150 - client_due_time) * self.delay_cost
+                delay_costs += (self.state.tau_episode - client_due_time) * self.delay_cost
 
         self.total_delay_cost += delay_costs
         self.transition_cost += delay_costs

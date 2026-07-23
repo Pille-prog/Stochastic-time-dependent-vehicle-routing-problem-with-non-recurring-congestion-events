@@ -284,18 +284,15 @@ def test_episode_invariants(
     if unserved:
         assert termination_charges == 1, "unserved Clients were never penalized"
     if termination_charges:
-        # The single termination call charges each late unserved Client its delay
-        # exactly once: ``tau - due`` past the horizon, the legacy hardcoded
-        # ``1150 - due`` when every vehicle is already back (ADR-0001 quirk).
+        # The single termination call charges each late unserved Client its
+        # delay exactly once, from the actual clock on either termination path
+        # (ticket 12 fixed the legacy's hardcoded 1150 in the all-back path).
         time_windows = {
             client.node: (client.time_window_start, client.time_window_end)
             for client in demand.clients
         }
-        charge_base = (
-            state.tau_episode if model.terminate_passing_horizon_calls else EMERGENCY_HORIZON
-        )
         expected_delay = sum(
-            charge_base - time_windows[client][1]
+            state.tau_episode - time_windows[client][1]
             for client in state.clients_not_visited
             if state.tau_episode > time_windows[client][1]
         )
