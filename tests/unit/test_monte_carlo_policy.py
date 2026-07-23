@@ -1,14 +1,12 @@
 """Unit tests for MonteCarloPolicy's W update and epsilon-greedy selection (ticket 11).
 
-Bit-exact legacy behavior is guarded by tests/test_training_episode_vs_legacy.py;
-these pin the pure computations on a world small enough to verify by hand: the
+These pin the pure computations on a world small enough to verify by hand: the
 19-component feature/weight dimensions, one hand-computed SGD step, the backward
 accumulation of the Monte Carlo return, and the two epsilon extremes (0 = pure
-greedy, 1 = pure random from the seeded global stream).
+greedy, 1 = pure random from the injected exploration Generator, ticket 13).
 """
 
 import math
-import random
 from typing import NamedTuple
 
 import numpy as np
@@ -40,9 +38,28 @@ def make_cache(arcs: dict) -> ShortestPathCache:
     )
 
 
-def make_policy(world: World, *, epsilon=0.0, W=None, lr=0.0, seed=0):
-    # The constructor draws one global random.choice per vehicle (ADR-0001).
-    random.seed(seed)
+class ScriptedRng:
+    """A minimal exploration-Generator double: exact, ordered ``choice``/``random``."""
+
+    def __init__(self, *, choices: list = (), randoms: list = ()) -> None:
+        self._choices = list(choices)
+        self._randoms = list(randoms)
+        self.choice_calls = 0
+        self.random_calls = 0
+
+    def choice(self, seq):
+        self.choice_calls += 1
+        return self._choices.pop(0)
+
+    def random(self) -> float:
+        self.random_calls += 1
+        return self._randoms.pop(0)
+
+
+def make_policy(world: World, *, epsilon=0.0, W=None, lr=0.0, seed=0, rng=None):
+    # The constructor draws one exploration_rng choice per vehicle (ticket 13).
+    if rng is None:
+        rng = np.random.default_rng(seed)
     return MonteCarloPolicy(
         number_vehicles=1,
         shortest_path_cache=world.cache,
@@ -54,15 +71,10 @@ def make_policy(world: World, *, epsilon=0.0, W=None, lr=0.0, seed=0):
         number_actions_test=2,
         horizon_end_minute=HORIZON_END,
         W=W,
+        exploration_rng=rng,
         number_actions_train=2,
         learning_rate=lr,
     )
-
-
-def seed_training_rngs(policy: MonteCarloPolicy, seed: int) -> None:
-    """Seed the two private training RNGs, as a reproducible caller must (ADR-0001)."""
-    policy.local_rng.seed(seed)
-    policy.local_rng_2.seed(seed)
 
 
 # --- W update ------------------------------------------------------------------
@@ -215,46 +227,47 @@ def distance_only_w() -> np.ndarray:
 class TestEpsilonGreedy:
     def test_epsilon_zero_is_pure_greedy(self):
         world = make_selection_world()
-        policy = make_policy(world, epsilon=0.0, W=distance_only_w())
-        seed_training_rngs(policy, 7)
+        # constructor's initial-action draw (feasible: in [1, 2], no repair draw),
+        # then the gate draw in decide_train (epsilon=0.0 always rejects it).
+        rng = ScriptedRng(choices=[1], randoms=[0.5])
+        policy = make_policy(world, epsilon=0.0, W=distance_only_w(), rng=rng)
 
-        untouched_global_stream = random.getstate()
         action = policy.decide_train(world.state)
 
         assert action == [1]  # the closest Client, never the exploratory draw
-        assert random.getstate() == untouched_global_stream
+        assert rng.choice_calls == 1  # only the constructor's initial-action draw
+        assert rng.random_calls == 1  # the gate draw itself, unconditionally made
 
     def test_epsilon_zero_matches_the_evaluation_greedy_decision(self):
         world = make_selection_world()
-        policy = make_policy(world, epsilon=0.0, W=distance_only_w())
-        seed_training_rngs(policy, 7)
+        policy = make_policy(
+            world, epsilon=0.0, W=distance_only_w(), rng=ScriptedRng(choices=[1], randoms=[0.5])
+        )
 
         twin_world = make_selection_world()
-        twin = make_policy(twin_world, epsilon=0.0, W=distance_only_w())
+        twin_rng = ScriptedRng(choices=[1])
+        twin = make_policy(twin_world, epsilon=0.0, W=distance_only_w(), rng=twin_rng)
 
         assert policy.decide_train(world.state) == twin.decide(twin_world.state)
 
-    def test_epsilon_one_is_pure_random_from_the_global_stream(self):
+    def test_epsilon_one_always_explores_via_the_injected_generator(self):
         world = make_selection_world()
-        policy = make_policy(world, epsilon=1.0, W=distance_only_w())
+        # constructor's initial-action draw, then the gate draw (epsilon=1.0
+        # always explores) and the exploratory choice itself.
+        rng = ScriptedRng(choices=[1, 2], randoms=[0.5])
+        policy = make_policy(world, epsilon=1.0, W=distance_only_w(), rng=rng)
         possible = policy._select_vehicle_possible_actions(2, 0)
         assert possible == [1, 2]  # precondition: the two closest Clients
 
-        seed_training_rngs(policy, 3)
-        random.seed(0)
-        expected = random.choice(possible)
-        assert expected == 2  # seed chosen so exploration overrides the greedy pick
-
-        random.seed(0)
-        assert policy.decide_train(world.state) == [expected]
+        assert policy.decide_train(world.state) == [2]
+        assert rng.choice_calls == 2  # constructor's action + the exploratory pick
+        assert rng.random_calls == 1  # the gate draw
 
     def test_epsilon_one_reproduces_with_equal_seeds(self):
         actions = []
         for _ in range(2):
             world = make_selection_world()
-            policy = make_policy(world, epsilon=1.0, W=distance_only_w())
-            seed_training_rngs(policy, 11)
-            random.seed(11)
+            policy = make_policy(world, epsilon=1.0, W=distance_only_w(), seed=11)
             actions.append(policy.decide_train(world.state))
 
         assert actions[0] == actions[1]
@@ -262,7 +275,6 @@ class TestEpsilonGreedy:
 
     def test_decide_train_requires_number_actions_train(self):
         world = make_update_world()
-        random.seed(0)
         policy = MonteCarloPolicy(
             number_vehicles=1,
             shortest_path_cache=world.cache,
@@ -274,6 +286,7 @@ class TestEpsilonGreedy:
             number_actions_test=2,
             horizon_end_minute=HORIZON_END,
             W=np.zeros(19),
+            exploration_rng=np.random.default_rng(0),
         )
 
         with pytest.raises(ValueError, match="number_actions_train"):

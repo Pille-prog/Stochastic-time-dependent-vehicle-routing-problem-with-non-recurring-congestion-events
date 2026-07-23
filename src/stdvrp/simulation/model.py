@@ -7,13 +7,16 @@ Episode loop (``create_monte_carlo_episode_train``, ticket 08). Deliberately
 concrete — no interface (ADR-0002); the CongestionGenerator seam is injected
 instead of the legacy's hardcoded event method.
 
-Stochastic velocities are sampled from the **global** ``random`` stream
-(``random.gauss`` per arc-minute, memoized per Episode) and congestion events from
-the global ``np.random`` stream via the CongestionGenerator; call order is behavior
-(ADR-0001). The per-Episode mutable dicts the legacy kept on ``DataCalculations``
-(``all_arc_velocity``, ``congested_arcs``) live on the Model, which is constructed
-fresh per Episode — the legacy reset both at every episode boundary, so a fresh
-Model starts from the identical state.
+Stochastic velocities and congestion events each draw from their own injected
+``np.random.Generator`` (``velocity_rng``, ``congestion_rng`` — ticket 13, ADR-0001
+phase 2): one per-Episode stream per concern, never shared with each other or with
+the Policy's exploration stream. The legacy consumed both from shared global
+state in a fixed call order (Phase 1, ADR-0001); that exact interleaving is not
+reproducible once the streams are independent, which is the deliberate point —
+see the ADR-0001 phase-2 addendum. The per-Episode mutable dicts the legacy kept
+on ``DataCalculations`` (``all_arc_velocity``, ``congested_arcs``) live on the
+Model, which is constructed fresh per Episode — the legacy reset both at every
+episode boundary, so a fresh Model starts from the identical state.
 
 Preserved legacy quirks (ADR-0001):
 
@@ -35,7 +38,8 @@ from __future__ import annotations
 
 import copy
 import math
-import random
+
+import numpy as np
 
 from stdvrp.congestion import CongestedArcs, CongestionGenerator
 from stdvrp.network.shortest_path_cache import ShortestPathCache
@@ -63,6 +67,8 @@ class Model:
         depot: int,
         congestion_generator: CongestionGenerator,
         max_congestion_duration: int,
+        velocity_rng: np.random.Generator,
+        congestion_rng: np.random.Generator,
     ) -> None:
         self.state = state
         self.policy = policy
@@ -74,6 +80,10 @@ class Model:
         self.horizon_end_minute = horizon_end_minute
         self.depot = depot
         self.congestion_generator = congestion_generator
+        # Per-Episode stochastic streams (ticket 13, ADR-0001 phase 2): one per
+        # concern, injected by the Episode runner that constructs this Model.
+        self.velocity_rng = velocity_rng
+        self.congestion_rng = congestion_rng
 
         # Cost factors as the legacy hardcodes them inside the model.
         self.earliness_cost = 0.1
@@ -268,7 +278,7 @@ class Model:
                     time = (self.state.tau_episode + 180 - 2) / 60
                     if time % self.hours_max_duration == 0:
                         self.congestion_generator.generate(
-                            self.state.tau_episode, self.congested_arcs
+                            self.state.tau_episode, self.congested_arcs, self.congestion_rng
                         )
 
                     for vehicle in range(self.number_vehicles):
@@ -562,7 +572,7 @@ class Model:
     def generate_normal_velocity(
         self, node_start: float, node_end: float, minute_start: int
     ) -> tuple[float, float, float]:
-        """Ports ``generate_normal_velocity``: one global ``random.gauss`` per arc-minute.
+        """Ports ``generate_normal_velocity``: one ``velocity_rng`` draw per arc-minute.
 
         ``minute_start`` must already be the even-floored minute; the legacy re-floored
         it internally, but the only caller (``create_random_velocity``) does so first.
@@ -571,7 +581,7 @@ class Model:
         length, speed = self.travel_time_model.travel_data[key]  # type: ignore[index]
         std = self.travel_time_model.speed_std[key]  # type: ignore[index]
 
-        velocity = random.gauss(speed, std)
+        velocity = float(self.velocity_rng.normal(speed, std))
         velocity = max(velocity, 0)
 
         # 60 km/h cap for ordinary streets (speeds are km/min), 120 km/h absolute cap.

@@ -9,16 +9,16 @@ extractors ``extract_general_state_features`` / ``extract_state_action_features`
 Training (ticket 08): ``monte_carlo_policy_train`` → ``select_epsilon_greedy_action_train``
 plus the Monte Carlo weight update ``actualize_W`` → ``update_W``.
 
-Global-RNG order is behavior (ADR-0001): construction consumes one ``random.choice``
-per vehicle for the initial action and then runs one full greedy decision, exactly
-like the legacy constructor. Evaluation decisions themselves consume no randomness.
-Training decisions draw from three streams exactly like the legacy: ``local_rng``
-gates exploration and ``local_rng_2`` repairs infeasible carried-over actions (both
-constructed UNSEEDED, so training is nondeterministic unless the caller seeds them —
-the golden-master capture seeds them per Episode as offset + train seed), while the
-exploratory action itself is drawn from the **global** ``random`` stream, interleaved
-with the transition function's velocity draws. The weight update consumes no
-randomness.
+Ticket 13 (RNG modernization, ADR-0001 phase 2): the caller injects one
+``exploration_rng: np.random.Generator`` — the policy's single stochastic
+concern. Construction consumes one draw per vehicle for the initial action and
+then runs one full greedy decision. Evaluation decisions themselves consume no
+randomness. Training decisions draw from the same stream for all three legacy
+draw sites: the exploration gate, the infeasible-carried-over-action repair, and
+the exploratory action itself (the legacy split these across two private
+UNSEEDED ``random.Random`` instances plus the global ``random`` stream — Phase 1,
+ADR-0001; consolidated here since exact draw-order equality with the legacy is
+no longer a goal). The weight update consumes no randomness.
 
 Feature normalization constants (150, 850, 1150, 13, 60, 100, 180, 2500, the
 earliness bins) are part of the feature definition and stay literal; only the values
@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import heapq
 import itertools
-import random
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
@@ -77,6 +76,7 @@ class MonteCarloPolicy(Policy):
         horizon_end_minute: int,
         W: NDArray[np.float64] | None,
         *,
+        exploration_rng: np.random.Generator,
         number_actions_train: int | None = None,
         learning_rate: float = 0.0,
     ) -> None:
@@ -92,12 +92,10 @@ class MonteCarloPolicy(Policy):
         self.learning_rate = learning_rate
         self.W = W
 
-        # Legacy quirk (ticket 04 finding 1): two UNSEEDED private RNGs drive the
-        # training exploration gate (``local_rng``) and the infeasible-action
-        # repair (``local_rng_2``). A caller wanting reproducible training must
-        # seed them right after construction, exactly like the capture driver.
-        self.local_rng = random.Random()
-        self.local_rng_2 = random.Random()
+        # Ticket 13 (ADR-0001 phase 2): the policy's single stochastic concern —
+        # the caller injects one per-Episode Generator, replacing the legacy's
+        # two private UNSEEDED RNGs plus the global ``random`` stream.
+        self.rng = exploration_rng
 
         # Cost factors as the legacy hardcodes them inside the policy.
         self.delay_cost_factor = 1
@@ -117,10 +115,10 @@ class MonteCarloPolicy(Policy):
         )
         self.mean_velocities: list[float] = []
 
-        # Legacy constructor behavior: a random initial action (one global-RNG
-        # choice per vehicle), then one full greedy decision pass.
+        # Legacy constructor behavior: a random initial action (one
+        # exploration_rng choice per vehicle), then one full greedy decision pass.
         self.action = [
-            random.choice(self.state.clients_not_visited) for _ in range(number_vehicles)
+            int(self.rng.choice(self.state.clients_not_visited)) for _ in range(number_vehicles)
         ]
         self.decide(state)
 
@@ -161,16 +159,14 @@ class MonteCarloPolicy(Policy):
                 self.number_of_actions, vehicle
             )
             if self.action[vehicle] not in self.possible_actions:
-                self.action[vehicle] = self.local_rng_2.choice(self.possible_actions)
+                self.action[vehicle] = int(self.rng.choice(self.possible_actions))
 
         for vehicle in range(self.number_vehicles):
             self.possible_actions = self._select_vehicle_possible_actions(
                 self.number_of_actions, vehicle
             )
-            if self.local_rng.random() < self.epsilon:
-                # Exploration draws from the GLOBAL stream, interleaved with the
-                # Model's velocity draws — order is behavior (ADR-0001).
-                self.action[vehicle] = random.choice(self.possible_actions)
+            if self.rng.random() < self.epsilon:
+                self.action[vehicle] = int(self.rng.choice(self.possible_actions))
             else:
                 self._select_best_q_action_for_vehicle(vehicle)
 

@@ -1,6 +1,5 @@
-"""ClientGenerator: config-driven demand generation, legacy global-RNG order."""
+"""ClientGenerator: config-driven demand generation (ticket 13: private per-call RNG)."""
 
-import random
 from pathlib import Path
 
 import pytest
@@ -30,8 +29,16 @@ def test_from_config_wires_every_demand_knob() -> None:
 def test_same_seed_reproduces_the_same_demand() -> None:
     generator = fixture_generator()
     first = generator.generate(7)
-    random.random()  # unrelated global-RNG traffic must not leak into the next call
     assert generator.generate(7) == first
+
+
+def test_different_seeds_reproduce_independently() -> None:
+    # Ticket 13: each call builds its own Generator from the seed, so calls for
+    # different seeds cannot leak state into one another either.
+    generator = fixture_generator()
+    a1, b1, a2 = generator.generate(1), generator.generate(2), generator.generate(1)
+    assert a1 == a2
+    assert a1 != b1
 
 
 def test_clients_are_unique_nodes_within_the_universe() -> None:
@@ -68,21 +75,6 @@ def test_vehicle_count_is_clients_divided_by_ratio_rounded_up(seed: int) -> None
     demand = fixture_generator().generate(seed)
     count = len(demand.clients)
     assert demand.vehicle_count == count // 4 + (1 if count % 4 else 0)
-
-
-def test_generate_consumes_the_global_stream_in_legacy_order() -> None:
-    # The exact legacy transcript (ADR-0001): one gauss, one sample over the node
-    # range, one randint per sampled node — nothing more, nothing less.
-    random.seed(11)
-    count = max(int(random.gauss(20, 4.0)), 8)
-    nodes = random.sample(range(1, 45), count)
-    windows = {node: random.randint(300, 780 - 60) for node in nodes}
-    probe_after = random.random()
-
-    demand = fixture_generator().generate(11)
-    assert [client.node for client in demand.clients] == nodes
-    assert {client.node: client.time_window_start for client in demand.clients} == windows
-    assert random.random() == probe_after
 
 
 def test_demand_values_are_frozen() -> None:

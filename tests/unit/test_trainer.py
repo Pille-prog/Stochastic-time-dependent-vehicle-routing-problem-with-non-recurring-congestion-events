@@ -54,8 +54,6 @@ def make_config(**overrides: Any) -> ExperimentConfig:
         "test_action_counts": (2,),
         "test_seeds": (100, 101),
         "test_vehicle_counts": (6, 5),
-        "train_exploration_seed_offset": 10_000_000,
-        "train_repair_seed_offset": 20_000_000,
         "static_policy_mean_cost": None,
     }
     values.update(overrides)
@@ -139,17 +137,6 @@ def test_train_seeds_warmup_lr_and_w_chaining(
     assert training_stub.calls[0]["W"] is None
     assert list(training_stub.calls[1]["W"]) == [1.0]
     assert list(training_stub.calls[2]["W"]) == [2.0]
-    # Capture-convention exploration seeding: offset + train seed.
-    assert [call["exploration_seed"] for call in training_stub.calls] == [
-        10_001_000,
-        10_001_001,
-        10_001_002,
-    ]
-    assert [call["repair_seed"] for call in training_stub.calls] == [
-        20_001_000,
-        20_001_001,
-        20_001_002,
-    ]
     assert [list(w) for w in result.w_trajectory] == [[1.0], [2.0], [3.0]]
     # test_frequency 5 > 3 episodes: no evaluation block ran.
     assert result.evaluations == ()
@@ -165,15 +152,6 @@ def test_null_warmup_uses_the_configured_rate_from_episode_one(
     config = make_config(warmup_learning_rate=None)
     make_trainer(config).train()
     assert [call["learning_rate"] for call in training_stub.calls] == [1.0e-5] * 3
-
-
-def test_null_offsets_leave_exploration_unseeded(
-    training_stub: TrainingStub, evaluation_stub: EvaluationStub
-) -> None:
-    config = make_config(train_exploration_seed_offset=None, train_repair_seed_offset=None)
-    make_trainer(config).train()
-    assert all(call["exploration_seed"] is None for call in training_stub.calls)
-    assert all(call["repair_seed"] is None for call in training_stub.calls)
 
 
 def test_evaluation_blocks_and_best_w_tracking(

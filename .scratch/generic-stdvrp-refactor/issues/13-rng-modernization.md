@@ -4,7 +4,7 @@
 
 **Blocked by:** 12.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] No global RNG seeding anywhere in the package; Generators are injected via config/constructors, one stream per stochastic concern (demand, congestion, velocities, policy exploration)
 - [ ] Statistical regression test: mean episode cost over N seeds within a pre-registered tolerance of the pre-migration baseline

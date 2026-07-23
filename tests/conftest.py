@@ -3,7 +3,6 @@
 import importlib.util
 from pathlib import Path
 from types import ModuleType
-from typing import Any
 
 import pytest
 
@@ -24,7 +23,7 @@ def capture() -> ModuleType:
     return module
 
 
-# --- Episode characterization venue (tickets 07/08; see characterization_world) ---
+# --- Legacy-monolith characterization venue (see characterization_world) ---
 
 
 @pytest.fixture(scope="module")
@@ -35,18 +34,3 @@ def legacy_world(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(scope="module")
 def legacy_module() -> ModuleType:
     return characterization_world.load_legacy_module()
-
-
-@pytest.fixture(scope="module")
-def legacy_calc(legacy_module: ModuleType, legacy_world: Path) -> Any:
-    return characterization_world.build_legacy_calc(legacy_module, legacy_world)
-
-
-@pytest.fixture(scope="module")
-def legacy_spm(legacy_module: ModuleType) -> Any:
-    return characterization_world.build_legacy_spm(legacy_module)
-
-
-@pytest.fixture(scope="module")
-def ported_world(legacy_world: Path) -> dict[str, Any]:
-    return characterization_world.build_ported_world(legacy_world)

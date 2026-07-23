@@ -44,8 +44,6 @@ def valid_values() -> dict:
         "test_action_counts": [2],
         "test_seeds": [100, 101],
         "test_vehicle_counts": [4, 4],
-        "train_exploration_seed_offset": 10000000,
-        "train_repair_seed_offset": 20000000,
         "static_policy_mean_cost": None,
     }
 
@@ -159,17 +157,3 @@ def test_type_errors_are_rejected(tmp_path: Path) -> None:
         ExperimentConfig.from_yaml(
             write_config(tmp_path, valid_values() | {"epsilon": "not a number"})
         )
-    with pytest.raises(ValueError, match="train_exploration_seed_offset"):
-        ExperimentConfig.from_yaml(
-            write_config(tmp_path, valid_values() | {"train_exploration_seed_offset": "big"})
-        )
-
-
-def test_seed_offsets_accept_null_for_legacy_nondeterminism(tmp_path: Path) -> None:
-    values = valid_values() | {
-        "train_exploration_seed_offset": None,
-        "train_repair_seed_offset": None,
-    }
-    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
-    assert config.train_exploration_seed_offset is None
-    assert config.train_repair_seed_offset is None

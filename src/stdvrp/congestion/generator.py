@@ -1,11 +1,13 @@
 """CongestionGenerator: non-recurring congestion events (variation axis 2; ADR-0002).
 
-The live implementation is a Phase-1 structural port (ADR-0001) of the legacy
+Phase-1 structural port (ADR-0001) of the legacy
 ``DataCalculations.create_random_unexpected_event_with_probability_and_2_nodes`` —
-the only congestion model ``model.transition_function`` actually invokes. It draws
-from the **global** ``np.random`` stream in the exact legacy order: one uniform per
-arc of ``event_probability`` in dict insertion order, then, per triggered event,
-one uniform for the velocity penalization and one for the duration.
+the only congestion model ``model.transition_function`` actually invokes: one
+uniform draw per arc of ``event_probability`` in dict insertion order, then, per
+triggered event, one uniform for the velocity penalization and one for the
+duration. Ticket 13 (RNG modernization, ADR-0001 phase 2) replaced the legacy's
+**global** ``np.random`` stream with an ``np.random.Generator`` the caller injects
+per call — one per-Episode stream, shared with nothing else (ADR-0001).
 
 Congested arcs are recorded as ``(float(node_start), float(node_end)) ->
 [velocity_multiplier, end_minute]`` — the float keys are a legacy quirk that must
@@ -34,8 +36,15 @@ class CongestionGenerator(ABC):
     """Generates non-recurring congestion events during an Episode."""
 
     @abstractmethod
-    def generate(self, minute_start: float, congested_arcs: CongestedArcs) -> None:
-        """Add this decision epoch's new events (if any) to ``congested_arcs``."""
+    def generate(
+        self, minute_start: float, congested_arcs: CongestedArcs, rng: np.random.Generator
+    ) -> None:
+        """Add this decision epoch's new events (if any) to ``congested_arcs``.
+
+        ``rng`` is the caller's per-Episode congestion stream (ticket 13,
+        ADR-0001 phase 2) — inject one instance per Episode, never share it
+        across Episodes or other stochastic concerns.
+        """
 
 
 @dataclass
@@ -43,8 +52,8 @@ class ArcProbabilityCongestionGenerator(CongestionGenerator):
     """One event roll per arc and epoch, spreading to neighbors with damped intensity.
 
     ``event_probability`` and ``successors`` come from the TravelTimeModel; both
-    iteration orders are behavior (ADR-0001): one ``np.random.uniform`` is consumed
-    per ``event_probability`` key whether or not an event triggers, and the spread
+    iteration orders are behavior (ADR-0001): one uniform draw is consumed per
+    ``event_probability`` key whether or not an event triggers, and the spread
     walks ``successors`` lists in arc-table order.
     """
 
@@ -61,18 +70,20 @@ class ArcProbabilityCongestionGenerator(CongestionGenerator):
     max_depth: int = 3
     probability_input: float = 1.0
 
-    def generate(self, minute_start: float, congested_arcs: CongestedArcs) -> None:
+    def generate(
+        self, minute_start: float, congested_arcs: CongestedArcs, rng: np.random.Generator
+    ) -> None:
         if self.probability_input != 0:
             for key in self.event_probability:
-                probability_for_congestion = np.random.uniform(0, 1)
+                probability_for_congestion = rng.uniform(0, 1)
                 if probability_for_congestion < self.event_probability[key]:
                     node_start_congestion = key[0]
                     node_end_congestion = key[1]
                     congestion_road = [node_start_congestion, node_end_congestion]
-                    velocity_penalization = np.random.uniform(
+                    velocity_penalization = rng.uniform(
                         self.congestion_lower_bound, self.congestion_upper_bound
                     )
-                    state_time_elimination = np.random.uniform(30, self.max_congestion_duration)
+                    state_time_elimination = rng.uniform(30, self.max_congestion_duration)
 
                     congested_arcs[(float(node_start_congestion), float(node_end_congestion))] = [
                         float(velocity_penalization),

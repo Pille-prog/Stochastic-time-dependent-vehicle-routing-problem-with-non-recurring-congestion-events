@@ -1,11 +1,18 @@
 """Episode runners: one full evaluation or training Episode from a seed.
 
 Ports the per-episode blocks of the legacy ``training_and_testing`` loops
-(ADR-0001), in the exact seed order the legacy uses: client generation reseeds the
-global ``random`` stream, then ``np.random.seed(seed)`` is called (ticket 06
-finding: that call belongs to the episode runner, not the ClientGenerator), then
-State, Policy and Model are built — the Policy constructor consumes one
-``random.choice`` per vehicle — and the episode runs to termination.
+(ADR-0001): demand is drawn first, then State, Policy and Model are built, then
+the episode runs to termination.
+
+Ticket 13 (RNG modernization, ADR-0001 phase 2): each Episode's ``seed`` spawns
+three independent ``np.random.Generator`` streams via ``np.random.SeedSequence``
+— one each for congestion, velocities and policy exploration — injected into the
+fresh Model/Policy this call constructs. Demand draws its own Generator directly
+from ``seed`` inside ``ClientGenerator.generate`` (see that module). No global
+``random``/``np.random`` state is touched, and spawning keeps the four concerns'
+streams independent of each other and of every other Episode's. This replaces the
+legacy's single shared global stream reseeded to ``seed`` at Episode start; exact
+draw-order equality with the legacy is retired (ADR-0001).
 
 Test episodes override the fleet size from the legacy's per-seed vehicle table and
 widen the action pool (``vehicles + actions``); evaluation episodes use the
@@ -14,20 +21,15 @@ generated fleet size and ``vehicles + 2``. Both are expressed through
 
 Training episodes (ticket 08) mirror the per-seed block of
 ``training_and_testing.training_model``: the fleet size is always the generated
-one and both action pools are ``vehicles + 2``. Two legacy behaviors are the
+one and both action pools are ``vehicles + 2``. One legacy behavior is the
 caller's responsibility, exactly as in the legacy loop:
 
-* **Warm-up learning-rate quirk** (pending ticket 12 triage): the legacy sets
-  ``lr = 0.000001`` before its training loop and only assigns the configured
-  learning rate after constructing the first Episode's policy — so the FIRST
-  training Episode always updates W with the hardcoded tiny warm-up rate and
-  every later Episode uses the configured one. Callers (the ticket 09 Trainer,
-  the golden-master tests) must pass ``learning_rate`` per Episode accordingly.
-* **Exploration seeding** (ticket 04 finding 1): the legacy policy's two
-  exploration RNGs are unseeded, making training nondeterministic by
-  construction. ``exploration_seed`` / ``repair_seed`` reproduce the golden
-  capture's convention (offset + train seed, applied right after the policy is
-  built); leave them ``None`` for legacy-faithful nondeterminism.
+* **Warm-up learning-rate quirk** (ticket 12): the legacy sets ``lr = 0.000001``
+  before its training loop and only assigns the configured learning rate after
+  constructing the first Episode's policy — so the FIRST training Episode always
+  updates W with the hardcoded tiny warm-up rate and every later Episode uses the
+  configured one. Callers (the ticket 09 Trainer) must pass ``learning_rate`` per
+  Episode accordingly.
 """
 
 from __future__ import annotations
@@ -44,6 +46,24 @@ from stdvrp.policies.monte_carlo import MonteCarloPolicy
 from stdvrp.simulation.model import Model
 from stdvrp.simulation.state import State
 from stdvrp.traffic.travel_time_model import TravelTimeModel
+
+EpisodeRngs = tuple[np.random.Generator, np.random.Generator, np.random.Generator]
+
+
+def _spawn_episode_rngs(seed: int) -> EpisodeRngs:
+    """Three independent per-Episode streams: congestion, velocities, exploration.
+
+    Ticket 13 (ADR-0001 phase 2): ``SeedSequence.spawn`` derives children that are
+    (with overwhelming probability) statistically independent of each other and of
+    ``np.random.default_rng(seed)`` itself, so this stays decorrelated from the
+    demand Generator ``ClientGenerator.generate`` builds straight from ``seed``.
+    """
+    congestion_seed, velocity_seed, exploration_seed = np.random.SeedSequence(seed).spawn(3)
+    return (
+        np.random.default_rng(congestion_seed),
+        np.random.default_rng(velocity_seed),
+        np.random.default_rng(exploration_seed),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +104,7 @@ def run_evaluation_episode(
     zero vector, as the legacy does on the very first episode.
     """
     demand = client_generator.generate(seed)
-    np.random.seed(seed)
+    congestion_rng, velocity_rng, exploration_rng = _spawn_episode_rngs(seed)
 
     number_vehicles = vehicle_count if vehicle_count is not None else demand.vehicle_count
     if number_actions_test is None:
@@ -107,6 +127,7 @@ def run_evaluation_episode(
         number_actions_test,
         horizon_end_minute,
         W,
+        exploration_rng=exploration_rng,
     )
     model = Model(
         state,
@@ -120,6 +141,8 @@ def run_evaluation_episode(
         depot,
         congestion_generator,
         max_congestion_duration,
+        velocity_rng=velocity_rng,
+        congestion_rng=congestion_rng,
     )
     model.run_evaluation_episode()
 
@@ -170,19 +193,16 @@ def run_training_episode(
     horizon_end_minute: int,
     n_observed_arcs: int,
     depot: int = 0,
-    exploration_seed: int | None = None,
-    repair_seed: int | None = None,
 ) -> TrainingEpisodeResult:
     """Run one ε-greedy training Episode and return the updated W with its costs.
 
     ``W`` is carried over from the previous training Episode (``None`` on the
     first one — the Policy constructor's greedy pass lazily creates the zero
     vector, exactly like the legacy). See the module docstring for the warm-up
-    learning-rate quirk and the exploration-seeding convention, both of which
-    live at the caller.
+    learning-rate quirk, which lives at the caller.
     """
     demand = client_generator.generate(seed)
-    np.random.seed(seed)
+    congestion_rng, velocity_rng, exploration_rng = _spawn_episode_rngs(seed)
 
     number_vehicles = demand.vehicle_count
     number_actions = number_vehicles + 2
@@ -204,6 +224,7 @@ def run_training_episode(
         number_actions,
         horizon_end_minute,
         W,
+        exploration_rng=exploration_rng,
         number_actions_train=number_actions,
         learning_rate=learning_rate,
     )
@@ -219,14 +240,9 @@ def run_training_episode(
         depot,
         congestion_generator,
         max_congestion_duration,
+        velocity_rng=velocity_rng,
+        congestion_rng=congestion_rng,
     )
-    # Golden-capture convention: seed the otherwise-unseeded exploration RNGs
-    # right after construction, before any training decision runs.
-    if exploration_seed is not None:
-        policy.local_rng.seed(exploration_seed)
-    if repair_seed is not None:
-        policy.local_rng_2.seed(repair_seed)
-
     model.run_training_episode()
 
     assert policy.W is not None

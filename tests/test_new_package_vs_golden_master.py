@@ -1,20 +1,29 @@
-"""Tickets 07/08/09 acceptance: the new package reproduces its golden baseline exactly.
+"""Ticket 13 statistical regression: the new package's costs stay near the
+pre-migration baseline once RNG modernization changes the exact numbers.
 
-For every stored test episode (full Chengdu data, marker ``golden``): the episode
-total cost and all four components — distance, delay, earliness, overtime — plus
-tau, state count and the delay/earliness client counts must equal the stored
-values bit-for-bit; re-running the stored training protocol (warm-up learning
-rate on the first Episode, capture-convention exploration seeding) must
-reproduce the stored W trajectory after every Episode; and one Trainer.run()
-driven by an ExperimentConfig assembled from the stored protocol must reproduce
-the whole baseline and write the per-run outputs.
+Ticket 12 pinned the new package's behavior bit-for-bit against
+``chengdu_full_phase2.json`` (full Chengdu data, protocol captured from the
+legacy run). Ticket 13 (RNG modernization, ADR-0001 phase 2) replaced every
+global ``random``/``np.random`` consumption with injected per-concern
+``np.random.Generator`` streams (PCG64) — exact bit-for-bit equality with that
+baseline is neither expected nor achievable (different bit-generator algorithm,
+different draw order), exactly as ADR-0001 anticipated. This file is the
+retirement ADR-0001 called for: ``chengdu_full_phase2.json`` is repurposed as
+the **pre-migration statistical baseline** (it is, after all, the last capture
+of the new package before ticket 13 touched a single RNG call site), and the
+exact-equality assertions are replaced with mean-cost-over-N-seeds tolerance
+checks. ``tests/test_golden_master.py`` (legacy monolith vs its own frozen
+capture) is unaffected — it never imports ``stdvrp`` and was already
+legacy-only documentation before this ticket.
 
-The baseline is ``chengdu_full_phase2.json`` — the ticket 12 re-baseline
-(``scripts/rebaseline_golden_master.py``): the phase-2 fixes deliberately change
-episode outcomes (ADR-0001 change log), so these tests pin the NEW package's
-behavior under the legacy capture's protocol. The legacy capture itself
-(``chengdu_full.json``) stays frozen and is still verified against the monolith
-by ``tests/test_golden_master.py``.
+Pre-registered tolerance: 40% relative to the baseline mean. The baseline's own
+per-episode costs have a ~40% coefficient of variation across both the 10 eval
+seeds and the 10 test seeds (computed from ``chengdu_full_phase2.json`` itself),
+so a single new sample of N draws from the same underlying distributions can
+land 40% away from the old sample's mean by chance alone; this band is sized to
+absorb that resampling noise while still catching a genuine regression (a sign
+error, a swapped bound, a broken stream) at the confirmed ADR-0001 fix
+magnitudes (fix 7 alone shifted a single-episode cost 2342.5 -> 4016.6, ~70%).
 
 Skips when the local dataset is absent (e.g. CI); building the world through the
 new package re-reads the 88 speed files and the 907 MB path cache (~15 minutes).
@@ -22,6 +31,7 @@ new package re-reads the 88 speed files and the 907 MB path cache (~15 minutes).
 
 import importlib.util
 import json
+import statistics
 from pathlib import Path
 from typing import Any
 
@@ -32,13 +42,16 @@ from stdvrp.config import ExperimentConfig
 from stdvrp.congestion import ArcProbabilityCongestionGenerator
 from stdvrp.demand import ClientGenerator
 from stdvrp.network import ShortestPathCache
-from stdvrp.simulation import run_evaluation_episode, run_training_episode
+from stdvrp.simulation import run_evaluation_episode
 from stdvrp.traffic import CsvDataSource, TravelTimeModel
 from stdvrp.training import Trainer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "golden_master" / "chengdu_full_phase2.json"
 LEGACY_DAYS = tuple(range(601, 631)) + tuple(range(701, 715))
+
+# Relative tolerance for mean-cost-over-N-seeds comparisons (see module docstring).
+RELATIVE_TOLERANCE = 0.40
 
 spec = importlib.util.spec_from_file_location(
     "capture_golden_master", REPO_ROOT / "scripts" / "capture_golden_master.py"
@@ -53,7 +66,7 @@ pytestmark = pytest.mark.golden
 @pytest.fixture(scope="module")
 def golden() -> dict[str, Any]:
     if not GOLDEN_PATH.exists():
-        pytest.skip("phase-2 baseline not generated yet (scripts/rebaseline_golden_master.py)")
+        pytest.skip("pre-migration baseline not generated (scripts/rebaseline_golden_master.py)")
     return json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
 
 
@@ -104,46 +117,8 @@ def world(golden: dict[str, Any], data_dir: Path) -> dict[str, Any]:
     }
 
 
-def test_w_trajectory_matches_exactly(golden: dict[str, Any], world: dict[str, Any]) -> None:
-    """Ticket 08: the training W sequence equals the stored trajectory bit-for-bit."""
-    protocol = golden["protocol"]
-    expected_trajectory = golden["training"]["w_trajectory"]
-
-    w = None
-    # Legacy warm-up quirk (opt-in since ticket 12; the protocol supplies it):
-    # the first training Episode runs with the tiny warm-up rate, later ones
-    # with the configured one.
-    learning_rate = protocol["warmup_learning_rate"]
-    produced = []
-    for train_seed in protocol["train_seeds"]:
-        result = run_training_episode(
-            seed=train_seed,
-            client_generator=world["client_generator"],
-            travel_time_model=world["travel_time_model"],
-            shortest_path_cache=world["cache"],
-            congestion_generator=world["congestion_generator"],
-            W=w,
-            learning_rate=learning_rate,
-            epsilon=protocol["epsilon"],
-            max_congestion_duration=protocol["max_congestion_duration"],
-            horizon_start_minute=protocol["horizon_start_time"],
-            horizon_end_minute=protocol["horizon_end_time"],
-            n_observed_arcs=protocol["n_arcs"],
-            exploration_seed=protocol["train_exploration_seed_offset"] + train_seed,
-            repair_seed=protocol["train_repair_seed_offset"] + train_seed,
-        )
-        learning_rate = protocol["learning_rate"]
-        w = result.w
-        produced.append([float(component) for component in result.w])
-
-    mismatches = [
-        f"episode {i} (seed {seed}): {diff}"
-        for i, (seed, expected, actual) in enumerate(
-            zip(protocol["train_seeds"], expected_trajectory, produced, strict=True)
-        )
-        for diff in capture.compare_results(expected, actual)
-    ]
-    assert not mismatches, "W trajectory mismatch:\n" + "\n".join(mismatches[:50])
+def _relative_diff(actual: float, expected: float) -> float:
+    return abs(actual - expected) / expected
 
 
 def config_from_protocol(protocol: dict[str, Any], data_dir: Path) -> ExperimentConfig:
@@ -190,16 +165,14 @@ def config_from_protocol(protocol: dict[str, Any], data_dir: Path) -> Experiment
         test_action_counts=tuple(protocol["test_actions"]),
         test_seeds=tuple(protocol["test_seeds"]),
         test_vehicle_counts=tuple(protocol["test_vehicles"]),
-        train_exploration_seed_offset=protocol["train_exploration_seed_offset"],
-        train_repair_seed_offset=protocol["train_repair_seed_offset"],
         static_policy_mean_cost=None,
     )
 
 
-def test_trainer_run_reproduces_the_whole_golden_master(
+def test_trainer_run_produces_finite_costs_near_the_baseline(
     golden: dict[str, Any], data_dir: Path, world: dict[str, Any], tmp_path: Path
 ) -> None:
-    """Ticket 09: one config-driven Trainer.run() equals the stored capture bit-for-bit."""
+    """Ticket 09 wiring survives the RNG migration: Trainer.run() end to end."""
     protocol = golden["protocol"]
     config = config_from_protocol(protocol, data_dir)
     trainer = Trainer(
@@ -211,48 +184,67 @@ def test_trainer_run_reproduces_the_whole_golden_master(
     )
     result = trainer.run(tmp_path / "run")
 
-    produced_trajectory = [[float(x) for x in w] for w in result.training.w_trajectory]
-    mismatches = capture.compare_results(golden["training"]["w_trajectory"], produced_trajectory)
-
-    # The single evaluation block is the capture's eval pass: same per-seed costs,
-    # and (having beaten the initial best-cost sentinel) it pins Best_W = Newest_W.
+    assert all(np.isfinite(w).all() for w in result.training.w_trajectory)
+    # Training moved the weights off the initial zero vector.
+    assert any(component != 0 for component in result.training.w_trajectory[-1])
     assert [block.episodes_completed for block in result.training.evaluations] == [
         len(protocol["train_seeds"])
     ]
-    mismatches += capture.compare_results(
-        golden["training"]["eval_costs"], list(result.training.evaluations[0].seed_costs)
-    )
     assert result.training.best_w is not None
-    assert list(result.tested_w) == list(result.training.best_w) == produced_trajectory[-1]
 
-    # test_episodes=1: each per-seed mean IS the single captured episode.
-    for report in result.test:
-        for entry, expected in zip(
-            report.per_seed, golden["test"][str(report.action_count)], strict=True
-        ):
-            produced = {"seed": entry.seed, "vehicles": entry.vehicle_count, **entry.metrics}
-            for key, value in expected.items():
-                if produced[key] != value:
-                    mismatches.append(
-                        f"actions={report.action_count} seed={entry.seed} {key}: "
-                        f"{value!r} != {produced[key]!r}"
-                    )
-
-    assert not mismatches, "golden mismatch:\n" + "\n".join(mismatches[:50])
+    baseline_mean = statistics.mean(golden["training"]["eval_costs"])
+    produced_mean = result.training.evaluations[0].mean_cost
+    assert _relative_diff(produced_mean, baseline_mean) <= RELATIVE_TOLERANCE, (
+        f"evaluation mean cost {produced_mean:.1f} vs baseline {baseline_mean:.1f} "
+        f"({_relative_diff(produced_mean, baseline_mean):.0%} > {RELATIVE_TOLERANCE:.0%})"
+    )
     assert (tmp_path / "run" / "results.json").is_file()
     assert (tmp_path / "run" / "training_plot.png").stat().st_size > 0
 
 
-def test_every_golden_test_episode_matches_exactly(
+def test_evaluation_mean_cost_is_within_tolerance_of_the_baseline(
     golden: dict[str, Any], world: dict[str, Any]
 ) -> None:
+    """Mean episode cost over the captured eval seeds, same W, new RNG streams."""
     protocol = golden["protocol"]
     best_w = np.array(golden["training"]["w_trajectory"][-1])
 
-    mismatches = []
+    produced_costs = [
+        run_evaluation_episode(
+            seed=seed,
+            client_generator=world["client_generator"],
+            travel_time_model=world["travel_time_model"],
+            shortest_path_cache=world["cache"],
+            congestion_generator=world["congestion_generator"],
+            W=best_w,
+            epsilon=protocol["epsilon"],
+            max_congestion_duration=protocol["max_congestion_duration"],
+            horizon_start_minute=protocol["horizon_start_time"],
+            horizon_end_minute=protocol["horizon_end_time"],
+            n_observed_arcs=protocol["n_arcs"],
+        ).total_cost
+        for seed in protocol["eval_seeds"]
+    ]
+
+    baseline_mean = statistics.mean(golden["training"]["eval_costs"])
+    produced_mean = statistics.mean(produced_costs)
+    assert _relative_diff(produced_mean, baseline_mean) <= RELATIVE_TOLERANCE, (
+        f"mean cost over {len(produced_costs)} eval seeds {produced_mean:.1f} vs "
+        f"baseline {baseline_mean:.1f} "
+        f"({_relative_diff(produced_mean, baseline_mean):.0%} > {RELATIVE_TOLERANCE:.0%})"
+    )
+
+
+def test_final_test_mean_cost_is_within_tolerance_of_the_baseline(
+    golden: dict[str, Any], world: dict[str, Any]
+) -> None:
+    """Mean total cost over each action-count's test seeds, same fixed-fleet table."""
+    protocol = golden["protocol"]
+    best_w = np.array(golden["training"]["w_trajectory"][-1])
+
     for actions, episodes in golden["test"].items():
-        for entry in episodes:
-            result = run_evaluation_episode(
+        produced_costs = [
+            run_evaluation_episode(
                 seed=entry["seed"],
                 client_generator=world["client_generator"],
                 travel_time_model=world["travel_time_model"],
@@ -266,25 +258,14 @@ def test_every_golden_test_episode_matches_exactly(
                 n_observed_arcs=protocol["n_arcs"],
                 vehicle_count=entry["vehicles"],
                 number_actions_test=entry["vehicles"] + int(actions),
-            )
-            produced = {
-                "seed": entry["seed"],
-                "vehicles": entry["vehicles"],
-                "total_cost": result.total_cost,
-                "distance_cost": result.distance_cost,
-                "delay_cost": result.delay_cost,
-                "earliness_cost": result.earliness_cost,
-                "overtime_cost": result.overtime_cost,
-                "tau": result.tau,
-                "state_count": result.state_count,
-                "delay_clients": result.delay_clients,
-                "earliness_clients": result.earliness_clients,
-            }
-            for key, expected in entry.items():
-                if produced[key] != expected:
-                    mismatches.append(
-                        f"actions={actions} seed={entry['seed']} {key}: "
-                        f"{expected!r} != {produced[key]!r}"
-                    )
+            ).total_cost
+            for entry in episodes
+        ]
 
-    assert not mismatches, "golden mismatch:\n" + "\n".join(mismatches[:50])
+        baseline_mean = statistics.mean(entry["total_cost"] for entry in episodes)
+        produced_mean = statistics.mean(produced_costs)
+        assert _relative_diff(produced_mean, baseline_mean) <= RELATIVE_TOLERANCE, (
+            f"actions={actions}: mean cost over {len(produced_costs)} test seeds "
+            f"{produced_mean:.1f} vs baseline {baseline_mean:.1f} "
+            f"({_relative_diff(produced_mean, baseline_mean):.0%} > {RELATIVE_TOLERANCE:.0%})"
+        )

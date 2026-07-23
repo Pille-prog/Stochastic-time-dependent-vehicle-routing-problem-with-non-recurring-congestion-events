@@ -23,12 +23,9 @@ Legacy fidelity notes:
   would run its test with ``Best_W = []`` and crash; the Trainer falls back to
   the final trained W instead (documented deviation, same information).
 * **Final test**: each (action count, seed) pair reruns ``test_episodes``
-  episodes and averages, verbatim from ``test_model`` — every episode fully
-  reseeds both RNG streams, so the iterations are identical and the mean equals
-  a single episode's value.
-* **Exploration seeding** (golden-capture convention, ticket 04 finding 1): the
-  configured offsets seed the otherwise-unseeded training exploration RNGs per
-  episode; ``None`` restores the legacy's nondeterministic training.
+  episodes and averages, verbatim from ``test_model`` — every episode draws its
+  own per-Episode Generators from its seed (ticket 13, ADR-0001 phase 2), so the
+  iterations are identical and the mean equals a single episode's value.
 * **Reported metrics**: the nine golden-pinned Episode metrics. The legacy
   report's three mean-time metrics (``mean_delay_time``, ``mean_earliness_time``,
   ``mean_overtime``) were not ported with the ticket 07 Model and are not pinned
@@ -216,8 +213,6 @@ class Trainer:
                 seed=seed,
                 W=w,
                 learning_rate=learning_rate,
-                exploration_seed=_offset_seed(config.train_exploration_seed_offset, seed),
-                repair_seed=_offset_seed(config.train_repair_seed_offset, seed),
                 **self._episode_kwargs(),
             )
             learning_rate = config.learning_rate
@@ -308,10 +303,6 @@ class Trainer:
 
 def _copy_w(w: W) -> W:
     return np.array(w, dtype=np.float64, copy=True)
-
-
-def _offset_seed(offset: int | None, seed: int) -> int | None:
-    return None if offset is None else offset + seed
 
 
 def _mean_and_std(values: list[float]) -> tuple[float, float]:

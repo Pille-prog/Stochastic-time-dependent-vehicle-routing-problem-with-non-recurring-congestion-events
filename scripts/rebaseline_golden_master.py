@@ -3,9 +3,14 @@
 Phase-2 fixes (ADR-0001 change log) deliberately change episode outcomes, so the
 new package can no longer match the legacy capture bit-for-bit. This script runs
 the capture protocol stored in ``chengdu_full.json`` through the ported Trainer
-on the full local dataset and writes the outcome to ``chengdu_full_phase2.json``
-— the baseline the new-package golden tests
-(``tests/test_new_package_vs_golden_master.py``) compare against.
+on the full local dataset and writes the outcome to ``chengdu_full_phase2.json``.
+
+Ticket 13 (RNG modernization) repurposed that file as the pre-migration
+statistical baseline: ``tests/test_new_package_vs_golden_master.py`` now compares
+its mean-cost-over-N-seeds against it within a tolerance, instead of asserting
+exact equality (ADR-0001 phase-2 addendum) — this script is unchanged, since it
+still captures exactly the moment right before ticket 13 touched any RNG call
+site.
 
 The legacy capture is NOT touched: ``chengdu_full.json`` remains the frozen
 evidence of what the monolith computed, and ``tests/test_golden_master.py``
@@ -92,16 +97,14 @@ def config_from_protocol(protocol: dict[str, Any], data_dir: Path) -> Any:
         test_action_counts=tuple(protocol["test_actions"]),
         test_seeds=tuple(protocol["test_seeds"]),
         test_vehicle_counts=tuple(protocol["test_vehicles"]),
-        train_exploration_seed_offset=protocol["train_exploration_seed_offset"],
-        train_repair_seed_offset=protocol["train_repair_seed_offset"],
         static_policy_mean_cost=None,
     )
 
 
 def run_rebaseline() -> None:
+    from stdvrp.congestion import ArcProbabilityCongestionGenerator
     from stdvrp.demand import ClientGenerator
     from stdvrp.network import ShortestPathCache
-    from stdvrp.congestion import ArcProbabilityCongestionGenerator
     from stdvrp.traffic import CsvDataSource, TravelTimeModel
     from stdvrp.training import Trainer
 

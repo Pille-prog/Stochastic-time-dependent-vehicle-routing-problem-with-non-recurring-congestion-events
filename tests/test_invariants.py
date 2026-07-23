@@ -135,9 +135,11 @@ class RecordingCongestionGenerator(CongestionGenerator):
         # (minute_start, arc, velocity multiplier, end minute) per written event.
         self.events: list[tuple[float, tuple[float, float], float, float]] = []
 
-    def generate(self, minute_start: float, congested_arcs: CongestedArcs) -> None:
+    def generate(
+        self, minute_start: float, congested_arcs: CongestedArcs, rng: np.random.Generator
+    ) -> None:
         before = dict(congested_arcs)
-        self.inner.generate(minute_start, congested_arcs)
+        self.inner.generate(minute_start, congested_arcs, rng)
         for arc, value in congested_arcs.items():
             # Values are freshly created lists, so identity detects overwrites.
             if arc not in before or before[arc] is not value:
@@ -402,10 +404,10 @@ def test_congestion_generator_stays_in_bounds(
         congestion_upper_bound=upper,
         max_congestion_duration=duration,
     )
-    np.random.seed(np_seed)
+    rng = np.random.default_rng(np_seed)
 
     congested: CongestedArcs = {}
-    generator.generate(minute_start, congested)
+    generator.generate(minute_start, congested, rng)
 
     for multiplier, end_minute in congested.values():
         assert lower <= multiplier <= upper

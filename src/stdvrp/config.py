@@ -71,13 +71,6 @@ class ExperimentConfig:
     test_seeds: tuple[int, ...]
     test_vehicle_counts: tuple[int, ...]
 
-    # Exploration seeding (golden-capture convention, ticket 04 finding 1): the
-    # legacy policy's training-only exploration RNGs are unseeded; these offsets
-    # seed them per episode (offset + train seed). Null restores the legacy's
-    # nondeterministic training.
-    train_exploration_seed_offset: int | None
-    train_repair_seed_offset: int | None
-
     # Plot baseline (was a hardcoded lookup table keyed by experiment parameters).
     static_policy_mean_cost: float | None
 
@@ -194,9 +187,6 @@ class ExperimentConfig:
             values["static_policy_mean_cost"] = _require_float(
                 path, "static_policy_mean_cost", values["static_policy_mean_cost"]
             )
-        for name in ("train_exploration_seed_offset", "train_repair_seed_offset"):
-            if values[name] is not None:
-                values[name] = _require_int(path, name, values[name])
         for name in ("links_file", "shortest_paths_file"):
             if not isinstance(values[name], str) or not values[name]:
                 raise ValueError(f"{path}: {name} must be a non-empty string")

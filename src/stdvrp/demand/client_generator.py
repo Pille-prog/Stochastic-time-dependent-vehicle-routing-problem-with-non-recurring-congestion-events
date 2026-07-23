@@ -1,21 +1,23 @@
 """ClientGenerator: draws the Clients and fleet size of one Episode.
 
-Phase-1 port of the legacy ``ClientGenerator.client_generator_function`` (ADR-0001):
-``generate`` reseeds the **global** ``random`` module and consumes its stream in the
-exact legacy order — one ``gauss`` for the client count, one ``sample`` over the
-client node range, then one ``randint`` per client for the time-window start — so
-episodes reproduce the legacy bit-for-bit for equal seeds. The values the legacy
-hardcoded (stddev 30, 60-client floor, the {150: 28, 250: 29} vehicle-ratio table,
-``range(1, 1900)``) come from ``ExperimentConfig`` instead.
+Ticket 13 (RNG modernization, ADR-0001 phase 2): ``generate`` draws from a private
+``np.random.Generator`` seeded fresh from the Episode seed on every call — no
+global ``random`` state is touched. This replaces the Phase-1 port's exact
+reproduction of the legacy's global-stream order (retired: exact equality cannot
+survive the switch from the legacy's Mersenne Twister to PCG64, ADR-0001). The
+values the legacy hardcoded (stddev 30, 60-client floor, the {150: 28, 250: 29}
+vehicle-ratio table, ``range(1, 1900)``) come from ``ExperimentConfig``.
 
-Like the legacy, a gauss draw above the size of the node universe makes ``sample``
-raise ``ValueError``; configs keep the mean far enough below the universe size.
+Like the legacy, a count draw above the size of the node universe makes the
+node sample raise ``ValueError``; configs keep the mean far enough below the
+universe size.
 """
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
+
+import numpy as np
 
 from stdvrp.config import ExperimentConfig
 
@@ -64,11 +66,11 @@ class ClientGenerator:
         )
 
     def generate(self, seed: int) -> EpisodeDemand:
-        random.seed(seed)
-        count = int(random.gauss(self.mean_number_clients, self.client_count_stddev))
+        rng = np.random.default_rng(seed)
+        count = int(rng.normal(self.mean_number_clients, self.client_count_stddev))
         count = max(count, self.min_number_clients)
         low, high = self.client_universe_node_range
-        nodes = random.sample(range(low, high), count)
+        nodes = [int(node) for node in rng.choice(high - low, size=count, replace=False) + low]
 
         # Legacy rounding kept verbatim: float division, truncate, +1 on a remainder.
         if count % self.clients_per_vehicle == 0:
@@ -79,6 +81,6 @@ class ClientGenerator:
         latest_start = self.horizon_end_minute - self.time_window_spread
         clients = []
         for node in nodes:
-            start = random.randint(self.horizon_start_minute, latest_start)
+            start = int(rng.integers(self.horizon_start_minute, latest_start, endpoint=True))
             clients.append(Client(node, start, start + self.time_window_spread))
         return EpisodeDemand(clients=tuple(clients), vehicle_count=vehicle_count)
