@@ -50,11 +50,14 @@ class ExperimentConfig:
     congestion_upper_bound: float
     max_congestion_duration: int
 
-    # Policy and training (former argv plus hardcoded values).
+    # Policy and training (former argv plus hardcoded values). The legacy always
+    # trained the first Episode with a hardcoded 1e-6 warm-up rate; null disables
+    # the warm-up so learning_rate applies from episode 1 (ticket 12, ADR-0001
+    # phase-2 change log).
     total_train_iterations: int
     test_frequency: int
     learning_rate: float
-    warmup_learning_rate: float
+    warmup_learning_rate: float | None
     epsilon: float
     n_observed_arcs: int
     first_train_seed: int
@@ -119,8 +122,10 @@ class ExperimentConfig:
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
-        if self.learning_rate <= 0 or self.warmup_learning_rate <= 0:
-            raise ValueError("learning rates must be positive")
+        if self.learning_rate <= 0:
+            raise ValueError("learning_rate must be positive")
+        if self.warmup_learning_rate is not None and self.warmup_learning_rate <= 0:
+            raise ValueError("warmup_learning_rate must be positive or null")
         if not self.test_action_counts or any(count <= 0 for count in self.test_action_counts):
             raise ValueError("test_action_counts must be a non-empty list of positive integers")
         if not self.test_seeds:
@@ -178,10 +183,13 @@ class ExperimentConfig:
             "congestion_lower_bound",
             "congestion_upper_bound",
             "learning_rate",
-            "warmup_learning_rate",
             "epsilon",
         ):
             values[name] = _require_float(path, name, values[name])
+        if values["warmup_learning_rate"] is not None:
+            values["warmup_learning_rate"] = _require_float(
+                path, "warmup_learning_rate", values["warmup_learning_rate"]
+            )
         if values["static_policy_mean_cost"] is not None:
             values["static_policy_mean_cost"] = _require_float(
                 path, "static_policy_mean_cost", values["static_policy_mean_cost"]

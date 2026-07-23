@@ -157,6 +157,16 @@ def test_train_seeds_warmup_lr_and_w_chaining(
     assert evaluation_stub.calls == []
 
 
+def test_null_warmup_uses_the_configured_rate_from_episode_one(
+    training_stub: TrainingStub, evaluation_stub: EvaluationStub
+) -> None:
+    # Phase-2 fix (ticket 12): the legacy warm-up (first Episode always trains
+    # with the tiny hardcoded rate) is optional — null disables it.
+    config = make_config(warmup_learning_rate=None)
+    make_trainer(config).train()
+    assert [call["learning_rate"] for call in training_stub.calls] == [1.0e-5] * 3
+
+
 def test_null_offsets_leave_exploration_unseeded(
     training_stub: TrainingStub, evaluation_stub: EvaluationStub
 ) -> None:

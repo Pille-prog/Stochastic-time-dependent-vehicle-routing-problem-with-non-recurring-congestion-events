@@ -10,9 +10,10 @@ test seed/fleet tables and the ``mean_static_policy`` plot baseline — comes fr
 
 Legacy fidelity notes:
 
-* **Warm-up learning rate** (pending ticket 12 triage): the first training
-  Episode always updates W with ``warmup_learning_rate``; every later Episode
-  uses ``learning_rate`` — exactly the legacy's ``lr`` reassignment quirk.
+* **Warm-up learning rate** (made optional in ticket 12): when
+  ``warmup_learning_rate`` is set, the first training Episode updates W with it
+  and every later Episode uses ``learning_rate`` — exactly the legacy's ``lr``
+  reassignment quirk; ``null`` applies ``learning_rate`` from episode 1.
 * **Evaluation blocks**: after every ``test_frequency`` episodes, the newest W
   is evaluated greedily over ``evaluation_seeds`` (generated fleet, default
   ``vehicles + 2`` action pool); the block with the lowest mean cost pins
@@ -196,8 +197,13 @@ class Trainer:
     def train(self) -> TrainingResult:
         config = self.config
         w: W | None = None
-        # Legacy warm-up quirk: the first Episode trains with the tiny rate.
-        learning_rate = config.warmup_learning_rate
+        # Legacy warm-up quirk, now opt-in (ticket 12): the first Episode trains
+        # with the warm-up rate when one is configured.
+        learning_rate = (
+            config.warmup_learning_rate
+            if config.warmup_learning_rate is not None
+            else config.learning_rate
+        )
         w_trajectory: list[W] = []
         evaluations: list[EvaluationBlock] = []
         newest_w: W | None = None

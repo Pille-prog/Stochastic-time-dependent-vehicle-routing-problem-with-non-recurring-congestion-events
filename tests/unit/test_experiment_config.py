@@ -103,6 +103,13 @@ def test_missing_key_is_rejected(tmp_path: Path) -> None:
         ExperimentConfig.from_yaml(write_config(tmp_path, values))
 
 
+def test_null_warmup_learning_rate_is_accepted(tmp_path: Path) -> None:
+    # Ticket 12: null disables the legacy warm-up quirk (learning_rate from ep 1).
+    values = valid_values() | {"warmup_learning_rate": None}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.warmup_learning_rate is None
+
+
 def test_scientific_notation_without_dot_still_parses_as_float(tmp_path: Path) -> None:
     # PyYAML parses "1e-6" as a string; the loader must still accept it.
     path = tmp_path / "config.yaml"
@@ -124,7 +131,8 @@ def test_scientific_notation_without_dot_still_parses_as_float(tmp_path: Path) -
         ({"client_universe_size": 100}, "client_universe_size"),
         ({"client_universe_node_range": [45, 1]}, "client_universe_node_range"),
         ({"total_train_iterations": 0}, "total_train_iterations"),
-        ({"learning_rate": 0.0}, "learning rates"),
+        ({"learning_rate": 0.0}, "learning_rate"),
+        ({"warmup_learning_rate": 0.0}, "warmup_learning_rate"),
         ({"time_window_spread": -1}, "time_window_spread"),
         ({"time_window_spread": 500}, "time_window_spread"),
         ({"client_count_stddev": -1.0}, "client_count_stddev"),
