@@ -47,13 +47,16 @@ import heapq
 import itertools
 import random
 from collections import defaultdict
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
 from stdvrp.network.shortest_path_cache import ShortestPathCache
 from stdvrp.policies.base import Policy
-from stdvrp.simulation.state import State
+
+if TYPE_CHECKING:
+    from stdvrp.simulation.state import State
 
 TimeWindows = dict[int, tuple[int, int]]
 
