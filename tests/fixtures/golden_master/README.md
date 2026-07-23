@@ -2,8 +2,9 @@
 
 `chengdu_full.json` pins the exact behavior of the untouched legacy script
 (`Main_Chengdu_Sirve_2_Acciones_Sin_Algunas_Variables.py`, frozen at the
-`legacy-monolith` tag) so the Phase 1 refactor can prove it changed nothing
-(ADR-0001). It was captured on the **full local dataset** — the legacy cannot run
+`legacy-monolith` tag; since ticket 14 the capture and tests extract it from
+that tag — it is no longer in the working tree) so the Phase 1 refactor can
+prove it changed nothing (ADR-0001). It was captured on the **full local dataset** — the legacy cannot run
 on the committed mini fixture (see the ADR-0001 addendum) — by:
 
 ```

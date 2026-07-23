@@ -8,7 +8,6 @@ The path cache comparison loads the same fixture CSV through both loaders and
 requires the resulting mappings to be bit-identical, float node ids included.
 """
 
-import importlib.util
 import os
 import random
 from pathlib import Path
@@ -21,21 +20,11 @@ from stdvrp.network import ShortestPathCache
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "chengdu_mini"
-LEGACY_SCRIPT = REPO_ROOT / "Main_Chengdu_Sirve_2_Acciones_Sin_Algunas_Variables.py"
 
 HORIZON_START, HORIZON_END = 300, 780
 TIME_WINDOW_SPREAD = 60
 SEEDS = (0, *range(1000, 1010), *range(100000, 100010))
 LEGACY_RATIO_TABLE = {150: 28, 250: 29}
-
-
-@pytest.fixture(scope="module")
-def legacy_module() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("legacy_monolith", LEGACY_SCRIPT)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 @pytest.mark.parametrize("mean_number_clients", sorted(LEGACY_RATIO_TABLE))

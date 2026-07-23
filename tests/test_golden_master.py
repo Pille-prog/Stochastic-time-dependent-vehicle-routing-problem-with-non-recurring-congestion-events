@@ -10,7 +10,6 @@ untouched legacy script and requires bit-exact float equality (ADR-0001). Skips
 when the local dataset is absent (e.g. CI).
 """
 
-import hashlib
 import json
 from pathlib import Path
 from types import ModuleType
@@ -50,10 +49,10 @@ def test_dataset_matches_captured_signature(
 
 
 def test_legacy_script_unchanged_since_capture(capture: ModuleType, golden: dict) -> None:
-    current = hashlib.sha256(capture.LEGACY_SCRIPT.read_bytes()).hexdigest()
+    current = capture.legacy_sha256()
     assert current == golden["meta"]["legacy_sha256"], (
-        "the legacy monolith changed since the golden master was captured; "
-        "it must stay frozen until ticket 14 (ADR-0001)"
+        "the legacy-monolith tag no longer matches the golden-master capture; "
+        "the tag must stay frozen forever (ADR-0001)"
     )
 
 

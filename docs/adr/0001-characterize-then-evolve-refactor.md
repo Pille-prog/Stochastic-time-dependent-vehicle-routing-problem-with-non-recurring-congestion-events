@@ -28,3 +28,7 @@ Two documented deviations in the ported Trainer (`src/stdvrp/training/trainer.py
 - **Best-cost sentinel.** The legacy initializes `Q_pred = 1e11`; the Trainer uses `inf`. Behavior differs only if a mean evaluation cost exceeded 1e11, where the legacy would keep `Best_W = []` and crash in the final test.
 
 Also noted: the legacy `test_model` report includes three mean-time metrics (`mean_delay_time`, `mean_earliness_time`, `mean_overtime`) that ticket 07's Model port does not expose — the golden master does not pin them. The Trainer reports the nine golden-pinned metrics; resurrect the other three deliberately (with Model support and tests) if a study needs them.
+
+## Addendum (2026-07-23, ticket 14): the monolith left the working tree
+
+`Main_Chengdu_Sirve_2_Acciones_Sin_Algunas_Variables.py` is deleted from the working tree; the `legacy-monolith` tag is now its only home and must stay frozen forever — the golden master's `legacy_sha256` (`bfbe14b5…`) pins the tag's content. The characterization venue survives the deletion: `tests/characterization_world.py` and `scripts/capture_golden_master.py` extract the script from the tag at run time (`git show legacy-monolith:<file>`), so the vs-legacy suites and the golden re-run keep working unchanged. CI fetches tags for this (`fetch-tags: true` in the checkout step); a tagless shallow clone fails those tests with instructions rather than skipping silently.

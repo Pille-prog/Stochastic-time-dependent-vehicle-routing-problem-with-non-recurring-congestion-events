@@ -12,7 +12,6 @@ This complements ticket 04's golden master (full local data): here CI itself pro
 the port is exact on real-shaped data.
 """
 
-import importlib.util
 import os
 import shutil
 from pathlib import Path
@@ -21,11 +20,11 @@ from types import ModuleType
 import pandas as pd
 import pytest
 
+from characterization_world import load_legacy_module
 from stdvrp.traffic import CsvDataSource, TravelTimeModel
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "chengdu_mini"
-LEGACY_SCRIPT = REPO_ROOT / "Main_Chengdu_Sirve_2_Acciones_Sin_Algunas_Variables.py"
 LEGACY_DAYS = tuple(range(601, 631)) + tuple(range(701, 715))
 MAX_CONGESTION_DURATION = 120
 
@@ -46,11 +45,7 @@ def legacy_world(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(scope="module")
 def legacy_module() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("legacy_monolith", LEGACY_SCRIPT)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_legacy_module()
 
 
 @pytest.fixture(scope="module")

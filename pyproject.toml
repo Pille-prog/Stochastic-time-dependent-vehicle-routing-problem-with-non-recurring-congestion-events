@@ -33,8 +33,6 @@ packages = ["src/stdvrp"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
-# The legacy monolith stays untouched until ticket 14 (ADR-0001); it predates the toolchain.
-extend-exclude = ["Main_Chengdu_Sirve_2_Acciones_Sin_Algunas_Variables.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
