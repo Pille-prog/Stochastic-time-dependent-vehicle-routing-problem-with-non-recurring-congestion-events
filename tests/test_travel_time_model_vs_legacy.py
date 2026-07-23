@@ -20,7 +20,6 @@ from types import ModuleType
 import pandas as pd
 import pytest
 
-from characterization_world import load_legacy_module
 from stdvrp.traffic import CsvDataSource, TravelTimeModel
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -41,11 +40,6 @@ def legacy_world(tmp_path_factory: pytest.TempPathFactory) -> Path:
                 world / f"speed[{day}]_[{half}].csv",
             )
     return world
-
-
-@pytest.fixture(scope="module")
-def legacy_module() -> ModuleType:
-    return load_legacy_module()
 
 
 @pytest.fixture(scope="module")

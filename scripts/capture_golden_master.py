@@ -47,14 +47,12 @@ import argparse
 import builtins
 import contextlib
 import copy
-import hashlib
 import importlib.util
 import json
 import os
 import pickle
 import platform
 import random
-import subprocess
 import sys
 import tempfile
 import time
@@ -63,9 +61,23 @@ from types import ModuleType
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LEGACY_TAG = "legacy-monolith"
-LEGACY_FILENAME = "Main_Chengdu_Sirve_2_Acciones_Sin_Algunas_Variables.py"
 DEFAULT_OUT = REPO_ROOT / "tests" / "fixtures" / "golden_master" / "chengdu_full.json"
+
+
+def _load_legacy_source_module() -> ModuleType:
+    """tests/legacy_source.py: tag-extraction helpers shared with the test suite
+    (loaded by file path — tests/ is not importable from a standalone script run)."""
+    spec = importlib.util.spec_from_file_location(
+        "legacy_source", REPO_ROOT / "tests" / "legacy_source.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+legacy_source = _load_legacy_source_module()
+LEGACY_FILENAME = legacy_source.LEGACY_FILENAME
 
 # The legacy's hardcoded per-seed vehicle table for mean_number_clients == 150
 # (test_model, lines 6396-6398 of the monolith).
@@ -197,38 +209,9 @@ def data_signature(data_dir: Path) -> dict[str, int]:
     return {name: (data_dir / name).stat().st_size for name in consumed_data_files()}
 
 
-_legacy_script_path: Path | None = None
-
-
-def read_legacy_source() -> bytes:
-    """The monolith's bytes, from the ``legacy-monolith`` tag (ticket 14 removed it
-    from the working tree; the tag is its permanent home, ADR-0001)."""
-    result = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "show", f"{LEGACY_TAG}:{LEGACY_FILENAME}"],
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"cannot read {LEGACY_FILENAME} from the {LEGACY_TAG} tag — "
-            f"shallow clone without tags? Run `git fetch --tags`. "
-            f"git said: {result.stderr.decode(errors='replace').strip()}"
-        )
-    return result.stdout
-
-
-def legacy_script_path() -> Path:
-    """A real on-disk copy of the monolith (importlib/inspect need a file path),
-    extracted from the tag once per process."""
-    global _legacy_script_path
-    if _legacy_script_path is None:
-        path = Path(tempfile.mkdtemp(prefix="legacy_monolith_")) / LEGACY_FILENAME
-        path.write_bytes(read_legacy_source())
-        _legacy_script_path = path
-    return _legacy_script_path
-
-
 def legacy_sha256() -> str:
-    return hashlib.sha256(read_legacy_source()).hexdigest()
+    sha: str = legacy_source.legacy_sha256()
+    return sha
 
 
 def default_data_dir() -> Path:
@@ -239,7 +222,9 @@ def default_data_dir() -> Path:
 def load_legacy() -> ModuleType:
     """Import the monolith unchanged. Headless matplotlib; no other side effects."""
     os.environ.setdefault("MPLBACKEND", "Agg")
-    spec = importlib.util.spec_from_file_location("legacy_monolith", legacy_script_path())
+    spec = importlib.util.spec_from_file_location(
+        "legacy_monolith", legacy_source.legacy_script_path()
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

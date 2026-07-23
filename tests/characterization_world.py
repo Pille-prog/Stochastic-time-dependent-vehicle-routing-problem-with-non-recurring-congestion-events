@@ -16,12 +16,11 @@ import builtins
 import importlib.util
 import os
 import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+from legacy_source import legacy_script_path
 from stdvrp.congestion import ArcProbabilityCongestionGenerator
 from stdvrp.demand import ClientGenerator
 from stdvrp.network import ShortestPathCache
@@ -29,8 +28,6 @@ from stdvrp.traffic import CsvDataSource, TravelTimeModel
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "chengdu_mini"
-LEGACY_TAG = "legacy-monolith"
-LEGACY_FILENAME = "Main_Chengdu_Sirve_2_Acciones_Sin_Algunas_Variables.py"
 LEGACY_DAYS = tuple(range(601, 631)) + tuple(range(701, 715))
 
 HORIZON_START, HORIZON_END = 300, 780
@@ -60,36 +57,6 @@ def build_legacy_world(world: Path) -> Path:
                 world / f"speed[{day}]_[{half}].csv",
             )
     return world
-
-
-_legacy_script_path: Path | None = None
-
-
-def read_legacy_source() -> bytes:
-    """The monolith's bytes, from the ``legacy-monolith`` tag (ticket 14 removed it
-    from the working tree; the tag is its permanent home, ADR-0001)."""
-    result = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "show", f"{LEGACY_TAG}:{LEGACY_FILENAME}"],
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"cannot read {LEGACY_FILENAME} from the {LEGACY_TAG} tag — "
-            f"shallow clone without tags? Run `git fetch --tags`. "
-            f"git said: {result.stderr.decode(errors='replace').strip()}"
-        )
-    return result.stdout
-
-
-def legacy_script_path() -> Path:
-    """A real on-disk copy of the monolith (importlib/inspect need a file path),
-    extracted from the tag once per process."""
-    global _legacy_script_path
-    if _legacy_script_path is None:
-        path = Path(tempfile.mkdtemp(prefix="legacy_monolith_")) / LEGACY_FILENAME
-        path.write_bytes(read_legacy_source())
-        _legacy_script_path = path
-    return _legacy_script_path
 
 
 def load_legacy_module() -> ModuleType:

@@ -17,3 +17,12 @@ The monolith is deleted from the working tree; its only home is now the `legacy-
 README rewritten as the front door: project purpose, repository structure, uv quickstart (`uv sync` / `uv run pytest` needs no data), the one-command Chengdu experiment, data acquisition (pointer to `data/README.md`), how to add a `Policy` or `CongestionGenerator` (the two research axes, with the ADR-0002 no-new-seams rule), and links to `CONTEXT.md`, both ADRs, the golden-master README and the issue tracker. ADR-0001 gained a ticket-14 addendum recording the deletion and the tag-extraction mechanism.
 
 Full suite after deletion: 222 passed (6 golden deselected); ruff, ruff format and mypy clean. Note: the working tree carries unrelated ticket-12 WIP (`travel_time_model.py` NaN-std fix + its test) — left uncommitted, only its dead `import math` was removed to keep `ruff check .` green.
+
+## Comments
+
+Code review (two-axis, base 636d28c) found no hard violations; four judgement-call findings, all addressed in the follow-up commit:
+
+- **Duplicated Code** (both axes): the tag-extraction helpers were verbatim-duplicated between `tests/characterization_world.py` and `scripts/capture_golden_master.py`. Extracted to `tests/legacy_source.py` (stdlib-only, so the capture script stays independent of the ported package); the tests import it normally, the script loads it by file path (`scripts/` and `tests/` cannot import each other).
+- **Middle Man**: `test_travel_time_model_vs_legacy.py` kept a local `legacy_module` fixture that only delegated to the loader while `conftest.py` already provides an identical one — deleted.
+- Temp-dir leak per process in `legacy_script_path()` — now content-addressed under the system temp dir (`stdvrp-legacy-<sha12>/`), reused across runs; the tag is frozen so a hit can never be stale.
+- Spec axis: README claimed `data/README.md` "documents each file" but it lacked `all_shortest_paths.csv` — row added, plus what the full 44-day experiment reads and that the default config needs no copying (reads the parent folder).
