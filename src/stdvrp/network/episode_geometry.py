@@ -1,41 +1,26 @@
 """EpisodeGeometry: dense per-Episode travel-time/length matrices (ADR-0003).
 
-Simulation-performance ticket 04: the Policy hot path drove 1.13M per-episode
-``ShortestPathCache.path_between`` dict lookups (ticket 01's profile, ~17% of
-episode time). This facade replaces the *time/length* half of those lookups —
-``.average_minutes`` and ``.length`` — with array indexing: one dense
-``[node, client-or-depot]`` matrix pair built once per Episode from the
-ShortestPathCache and reused for the rest of the Episode's decisions.
+Simulation-performance ticket 04 (see its ``## Comments`` for the full
+rationale and benchmark numbers): replaces ``ShortestPathCache.path_between``
+dict lookups on the Policy hot path with array indexing — one dense
+``[node, client-or-depot]`` matrix pair per Episode. Rows are every node id
+the cache ever priced toward some client (in practice the road network's full
+node universe); columns are this Episode's Clients plus the depot. Values are
+the cache's own floats, copied verbatim, so scalar reads stay bit-identical to
+the lookups they replace (Tier 1, pure representation change).
 
-Rows cover every node id that has a cached path toward some client — in
-practice the road network's full node universe, since the cache is dense over
-(every graph node) x (the experiment's client-universe nodes). Columns are
-this Episode's Clients plus the depot, so the matrix stays small (tens of MB,
-ADR-0003) even though the cache itself is not. Values are the cache's own
-floats, copied verbatim — no arithmetic — so scalar reads stay bit-identical
-to the ``path_between(...).average_minutes/.length`` calls they replace
-(Tier 1, pure representation change).
+Two design choices worth knowing before touching this file:
 
-**Per-cache memoization.** A single pass over the whole ShortestPathCache costs
-about as much as the dict lookups it replaces (measured on the mini-fixture
-benchmark: rebuilding from scratch every Episode regressed throughput). But the
-cache is immutable and shared across every Episode of a run, and its *full*
-column universe (every client the cache was ever priced toward) never changes
-between Episodes — only which subset of it one Episode's Clients select. So the
-one full-cache scan is memoized per ShortestPathCache instance (a
-``WeakKeyDictionary``, safe because the cache is never mutated after
-construction); each Episode's :meth:`EpisodeGeometry.build` then does a cheap
-vectorized column-select out of that shared full index, which is what actually
-lands the "~ms per Episode" ADR-0003 target.
-
-**Scalar reads use nested Python lists, not numpy indexing.** Measured (this
-repo, mini fixture): a single ``ndarray[i, j]`` scalar read costs about 2x a
-nested-list ``list[i][j]`` read — numpy's per-call C-API dispatch overhead,
-worse than the dict lookup it replaces once paid one call at a time on the
-1e5-calls-per-Episode Policy hot path. So each built matrix keeps its numpy
-form (for the vectorized row/column accessors tickets 05/07 build on) *and* a
-``.tolist()`` copy (cheap: one bulk vectorized conversion) that
-:meth:`average_minutes`/:meth:`length` read from instead.
+- **Per-cache memoization.** Rescanning the whole ShortestPathCache every
+  Episode measurably regressed throughput, so the scan is memoized per
+  ShortestPathCache instance (:func:`_full_index`, a ``WeakKeyDictionary`` —
+  safe, since the cache is never mutated after construction); each Episode
+  then does a cheap vectorized column-select out of that shared index.
+- **Scalar reads use nested Python lists, not numpy indexing** — a single
+  ``ndarray[i, j]`` read measured slower than a nested-list ``list[i][j]``
+  read, and this path is called ~1e5 times per Episode. Each built matrix
+  keeps its numpy form (for the vectorized row/column accessors tickets 05/07
+  build on) *and* a ``.tolist()`` copy that the scalar accessors read from.
 
 Path *node sequences* (``.nodes``, used by the Model for routing) are not part
 of this facade — they stay on the ShortestPathCache (ticket 04 scope: only the
@@ -172,18 +157,12 @@ class EpisodeGeometry:
 
     def average_minutes(self, node: float, client: float) -> float:
         """The cached mean travel minutes from ``node`` to ``client``; ``KeyError`` if absent."""
-        row = self._row_index.get(node)
-        col = self._col_index.get(client)
-        if row is None or col is None or not self._present_list[row][col]:
-            raise KeyError((node, client))
+        row, col = self._locate(node, client)
         return self._average_minutes_list[row][col]
 
     def length(self, node: float, client: float) -> float:
         """The cached path length from ``node`` to ``client``; ``KeyError`` if absent."""
-        row = self._row_index.get(node)
-        col = self._col_index.get(client)
-        if row is None or col is None or not self._present_list[row][col]:
-            raise KeyError((node, client))
+        row, col = self._locate(node, client)
         return self._length_list[row][col]
 
     def average_minutes_row(self, node: float) -> NDArray[np.float64]:
@@ -215,6 +194,13 @@ class EpisodeGeometry:
         if col is None:
             raise KeyError(client)
         return col
+
+    def _locate(self, node: float, client: float) -> tuple[int, int]:
+        row = self._row_index.get(node)
+        col = self._col_index.get(client)
+        if row is None or col is None or not self._present_list[row][col]:
+            raise KeyError((node, client))
+        return row, col
 
 
 def _ordered_unique(values: Sequence[float]) -> tuple[float, ...]:

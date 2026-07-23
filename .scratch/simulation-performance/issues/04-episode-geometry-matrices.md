@@ -73,7 +73,7 @@ one-for-one. `Model` is unchanged (still holds `ShortestPathCache` for
 `EpisodeGeometry.build(shortest_path_cache, clients, depot)` per Episode,
 right after `State`, and inject it into `MonteCarloPolicy`.
 
-**Tests.** `tests/unit/test_episode_geometry.py` (new, 27 cases): shape and
+**Tests.** `tests/unit/test_episode_geometry.py` (new, 17 cases): shape and
 column ordering, scalar/vector accessor parity with `path_between`,
 KeyError-equivalence for absent pairs (missing cache pairs, nodes outside the
 cache, and Clients outside *this Episode's* columns even when the underlying
