@@ -16,7 +16,6 @@ The 44-day exact-equality run against the unmodified legacy classes lives in
 tests/test_travel_time_model_vs_legacy.py.
 """
 
-import math
 from pathlib import Path
 
 import pandas as pd
@@ -159,12 +158,13 @@ def test_windows_blend_filled_speeds_rather_than_repeat_them(
     assert speed != filled_speed(observed_speeds, minute)
 
 
-def test_single_day_speed_std_is_nan_everywhere(travel_time_model: TravelTimeModel) -> None:
-    # pandas std of one observation is NaN and the legacy dropna() was a silent
-    # no-op (ADR-0001): with the one-day fixture every deviation is NaN. Ticket 07
-    # must use the multi-day characterization world for stochastic velocities.
+def test_single_day_speed_std_is_zero_everywhere(travel_time_model: TravelTimeModel) -> None:
+    # Phase-2 fix (ticket 12, ADR-0001 change log): pandas std of one observation
+    # is NaN, and the legacy dropna() that should have removed those rows was a
+    # silent no-op — random.gauss(speed, nan) then produced NaN velocities. A
+    # single observation now means a deterministic speed: std exactly 0.0.
     assert set(travel_time_model.speed_std) == set(travel_time_model.travel_data)
-    assert all(math.isnan(value) for value in travel_time_model.speed_std.values())
+    assert all(value == 0.0 for value in travel_time_model.speed_std.values())
 
 
 def test_successors_follow_link_order(

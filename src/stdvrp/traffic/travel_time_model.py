@@ -13,14 +13,19 @@ Known preserved behaviors (do not "fix" before Phase 2, see ADR-0001):
 
 - Speeds between minutes 420-540, 660-840 and 960-1080 are overwritten by a linear
   blend of the interval endpoints, even where real observations exist.
-- The standard-deviation lookup stores the *raw* std for minutes 421-539 (the
-  interpolated value is computed and discarded), and its endpoint lookups are
-  off by two minutes (418/542, 658/842, 958/1082).
-- With a single traffic day, every std is NaN: pandas ``std`` of one observation is
-  NaN and the legacy ``dropna()`` result was discarded (a silent no-op, preserved
-  here by simply not dropping).
+- The standard-deviation endpoint lookups are off by two minutes (418/542,
+  658/842, 958/1082) — those are the last/first *observed* minutes around each
+  data-gap window.
 - The per-arc event probability divides by the day count (the legacy hardcoded 44,
   its day count); identical whenever all 44 archive days are configured.
+
+- The standard-deviation lookup stores the *raw* std for minutes 421-539 (the
+  interpolated value is computed and discarded).
+
+Phase-2 deliberate fixes (ticket 12, ADR-0001 change log):
+
+- A (Period, Link) with a single observation gets std 0.0, not NaN (the legacy
+  ``dropna()`` no-op let ``random.gauss(speed, nan)`` produce NaN velocities).
 """
 
 from __future__ import annotations
@@ -83,18 +88,24 @@ class TravelTimeModel:
 def _aggregate_speed_statistics(history: TrafficHistory) -> pd.DataFrame:
     """Mean and std of the km/min speed per (Period, Link) over all configured days.
 
-    Ports ``environment.process_all_data``. The legacy called ``all_data.dropna()``
-    and discarded the result — a silent no-op, preserved by not dropping (ADR-0001).
+    Ports ``environment.process_all_data``. Phase-2 fix (ticket 12, ADR-0001 change
+    log): a (Period, Link) observed on a single day has a NaN pandas std (ddof=1),
+    and the legacy ``dropna()`` that should have removed those rows discarded its
+    result — ``random.gauss(speed, nan)`` then produced NaN velocities. A single
+    observation now means a deterministic speed: std 0.0. Multi-observation stds
+    are untouched.
     """
     all_data = pd.concat(
         [history.observations_by_day[day] for day in history.days], ignore_index=True
     )
     all_data["Speed"] = all_data["Speed"] / 60
-    return (
+    aggregated = (
         all_data.groupby(["Period", "Link"])
         .agg(speed=("Speed", "mean"), speed_std=("Speed", "std"))
         .reset_index()
     )
+    aggregated["speed_std"] = aggregated["speed_std"].fillna(0.0)
+    return aggregated
 
 
 def _build_speed_table(
