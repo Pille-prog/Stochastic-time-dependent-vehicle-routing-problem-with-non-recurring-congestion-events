@@ -9,16 +9,25 @@ greedy, 1 = pure random from the seeded global stream).
 
 import math
 import random
+from typing import NamedTuple
 
 import numpy as np
 import pytest
 
 from stdvrp.network.shortest_path_cache import ShortestPath, ShortestPathCache
-from stdvrp.policies.monte_carlo import MonteCarloPolicy
+from stdvrp.policies.monte_carlo import MonteCarloPolicy, TimeWindows
 from stdvrp.simulation.state import State
 
 DEPOT = 0
 HORIZON_END = 780
+
+
+class World(NamedTuple):
+    """The three inputs a policy needs, built together by the make_*_world helpers."""
+
+    cache: ShortestPathCache
+    time_windows: TimeWindows
+    state: State
 
 
 def make_cache(arcs: dict) -> ShortestPathCache:
@@ -31,15 +40,15 @@ def make_cache(arcs: dict) -> ShortestPathCache:
     )
 
 
-def make_policy(cache, time_windows, state, *, epsilon=0.0, W=None, lr=0.0, seed=0):
+def make_policy(world: World, *, epsilon=0.0, W=None, lr=0.0, seed=0):
     # The constructor draws one global random.choice per vehicle (ADR-0001).
     random.seed(seed)
     return MonteCarloPolicy(
         number_vehicles=1,
-        shortest_path_cache=cache,
-        time_windows=time_windows,
-        state=state,
-        number_clients=len(time_windows),
+        shortest_path_cache=world.cache,
+        time_windows=world.time_windows,
+        state=world.state,
+        number_clients=len(world.time_windows),
         epsilon=epsilon,
         depot=DEPOT,
         number_actions_test=2,
@@ -48,6 +57,12 @@ def make_policy(cache, time_windows, state, *, epsilon=0.0, W=None, lr=0.0, seed
         number_actions_train=2,
         learning_rate=lr,
     )
+
+
+def seed_training_rngs(policy: MonteCarloPolicy, seed: int) -> None:
+    """Seed the two private training RNGs, as a reproducible caller must (ADR-0001)."""
+    policy.local_rng.seed(seed)
+    policy.local_rng_2.seed(seed)
 
 
 # --- W update ------------------------------------------------------------------
@@ -71,7 +86,7 @@ def make_update_world():
         number_vehicles=1, clients=[1, 2], n_arcs=3, horizon_start_minute=300, depot=DEPOT
     )
     state.tau_episode = 400
-    return cache, time_windows, state
+    return World(cache, time_windows, state)
 
 
 def hand_computed_features() -> np.ndarray:
@@ -108,8 +123,8 @@ def hand_computed_features() -> np.ndarray:
 
 class TestWUpdate:
     def test_feature_vector_and_created_w_have_19_components(self):
-        cache, time_windows, state = make_update_world()
-        policy = make_policy(cache, time_windows, state, W=None)
+        world = make_update_world()
+        policy = make_policy(world, W=None)
 
         assert policy.W is not None  # created by the constructor's greedy pass
         assert policy.W.shape == (19,)
@@ -117,37 +132,37 @@ class TestWUpdate:
         assert len(policy.X_state_action) == 7
 
     def test_update_preserves_w_dimensions(self):
-        cache, time_windows, state = make_update_world()
-        policy = make_policy(cache, time_windows, state, W=np.zeros(19), lr=0.5)
+        world = make_update_world()
+        policy = make_policy(world, W=np.zeros(19), lr=0.5)
 
-        policy.update_W([state], [[1]], [0.0, 20.0])
+        policy.update_W([world.state], [[1]], [0.0, 20.0])
 
         assert policy.W.shape == (19,)
 
     def test_single_step_matches_hand_computation(self):
-        cache, time_windows, state = make_update_world()
-        policy = make_policy(cache, time_windows, state, W=np.zeros(19), lr=0.5)
+        world = make_update_world()
+        policy = make_policy(world, W=np.zeros(19), lr=0.5)
 
-        policy.update_W([state], [[1]], [0.0, 20.0])
+        policy.update_W([world.state], [[1]], [0.0, 20.0])
 
         # U_t = rewards[1] = 20; acquired-cost baseline and Q_pred are both 0,
         # so W steps from zero to lr * U_t * X = 10 * X.
         np.testing.assert_allclose(policy.W, 10 * hand_computed_features(), rtol=1e-12)
 
     def test_zero_learning_rate_is_a_no_op(self):
-        cache, time_windows, state = make_update_world()
+        world = make_update_world()
         initial = np.full(19, 0.3)
-        policy = make_policy(cache, time_windows, state, W=initial.copy(), lr=0.0)
+        policy = make_policy(world, W=initial.copy(), lr=0.0)
 
-        policy.update_W([state], [[1]], [0.0, 20.0])
+        policy.update_W([world.state], [[1]], [0.0, 20.0])
 
         np.testing.assert_array_equal(policy.W, initial)
 
     def test_return_accumulates_rewards_newest_first(self):
-        cache, time_windows, state = make_update_world()
-        policy = make_policy(cache, time_windows, state, W=np.zeros(19), lr=0.5)
+        world = make_update_world()
+        policy = make_policy(world, W=np.zeros(19), lr=0.5)
 
-        policy.update_W([state, state], [[1], [1]], [0.0, 5.0, 7.0])
+        policy.update_W([world.state, world.state], [[1], [1]], [0.0, 5.0, 7.0])
 
         # Epochs replay newest-first: U_t is 7 for t=1, then 7 + 5 = 12 for t=0,
         # each stepping W against the Q predicted by the weights so far.
@@ -188,7 +203,7 @@ def make_selection_world():
     state = State(
         number_vehicles=1, clients=[1, 2, 3, 4], n_arcs=3, horizon_start_minute=300, depot=DEPOT
     )
-    return cache, time_windows, state
+    return World(cache, time_windows, state)
 
 
 def distance_only_w() -> np.ndarray:
@@ -199,65 +214,61 @@ def distance_only_w() -> np.ndarray:
 
 class TestEpsilonGreedy:
     def test_epsilon_zero_is_pure_greedy(self):
-        cache, time_windows, state = make_selection_world()
-        policy = make_policy(cache, time_windows, state, epsilon=0.0, W=distance_only_w())
-        policy.local_rng.seed(7)
-        policy.local_rng_2.seed(7)
+        world = make_selection_world()
+        policy = make_policy(world, epsilon=0.0, W=distance_only_w())
+        seed_training_rngs(policy, 7)
 
         untouched_global_stream = random.getstate()
-        action = policy.decide_train(state)
+        action = policy.decide_train(world.state)
 
         assert action == [1]  # the closest Client, never the exploratory draw
         assert random.getstate() == untouched_global_stream
 
     def test_epsilon_zero_matches_the_evaluation_greedy_decision(self):
-        cache, time_windows, state = make_selection_world()
-        policy = make_policy(cache, time_windows, state, epsilon=0.0, W=distance_only_w())
-        policy.local_rng.seed(7)
-        policy.local_rng_2.seed(7)
+        world = make_selection_world()
+        policy = make_policy(world, epsilon=0.0, W=distance_only_w())
+        seed_training_rngs(policy, 7)
 
-        cache_2, time_windows_2, state_2 = make_selection_world()
-        twin = make_policy(cache_2, time_windows_2, state_2, epsilon=0.0, W=distance_only_w())
+        twin_world = make_selection_world()
+        twin = make_policy(twin_world, epsilon=0.0, W=distance_only_w())
 
-        assert policy.decide_train(state) == twin.decide(state_2)
+        assert policy.decide_train(world.state) == twin.decide(twin_world.state)
 
     def test_epsilon_one_is_pure_random_from_the_global_stream(self):
-        cache, time_windows, state = make_selection_world()
-        policy = make_policy(cache, time_windows, state, epsilon=1.0, W=distance_only_w())
+        world = make_selection_world()
+        policy = make_policy(world, epsilon=1.0, W=distance_only_w())
         possible = policy._select_vehicle_possible_actions(2, 0)
         assert possible == [1, 2]  # precondition: the two closest Clients
 
-        policy.local_rng.seed(3)
-        policy.local_rng_2.seed(3)
+        seed_training_rngs(policy, 3)
         random.seed(0)
         expected = random.choice(possible)
         assert expected == 2  # seed chosen so exploration overrides the greedy pick
 
         random.seed(0)
-        assert policy.decide_train(state) == [expected]
+        assert policy.decide_train(world.state) == [expected]
 
     def test_epsilon_one_reproduces_with_equal_seeds(self):
         actions = []
         for _ in range(2):
-            cache, time_windows, state = make_selection_world()
-            policy = make_policy(cache, time_windows, state, epsilon=1.0, W=distance_only_w())
-            policy.local_rng.seed(11)
-            policy.local_rng_2.seed(11)
+            world = make_selection_world()
+            policy = make_policy(world, epsilon=1.0, W=distance_only_w())
+            seed_training_rngs(policy, 11)
             random.seed(11)
-            actions.append(policy.decide_train(state))
+            actions.append(policy.decide_train(world.state))
 
         assert actions[0] == actions[1]
         assert actions[0][0] in {1, 2}
 
     def test_decide_train_requires_number_actions_train(self):
-        cache, time_windows, state = make_update_world()
+        world = make_update_world()
         random.seed(0)
         policy = MonteCarloPolicy(
             number_vehicles=1,
-            shortest_path_cache=cache,
-            time_windows=time_windows,
-            state=state,
-            number_clients=len(time_windows),
+            shortest_path_cache=world.cache,
+            time_windows=world.time_windows,
+            state=world.state,
+            number_clients=len(world.time_windows),
             epsilon=0.0,
             depot=DEPOT,
             number_actions_test=2,
@@ -266,4 +277,4 @@ class TestEpsilonGreedy:
         )
 
         with pytest.raises(ValueError, match="number_actions_train"):
-            policy.decide_train(state)
+            policy.decide_train(world.state)
