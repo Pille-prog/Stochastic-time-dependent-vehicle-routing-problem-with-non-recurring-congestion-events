@@ -1,0 +1,44 @@
+# Experiment config for the committed mini fixture (45 nodes, day 601).
+# Used by the test suite and by `experiments/chengdu/run.py --config <this file>`.
+# Demand values are scaled to the 44-node client universe (nodes 1..44): a
+# gauss(20, 4) draw stays far below 44, so client generation cannot exhaust it.
+
+data_dir: .
+links_file: link.csv
+shortest_paths_file: all_shortest_paths.csv
+instance_day: 601
+traffic_days: [601]
+
+horizon_start_minute: 300
+horizon_end_minute: 780
+
+mean_number_clients: 20
+client_count_stddev: 4.0
+min_number_clients: 8
+clients_per_vehicle: 4
+time_window_spread: 60
+client_universe_seed: 0
+client_universe_size: 10
+client_universe_node_range: [1, 45]
+
+congestion_lower_bound: 0.3
+congestion_upper_bound: 0.4
+max_congestion_duration: 120
+
+total_train_iterations: 10
+test_frequency: 5
+learning_rate: 1.0e-5
+warmup_learning_rate: 1.0e-6
+epsilon: 0.1
+n_observed_arcs: 3
+first_train_seed: 1000
+evaluation_seed_start: 100000
+evaluation_seed_count: 50
+test_episodes: 10
+
+# The mini fixture has no legacy vehicle table; any small fleet works.
+test_action_counts: [2]
+test_seeds: [100, 101]
+test_vehicle_counts: [4, 4]
+
+static_policy_mean_cost: null

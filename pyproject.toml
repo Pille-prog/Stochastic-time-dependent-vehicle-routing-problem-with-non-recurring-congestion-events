@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stdvrp"
+version = "0.1.0"
+description = "Stochastic time-dependent vehicle routing with non-recurring congestion events: simulation and policy-optimization laboratory"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.8",
+    "networkx>=3.2",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.100",
+    "mypy>=1.10",
+    "pandas-stubs>=2.1",
+    "pytest>=8.0",
+    "ruff>=0.8",
+    "types-pyyaml>=6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stdvrp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/stdvrp"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+
+# Everything inside the package is new code: fully typed from day one.
+[[tool.mypy.overrides]]
+module = "stdvrp.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = ["networkx.*", "matplotlib.*"]
+ignore_missing_imports = true
+
+# Strict on the new core interfaces (ADR-0002 seams and the experiment config).
+# mypy does not accept `strict` per-module, so its component flags are set instead.
+[[tool.mypy.overrides]]
+module = ["stdvrp.config", "stdvrp.traffic.datasource"]
+disallow_any_generics = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+strict_equality = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The golden-master test needs the full local Chengdu dataset and takes minutes;
+# opt in with `uv run pytest -m golden`.
+addopts = "-m 'not golden'"
+markers = [
+    "golden: exact legacy golden-master equality; needs the full local dataset",
+]

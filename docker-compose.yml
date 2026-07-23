@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:16
+    container_name: stdvrp-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-stdvrp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stdvrp}
+      POSTGRES_DB: ${POSTGRES_DB:-stdvrp}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - stdvrp-db-data:/var/lib/postgresql/data
+
+volumes:
+  stdvrp-db-data:
