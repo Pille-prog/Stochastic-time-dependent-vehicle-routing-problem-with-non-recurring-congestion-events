@@ -84,7 +84,8 @@ def load_world(config: ExperimentConfig, *, cache_dir: Path | None = None) -> Lo
     ``cache_dir=None`` (the default) disables caching entirely: every call parses
     the CSVs, exactly as before this ticket. Passing a directory is the opt-in.
     """
-    key = _cache_key(config)
+    source = CsvDataSource.from_config(config)
+    key = _cache_key(config, source)
     cache_path = None if cache_dir is None else cache_dir / f"{_key_digest(key)}.pkl"
 
     if cache_path is not None:
@@ -92,7 +93,6 @@ def load_world(config: ExperimentConfig, *, cache_dir: Path | None = None) -> Lo
         if cached is not None:
             return cached
 
-    source = CsvDataSource.from_config(config)
     travel_time_model = TravelTimeModel(
         source.load_road_network(),
         source.load_traffic_history(),
@@ -109,26 +109,16 @@ def load_world(config: ExperimentConfig, *, cache_dir: Path | None = None) -> Lo
     return world
 
 
-def _consumed_files(config: ExperimentConfig) -> list[Path]:
-    """Every file ``CsvDataSource`` reads for ``config`` (mirrors its read methods)."""
-    data_dir = config.data_dir
-    files = [data_dir / config.links_file, data_dir / config.shortest_paths_file]
-    for day in config.traffic_days:
-        files.append(data_dir / f"speed[{day}]_[0].csv")
-        files.append(data_dir / f"speed[{day}]_[1].csv")
-    return files
-
-
 def _file_signature(path: Path) -> tuple[int, int]:
     stat = path.stat()
     return stat.st_size, stat.st_mtime_ns
 
 
-def _cache_key(config: ExperimentConfig) -> dict[str, Any]:
+def _cache_key(config: ExperimentConfig, source: CsvDataSource) -> dict[str, Any]:
     """Everything the built world depends on; any change invalidates the cache."""
     return {
         "cache_format": CACHE_FORMAT,
-        "files": {str(path): _file_signature(path) for path in sorted(_consumed_files(config))},
+        "files": {str(path): _file_signature(path) for path in sorted(source.consumed_files())},
         "world_params": {
             "traffic_days": list(config.traffic_days),
             "instance_day": config.instance_day,
@@ -148,17 +138,6 @@ def _key_digest(key: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _travel_time_model_state(model: TravelTimeModel) -> dict[str, Any]:
-    return {
-        "mean_arc_data": model.mean_arc_data,
-        "speed_std": model.speed_std,
-        "travel_data": model.travel_data,
-        "successors": model.successors,
-        "node_coordinates": model.node_coordinates,
-        "event_probability": model.event_probability,
-    }
-
-
 def _read_cache(path: Path, key: dict[str, Any]) -> LoadedWorld | None:
     """Return the cached world on an exact key match; ``None`` on miss or corruption."""
     try:
@@ -171,7 +150,7 @@ def _read_cache(path: Path, key: dict[str, Any]) -> LoadedWorld | None:
     state = payload.get("state")
     if state is None:
         return None
-    travel_time_model = TravelTimeModel._from_cached_state(**state["travel_time_model"])
+    travel_time_model = TravelTimeModel._from_cached_state(state["travel_time_model"])
     shortest_path_cache = ShortestPathCache(state["shortest_path_cache"])
     return LoadedWorld(travel_time_model, shortest_path_cache)
 
@@ -180,7 +159,7 @@ def _write_cache(path: Path, key: dict[str, Any], world: LoadedWorld) -> None:
     """Atomic write (tmp + replace) so an interrupted run never leaves a torn cache."""
     path.parent.mkdir(parents=True, exist_ok=True)
     state = {
-        "travel_time_model": _travel_time_model_state(world.travel_time_model),
+        "travel_time_model": world.travel_time_model._cached_state(),
         "shortest_path_cache": world.shortest_path_cache.as_dict(),
     }
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")

@@ -74,6 +74,19 @@ class CsvDataSource(DataSource):
         observations_by_day = {day: self._read_day(day) for day in self.traffic_days}
         return TrafficHistory(observations_by_day, self.instance_day)
 
+    def consumed_files(self) -> list[Path]:
+        """Every file the loaders above read (for ``stdvrp.traffic.world_cache``'s
+        cache-invalidation signature — the single place that owns this naming
+        convention, so a signature can never silently drift from what is
+        actually read)."""
+        files = [self.data_dir / self.links_file, self.data_dir / self.shortest_paths_file]
+        for day in self.traffic_days:
+            files.extend(self._day_files(day))
+        return files
+
     def _read_day(self, day: int) -> pd.DataFrame:
-        halves = [pd.read_csv(self.data_dir / f"speed[{day}]_[{half}].csv") for half in (0, 1)]
+        halves = [pd.read_csv(path) for path in self._day_files(day)]
         return pd.concat(halves, ignore_index=True)
+
+    def _day_files(self, day: int) -> list[Path]:
+        return [self.data_dir / f"speed[{day}]_[{half}].csv" for half in (0, 1)]

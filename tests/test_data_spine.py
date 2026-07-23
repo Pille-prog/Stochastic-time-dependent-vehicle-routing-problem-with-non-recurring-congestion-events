@@ -99,6 +99,20 @@ def test_traffic_history_holds_the_instance_day(data_source: CsvDataSource) -> N
     assert len(history.instance_day_observations) == len(morning) + len(afternoon)
 
 
+def test_consumed_files_lists_every_file_the_loaders_above_actually_read(
+    data_source: CsvDataSource,
+) -> None:
+    # stdvrp.traffic.world_cache's cache-invalidation signature (ticket 03,
+    # simulation-performance) hashes exactly this list, so it must match what
+    # load_road_network/load_traffic_history/load_shortest_path_cache read.
+    assert data_source.consumed_files() == [
+        FIXTURE_DIR / "link.csv",
+        FIXTURE_DIR / "all_shortest_paths.csv",
+        FIXTURE_DIR / "speed[601]_[0].csv",
+        FIXTURE_DIR / "speed[601]_[1].csv",
+    ]
+
+
 def test_travel_data_covers_every_minute_of_the_data_span(
     travel_time_model: TravelTimeModel,
 ) -> None:

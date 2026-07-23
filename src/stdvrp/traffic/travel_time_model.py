@@ -29,7 +29,7 @@ Phase-2 deliberate fixes (ticket 12, ADR-0001 change log):
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 
@@ -59,6 +59,20 @@ class TravelTimeModel:
       coordinates, length and travel time.
     """
 
+    # The public, derived attributes a world cache snapshots (ticket 03,
+    # simulation-performance) — the single list both cache directions
+    # (_cached_state / _from_cached_state) walk, so they cannot drift apart.
+    # ``_speed_table`` is deliberately excluded: private, and only an
+    # intermediate value the six attributes above are already derived from.
+    _CACHED_STATE_ATTRS: ClassVar[tuple[str, ...]] = (
+        "mean_arc_data",
+        "speed_std",
+        "travel_data",
+        "successors",
+        "node_coordinates",
+        "event_probability",
+    )
+
     def __init__(
         self,
         road_network: RoadNetwork,
@@ -83,30 +97,25 @@ class TravelTimeModel:
             traffic_history, speed_table, max_congestion_duration
         )
 
+    def _cached_state(self) -> dict[str, Any]:
+        """This model's derived state, for ``stdvrp.traffic.world_cache`` to pickle.
+
+        The other half of :meth:`_from_cached_state` — both walk
+        ``_CACHED_STATE_ATTRS`` so the two directions cannot drift apart.
+        """
+        return {name: getattr(self, name) for name in self._CACHED_STATE_ATTRS}
+
     @classmethod
-    def _from_cached_state(
-        cls,
-        *,
-        mean_arc_data: pd.DataFrame,
-        speed_std: dict[ArcMinuteKey, float],
-        travel_data: dict[ArcMinuteKey, tuple[float, float]],
-        successors: dict[int, list[int]],
-        node_coordinates: dict[int, list[float]],
-        event_probability: dict[ArcKey, float],
-    ) -> TravelTimeModel:
+    def _from_cached_state(cls, state: dict[str, Any]) -> TravelTimeModel:
         """Rebuild from a world cache's derived attributes, bypassing the pandas pipeline.
 
-        For ``stdvrp.traffic.world_cache`` only (ticket 03): the cache stores exactly
-        these six attributes, so a cache hit skips CSV parsing and the aggregation
-        pipeline entirely rather than re-deriving them from a rebuilt speed table.
+        For ``stdvrp.traffic.world_cache`` only (ticket 03): a cache hit skips CSV
+        parsing and the aggregation pipeline entirely rather than re-deriving
+        ``_CACHED_STATE_ATTRS`` from a rebuilt speed table.
         """
         model = cls.__new__(cls)
-        model.mean_arc_data = mean_arc_data
-        model.speed_std = speed_std
-        model.travel_data = travel_data
-        model.successors = successors
-        model.node_coordinates = node_coordinates
-        model.event_probability = event_probability
+        for name in cls._CACHED_STATE_ATTRS:
+            setattr(model, name, state[name])
         return model
 
 
