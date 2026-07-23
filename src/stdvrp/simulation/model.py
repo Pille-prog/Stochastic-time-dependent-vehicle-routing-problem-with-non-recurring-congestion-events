@@ -150,10 +150,6 @@ class Model:
             self.episode_actions.append(copy.deepcopy(action))
             reward = self.transition_function(action)
             self.episode_rewards.append(reward)
-            # Preserved quirk (pending ticket 12 triage): the legacy training loop
-            # zeroes the distance-cost accumulator every step, so a training
-            # Episode ends with ``total_distance_cost`` holding 0, never the total.
-            self.total_distance_cost = 0
             self.total_state_counter += 1
 
         policy.update_W(self.episode_states, self.episode_actions, self.episode_rewards)

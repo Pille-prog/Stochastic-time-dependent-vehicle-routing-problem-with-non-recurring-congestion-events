@@ -145,8 +145,10 @@ def _episode_result(model: Model) -> EpisodeResult:
 class TrainingEpisodeResult:
     """The W produced by one training Episode plus its cost outcome.
 
-    ``episode.distance_cost`` is always 0 by the preserved legacy quirk: the
-    training loop zeroes the distance accumulator after every step.
+    ``episode.distance_cost`` is the Episode's real distance component — the
+    legacy zeroed the accumulator after every training step and always reported
+    0 (reporting only, rewards were unaffected; fixed in ticket 12, ADR-0001
+    phase-2 change log).
     """
 
     w: NDArray[np.float64]

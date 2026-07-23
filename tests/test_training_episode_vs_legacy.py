@@ -160,7 +160,6 @@ def test_chained_training_episodes_are_bit_identical(
 
         assert list(result.w) == list(legacy["w"]), f"W diverged at seed {seed}"
         assert result.episode.total_cost == legacy["total_cost"]
-        assert result.episode.distance_cost == legacy["distance_cost"]
         assert result.episode.delay_cost == legacy["delay_cost"]
         assert result.episode.earliness_cost == legacy["earliness_cost"]
         assert result.episode.overtime_cost == legacy["overtime_cost"]
@@ -170,8 +169,12 @@ def test_chained_training_episodes_are_bit_identical(
         assert result.episode.earliness_clients == legacy["earliness_clients"]
         # Both sides must consume the global streams identically (ADR-0001).
         assert ported_stream == legacy["stream"]
-        # The preserved quirk: training zeroes the distance accumulator per step.
-        assert result.episode.distance_cost == 0
+        # Phase-2 fix (ticket 12): the legacy zeroed the distance accumulator
+        # after every training step (reporting only — rewards are captured
+        # before the zeroing), so it reports 0 where the port now reports the
+        # Episode's real distance component.
+        assert legacy["distance_cost"] == 0
+        assert result.episode.distance_cost > 0
 
         # The Episode must genuinely exercise the training RNG paths: the
         # exploration gate draws once per vehicle per epoch (always), and these
