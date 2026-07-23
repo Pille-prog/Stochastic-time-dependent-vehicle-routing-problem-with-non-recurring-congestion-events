@@ -10,6 +10,7 @@ loaded via the ``benchmark_module`` fixture (conftest).
 
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -42,11 +43,13 @@ def test_main_dispatches_default_args_to_the_fixture_benchmark(
     Dispatch only (the real 20s world build is covered once above) — monkeypatch
     the heavy runner so this stays a fast CLI-wiring check.
     """
-    calls: dict[str, int] = {}
+    calls: dict[str, Any] = {}
     monkeypatch.setattr(
         benchmark_module,
         "run_fixture_benchmark",
-        lambda n_train, n_eval: calls.update(n_train=n_train, n_eval=n_eval),
+        lambda n_train, n_eval, cache_dir=None: calls.update(
+            n_train=n_train, n_eval=n_eval, cache_dir=cache_dir
+        ),
     )
-    benchmark_module.main(["--train", "3", "--eval", "7"])
-    assert calls == {"n_train": 3, "n_eval": 7}
+    benchmark_module.main(["--train", "3", "--eval", "7", "--no-cache"])
+    assert calls == {"n_train": 3, "n_eval": 7, "cache_dir": None}

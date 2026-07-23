@@ -58,7 +58,7 @@ from stdvrp.congestion import ArcProbabilityCongestionGenerator
 from stdvrp.demand import ClientGenerator
 from stdvrp.network import ShortestPathCache
 from stdvrp.simulation import run_evaluation_episode, run_training_episode
-from stdvrp.traffic import CsvDataSource, TravelTimeModel
+from stdvrp.traffic import TravelTimeModel, world_cache
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "chengdu_mini"
@@ -119,17 +119,16 @@ def fixture_config(data_dir: Path) -> ExperimentConfig:
     )
 
 
-def load_world(config: ExperimentConfig) -> tuple[World, float]:
-    """Build the world from ``config``; return it with the world-load wall-clock."""
+def load_world(config: ExperimentConfig, *, cache_dir: Path | None = None) -> tuple[World, float]:
+    """Build the world from ``config``; return it with the world-load wall-clock.
+
+    ``cache_dir`` (ticket 03) opts into the binary world cache: ``None`` parses
+    the CSVs fresh, exactly as before; a directory reuses a matching snapshot.
+    """
     started = time.perf_counter()
-    source = CsvDataSource.from_config(config)
-    travel_time_model = TravelTimeModel(
-        source.load_road_network(),
-        source.load_traffic_history(),
-        config.max_congestion_duration,
-        horizon_start_minute=config.horizon_start_minute,
-    )
-    shortest_path_cache = source.load_shortest_path_cache()
+    loaded = world_cache.load_world(config, cache_dir=cache_dir)
+    travel_time_model = loaded.travel_time_model
+    shortest_path_cache = loaded.shortest_path_cache
     congestion_generator = ArcProbabilityCongestionGenerator(
         event_probability=travel_time_model.event_probability,
         successors=travel_time_model.successors,
@@ -300,13 +299,13 @@ def _print_table(rows: list[tuple[str, str]]) -> None:
         print(f"  {label.ljust(width)}  {value}")
 
 
-def run_fixture_benchmark(n_train: int, n_eval: int) -> None:
+def run_fixture_benchmark(n_train: int, n_eval: int, cache_dir: Path | None = None) -> None:
     """The committed mini-fixture benchmark: world load + N train + N eval."""
     with tempfile.TemporaryDirectory(prefix="benchmark_world_") as tmp:
         data_dir = build_fixture_data_dir(Path(tmp))
         config = fixture_config(data_dir)
         print(f"building the mini-fixture world ({len(LEGACY_DAYS)} day-copies) ...", flush=True)
-        world, load_seconds = load_world(config)
+        world, load_seconds = load_world(config, cache_dir=cache_dir)
 
         train_seeds = [config.first_train_seed + i for i in range(n_train)]
         eval_seeds = list(config.evaluation_seeds[:n_eval])
@@ -331,12 +330,20 @@ def run_fixture_benchmark(n_train: int, n_eval: int) -> None:
     )
 
 
-def run_config_baseline(config_path: Path, full_config_path: Path | None, with_test: bool) -> None:
+def run_config_baseline(
+    config_path: Path,
+    full_config_path: Path | None,
+    with_test: bool,
+    cache_dir: Path | None = None,
+) -> None:
     """The scaled real-dataset baseline: time each phase, optionally project the full run."""
     config = ExperimentConfig.from_yaml(config_path)
     print(f"config: {config_path}")
-    print("loading world (the full Chengdu archive takes minutes) ...", flush=True)
-    world, load_seconds = load_world(config)
+    print(
+        "loading world (the full Chengdu archive takes minutes, or seconds warm-cached) ...",
+        flush=True,
+    )
+    world, load_seconds = load_world(config, cache_dir=cache_dir)
     print(f"world loaded in {load_seconds:.1f}s", flush=True)
 
     train_seeds = [config.first_train_seed + i for i in range(config.total_train_iterations)]
@@ -432,13 +439,31 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="full config to project the full-run wall-clock from the scaled measurements",
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=world_cache.default_cache_dir(),
+        help=(
+            "binary world cache directory, ticket 03 (default: %(default)s, "
+            "or STDVRP_WORLD_CACHE_DIR)"
+        ),
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="always rebuild the world from the CSVs and do not write the cache",
+    )
     args = parser.parse_args(argv)
+    cache_dir = None if args.no_cache else args.cache_dir
 
     if args.config is None:
-        run_fixture_benchmark(args.train, args.eval)
+        run_fixture_benchmark(args.train, args.eval, cache_dir=cache_dir)
     else:
         run_config_baseline(
-            args.config, args.project, with_test=args.test or args.project is not None
+            args.config,
+            args.project,
+            with_test=args.test or args.project is not None,
+            cache_dir=cache_dir,
         )
 
 

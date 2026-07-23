@@ -83,6 +83,32 @@ class TravelTimeModel:
             traffic_history, speed_table, max_congestion_duration
         )
 
+    @classmethod
+    def _from_cached_state(
+        cls,
+        *,
+        mean_arc_data: pd.DataFrame,
+        speed_std: dict[ArcMinuteKey, float],
+        travel_data: dict[ArcMinuteKey, tuple[float, float]],
+        successors: dict[int, list[int]],
+        node_coordinates: dict[int, list[float]],
+        event_probability: dict[ArcKey, float],
+    ) -> TravelTimeModel:
+        """Rebuild from a world cache's derived attributes, bypassing the pandas pipeline.
+
+        For ``stdvrp.traffic.world_cache`` only (ticket 03): the cache stores exactly
+        these six attributes, so a cache hit skips CSV parsing and the aggregation
+        pipeline entirely rather than re-deriving them from a rebuilt speed table.
+        """
+        model = cls.__new__(cls)
+        model.mean_arc_data = mean_arc_data
+        model.speed_std = speed_std
+        model.travel_data = travel_data
+        model.successors = successors
+        model.node_coordinates = node_coordinates
+        model.event_probability = event_probability
+        return model
+
 
 def _aggregate_speed_statistics(history: TrafficHistory) -> pd.DataFrame:
     """Mean and std of the km/min speed per (Period, Link) over all configured days.

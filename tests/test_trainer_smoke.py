@@ -21,6 +21,7 @@ import pytest
 
 import characterization_world
 from stdvrp.config import ExperimentConfig
+from stdvrp.traffic import world_cache
 from stdvrp.training import (
     ActionCountReport,
     EvaluationBlock,
@@ -136,8 +137,11 @@ def test_entry_script_wires_config_to_trainer(
             self.config = config
 
         @classmethod
-        def from_config(cls, config: ExperimentConfig, log: Any = None) -> "TrainerStub":
+        def from_config(
+            cls, config: ExperimentConfig, cache_dir: Any = None, log: Any = None
+        ) -> "TrainerStub":
             calls["config"] = config
+            calls["cache_dir"] = cache_dir
             return cls(config)
 
         def run(self, output_dir: Path) -> ExperimentResult:
@@ -151,6 +155,54 @@ def test_entry_script_wires_config_to_trainer(
 
     assert calls["config"].instance_day == 601
     assert calls["output_dir"] == tmp_path / "out"
+    assert calls["cache_dir"] == world_cache.default_cache_dir()
     output = capsys.readouterr().out
     assert "best evaluation mean cost: 15.0000" in output
     assert "final test actions=2: mean cost 15.0000 (std 5.0000)" in output
+
+
+def test_entry_script_no_cache_flag_disables_the_world_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--no-cache`` opts out of the binary world cache (ticket 03)."""
+    spec = importlib.util.spec_from_file_location(
+        "chengdu_run", REPO_ROOT / "experiments" / "chengdu" / "run.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    w = np.array([1.0])
+    fake_result = ExperimentResult(
+        training=TrainingResult(w_trajectory=(w,), evaluations=(), newest_w=None, best_w=None),
+        test=(),
+        tested_w=w,
+    )
+    calls: dict[str, Any] = {}
+
+    class TrainerStub:
+        def __init__(self, config: ExperimentConfig) -> None:
+            self.config = config
+
+        @classmethod
+        def from_config(
+            cls, config: ExperimentConfig, cache_dir: Any = None, log: Any = None
+        ) -> "TrainerStub":
+            calls["cache_dir"] = cache_dir
+            return cls(config)
+
+        def run(self, output_dir: Path) -> ExperimentResult:
+            return fake_result
+
+    monkeypatch.setattr(module, "Trainer", TrainerStub)
+    module.main(
+        [
+            "--config",
+            str(FIXTURE_DIR / "config.yaml"),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--no-cache",
+        ]
+    )
+
+    assert calls["cache_dir"] is None

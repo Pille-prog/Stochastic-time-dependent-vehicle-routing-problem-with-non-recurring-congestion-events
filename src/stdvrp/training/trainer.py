@@ -57,7 +57,7 @@ from stdvrp.congestion import ArcProbabilityCongestionGenerator, CongestionGener
 from stdvrp.demand import ClientGenerator
 from stdvrp.network import ShortestPathCache
 from stdvrp.simulation import run_evaluation_episode, run_training_episode
-from stdvrp.traffic import CsvDataSource, TravelTimeModel
+from stdvrp.traffic import TravelTimeModel, world_cache
 
 W = NDArray[np.float64]
 
@@ -159,21 +159,26 @@ class Trainer:
 
     @classmethod
     def from_config(
-        cls, config: ExperimentConfig, *, log: Callable[[str], None] | None = None
+        cls,
+        config: ExperimentConfig,
+        *,
+        cache_dir: Path | None = None,
+        log: Callable[[str], None] | None = None,
     ) -> Trainer:
-        """Load the world from the config's DataSource and wire the Trainer."""
-        source = CsvDataSource.from_config(config)
-        travel_time_model = TravelTimeModel(
-            source.load_road_network(),
-            source.load_traffic_history(),
-            config.max_congestion_duration,
-            horizon_start_minute=config.horizon_start_minute,
-        )
+        """Load the world from the config's DataSource and wire the Trainer.
+
+        ``cache_dir`` (ticket 03, simulation-performance) opts into the binary
+        world cache: ``None`` (the default) parses the CSVs fresh every call,
+        exactly as before; a directory reuses a matching prior snapshot instead
+        of re-parsing, and writes one on a miss. See ``stdvrp.traffic.world_cache``.
+        """
+        world = world_cache.load_world(config, cache_dir=cache_dir)
+        travel_time_model = world.travel_time_model
         return cls(
             config,
             client_generator=ClientGenerator.from_config(config),
             travel_time_model=travel_time_model,
-            shortest_path_cache=source.load_shortest_path_cache(),
+            shortest_path_cache=world.shortest_path_cache,
             congestion_generator=ArcProbabilityCongestionGenerator(
                 event_probability=travel_time_model.event_probability,
                 successors=travel_time_model.successors,
@@ -272,18 +277,14 @@ class Trainer:
             for seed, vehicle_count in zip(
                 config.test_seeds, config.test_vehicle_counts, strict=True
             ):
-                totals = dict.fromkeys(EPISODE_METRICS, 0.0)
-                for _ in range(config.test_episodes):
-                    episode = run_evaluation_episode(
-                        seed=seed,
-                        W=w,
-                        vehicle_count=vehicle_count,
-                        number_actions_test=vehicle_count + action_count,
-                        **self._episode_kwargs(),
-                    )
-                    for name in EPISODE_METRICS:
-                        totals[name] += float(getattr(episode, name))
-                metrics = {name: value / config.test_episodes for name, value in totals.items()}
+                episode = run_evaluation_episode(
+                    seed=seed,
+                    W=w,
+                    vehicle_count=vehicle_count,
+                    number_actions_test=vehicle_count + action_count,
+                    **self._episode_kwargs(),
+                )
+                metrics = {name: float(getattr(episode, name)) for name in EPISODE_METRICS}
                 per_seed.append(SeedTestResult(seed, vehicle_count, metrics))
             summary = {
                 name: _mean_and_std([entry.metrics[name] for entry in per_seed])

@@ -7,8 +7,11 @@ and writes ``results.json`` plus the training plot to a per-run output directory
     uv run python experiments/chengdu/run.py [--config config.yaml] [--output-dir DIR]
 
 The default output directory is ``runs/<timestamp>`` next to the config file
-(gitignored). Loading the full Chengdu data takes ~15 minutes; the training run
-itself depends on ``total_train_iterations``.
+(gitignored). Loading the full Chengdu data cold takes ~15 minutes; the binary
+world cache (ticket 03, simulation-performance) makes a repeat run with the same
+data and world-shaping config load in seconds instead — on by default, see
+``--cache-dir``/``--no-cache``. The training run itself depends on
+``total_train_iterations``.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from stdvrp.config import ExperimentConfig
+from stdvrp.traffic import world_cache
 from stdvrp.training import Trainer
 
 
@@ -35,16 +39,31 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="per-run output directory (default: runs/<timestamp> next to the config)",
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=world_cache.default_cache_dir(),
+        help=(
+            "binary world cache directory, ticket 03 (default: %(default)s, "
+            "or STDVRP_WORLD_CACHE_DIR)"
+        ),
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="always rebuild the world from the CSVs and do not write the cache",
+    )
     args = parser.parse_args(argv)
 
     config = ExperimentConfig.from_yaml(args.config)
     output_dir = args.output_dir
     if output_dir is None:
         output_dir = args.config.parent / "runs" / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    cache_dir = None if args.no_cache else args.cache_dir
 
     print(f"config: {args.config}")
-    print("loading world data (the full Chengdu archive takes ~15 minutes)...")
-    trainer = Trainer.from_config(config, log=print)
+    print("loading world data (the full Chengdu archive takes ~15 minutes cold)...")
+    trainer = Trainer.from_config(config, cache_dir=cache_dir, log=print)
     result = trainer.run(output_dir)
 
     best = result.training.best_mean_cost
