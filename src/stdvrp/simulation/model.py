@@ -60,7 +60,7 @@ class Model:
         self.state = state
         self.policy = policy
         self.travel_time_model = travel_time_model
-        self.spm = shortest_path_cache
+        self.shortest_path_cache = shortest_path_cache
         self.time_windows = time_windows
         self.number_vehicles = number_vehicles
         self.horizon_start_minute = horizon_start_minute
@@ -89,7 +89,9 @@ class Model:
         self.action: list[int] = [0 for _ in range(number_vehicles)]
         self.vehicles_shortest_path: list[list[float]] = [[0, 0] for _ in range(number_vehicles)]
         self.node_time_arrival: list[float] = [horizon_start_minute for _ in range(number_vehicles)]
-        self.tau_salida: list[float] = [horizon_start_minute for _ in range(number_vehicles)]
+        # Per-vehicle departure time (legacy ``tau_salida``): the tau at which the
+        # vehicle leaves its current node once service there is finished.
+        self.departure_tau: list[float] = [horizon_start_minute for _ in range(number_vehicles)]
         self.tau_vehicle_horizon_change: list[float] = [
             horizon_start_minute for _ in range(number_vehicles)
         ]
@@ -164,7 +166,7 @@ class Model:
             elif self.tau_multiplicator > min_travel_time:
                 # A vehicle finishes a Client's service time.
                 if (
-                    self.tau_salida[min_travel_time_vehicle] == min_travel_time
+                    self.departure_tau[min_travel_time_vehicle] == min_travel_time
                     and len(self.vehicles_shortest_path[min_travel_time_vehicle]) <= 2
                 ):
                     self.state.vehicle_completing_service[min_travel_time_vehicle] = 0
@@ -200,7 +202,7 @@ class Model:
                             self.total_overtime_vehicles += 1
 
                         self.node_time_arrival[min_travel_time_vehicle] = float("inf")
-                        self.tau_salida[min_travel_time_vehicle] = 0
+                        self.departure_tau[min_travel_time_vehicle] = 0
                         self.total_cost += self.transition_cost
                         self.end_transition_function = 2
 
@@ -243,6 +245,9 @@ class Model:
                     if self.tau_multiplicator >= 1150:
                         self.terminate_state_passing_horizon()
 
+                    # Preserved quirk: the transition only ends on epochs where the
+                    # shifted clock (tau + 178) is a multiple of 6 — same arithmetic
+                    # family as the congestion gate above.
                     time = self.state.tau_episode + 180 - 2
                     if time % 6 == 0:
                         self.end_transition_function = 2
@@ -254,7 +259,7 @@ class Model:
         """Ports ``calculate_action_route``: reroute vehicles whose decision changed."""
         for vehicle in range(len(action)):
             # Still serving a Client: only refresh the velocity bookkeeping.
-            if self.tau_salida[vehicle] > self.state.tau_episode:
+            if self.departure_tau[vehicle] > self.state.tau_episode:
                 self.create_and_actualize_state_velocity(vehicle)
 
             elif (
@@ -268,17 +273,17 @@ class Model:
             ] != float("inf"):
                 vehicle_position = self.state.vehicle_position[vehicle]
                 vehicle_destination = action[vehicle]
-                if self.tau_salida[vehicle] == self.state.tau_episode:
+                if self.departure_tau[vehicle] == self.state.tau_episode:
                     # At a node: route straight from the current position.
                     shortest_path = list(
-                        self.spm.path_between(vehicle_position, vehicle_destination).nodes
+                        self.shortest_path_cache.path_between(vehicle_position, vehicle_destination).nodes
                     )
                     self.vehicles_shortest_path[vehicle] = shortest_path[:]
                     self.create_and_actualize_state_velocity(vehicle)
                 else:
                     # Mid-arc: finish the current arc, then follow the new route.
                     shortest_path = list(
-                        self.spm.path_between(
+                        self.shortest_path_cache.path_between(
                             self.vehicles_shortest_path[vehicle][1], vehicle_destination
                         ).nodes
                     )
@@ -293,10 +298,10 @@ class Model:
         if self.state.tau_episode > 1198:
             self.terminate_state_passing_horizon()
 
-        elif self.tau_salida[vehicle] > self.state.tau_episode:
+        elif self.departure_tau[vehicle] > self.state.tau_episode:
             self.state.observed_velocity[vehicle].pop(0)
             self.state.observed_velocity[vehicle].append(0)
-            self.node_time_arrival[vehicle] = self.tau_salida[vehicle]
+            self.node_time_arrival[vehicle] = self.departure_tau[vehicle]
             self.tau_vehicle_horizon_change[vehicle] = self.state.tau_episode
 
         else:
@@ -309,7 +314,7 @@ class Model:
             self.state.observed_velocity[vehicle].pop(0)
             self.state.observed_velocity[vehicle].append(velocity)
             self.node_time_arrival[vehicle] = self.state.tau_episode + travel_time
-            self.tau_salida[vehicle] = self.state.tau_episode
+            self.departure_tau[vehicle] = self.state.tau_episode
             self.tau_vehicle_horizon_change[vehicle] = self.state.tau_episode
 
     def vehicle_reaches_client(self, min_travel_time_vehicle: int, min_travel_time: float) -> None:
@@ -339,7 +344,7 @@ class Model:
 
         self.vehicle_distance_transition_cost(min_travel_time)
 
-        self.tau_salida[min_travel_time_vehicle] = self.state.tau_episode + self.service_time
+        self.departure_tau[min_travel_time_vehicle] = self.state.tau_episode + self.service_time
         self.state.vehicle_completing_service[min_travel_time_vehicle] = 1
         self.tau_vehicle_horizon_change[min_travel_time_vehicle] = self.state.tau_episode
         self.distance_arc_distance_travelled[min_travel_time_vehicle] = 0
@@ -373,7 +378,7 @@ class Model:
             self.state.vehicle_position[min_travel_time_vehicle] = self.vehicles_shortest_path[
                 min_travel_time_vehicle
             ][1]
-            self.tau_salida[min_travel_time_vehicle] = self.state.tau_episode
+            self.departure_tau[min_travel_time_vehicle] = self.state.tau_episode
             self.tau_vehicle_horizon_change[min_travel_time_vehicle] = self.state.tau_episode
             self.distance_arc_distance_travelled[min_travel_time_vehicle] = 0
             self.end_transition_function = 2
@@ -427,12 +432,12 @@ class Model:
 
     def time_horizon_actualization(self, vehicle: int) -> None:
         """Ports ``time_horizon_actualization``: re-sample the current arc's velocity."""
-        if self.tau_salida[vehicle] > self.state.tau_episode:
+        if self.departure_tau[vehicle] > self.state.tau_episode:
             random_velocity: float = 0
             self.tau_vehicle_horizon_change[vehicle] = self.state.tau_episode
             self.state.observed_velocity[vehicle].pop(0)
             self.state.observed_velocity[vehicle].append(random_velocity)
-            self.node_time_arrival[vehicle] = self.tau_salida[vehicle]
+            self.node_time_arrival[vehicle] = self.departure_tau[vehicle]
 
         elif self.node_time_arrival[vehicle] != float("inf"):
             _, random_velocity, arc_length = self.create_random_velocity(
@@ -490,17 +495,11 @@ class Model:
         key_minute = (node_start, node_end, minute_start)
 
         if key_arc not in self.congested_arcs:
-            if key_minute not in self.sampled_arc_velocities:
-                return self.generate_normal_velocity(node_start, node_end, minute_start)
-            velocity, travel_time, length = self.sampled_arc_velocities[key_minute]
-            return travel_time, velocity, length
+            return self._memoized_normal_velocity(key_minute)
 
         event_end = self.congested_arcs[key_arc][1]
         if tau_episode >= event_end:
-            if key_minute not in self.sampled_arc_velocities:
-                return self.generate_normal_velocity(node_start, node_end, minute_start)
-            velocity, travel_time, length = self.sampled_arc_velocities[key_minute]
-            return travel_time, velocity, length
+            return self._memoized_normal_velocity(key_minute)
 
         length, speed = self.travel_time_model.travel_data[key_minute]  # type: ignore[index]
         congestion_multiplier = self.congested_arcs[key_arc][0]
@@ -508,10 +507,21 @@ class Model:
         travel_time = length / velocity
         return travel_time, velocity, length
 
+    def _memoized_normal_velocity(self, key: ArcMinuteKey) -> tuple[float, float, float]:
+        """Return the memoized sample for the arc-minute, drawing a fresh one if absent."""
+        if key not in self.sampled_arc_velocities:
+            return self.generate_normal_velocity(*key)
+        velocity, travel_time, length = self.sampled_arc_velocities[key]
+        return travel_time, velocity, length
+
     def generate_normal_velocity(
         self, node_start: float, node_end: float, minute_start: int
     ) -> tuple[float, float, float]:
-        """Ports ``generate_normal_velocity``: one global ``random.gauss`` per arc-minute."""
+        """Ports ``generate_normal_velocity``: one global ``random.gauss`` per arc-minute.
+
+        ``minute_start`` must already be the even-floored minute; the legacy re-floored
+        it internally, but the only caller (``create_random_velocity``) does so first.
+        """
         key = (node_start, node_end, minute_start)
         length, speed = self.travel_time_model.travel_data[key]  # type: ignore[index]
         std = self.travel_time_model.speed_std[key]  # type: ignore[index]

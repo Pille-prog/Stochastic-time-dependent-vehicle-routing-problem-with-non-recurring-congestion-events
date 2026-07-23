@@ -26,6 +26,11 @@ Preserved legacy quirks (do not fix before Phase 2; ADR-0001):
   client count; ``late_count`` divides by 13.
 - The candidate action set is deduplicated via ``list(set(...))`` — CPython set
   iteration order for these int node ids is deterministic and preserved in-process.
+- Depot-idle cutoffs are inconsistent literals that ignore the configured horizon:
+  ``tau > 350`` in ``_select_vehicle_possible_actions`` vs ``tau > 310`` in the
+  delayed/shortest-distance classifiers.
+- ``_extract_state_action_features`` emits a permanently-zero second feature; it
+  pads W to its legacy 19 components.
 """
 
 from __future__ import annotations
@@ -62,7 +67,7 @@ class MonteCarloPolicy(Policy):
         W: NDArray[np.float64] | None,
     ) -> None:
         self.number_vehicles = number_vehicles
-        self.spm = shortest_path_cache
+        self.shortest_path_cache = shortest_path_cache
         self.time_windows = time_windows
         self.state = state
         self.number_clients = number_clients
@@ -165,7 +170,7 @@ class MonteCarloPolicy(Policy):
             clients = self.state.clients_not_visited
             travel_times = [
                 (
-                    self.spm.path_between(
+                    self.shortest_path_cache.path_between(
                         self.state.vehicle_position[vehicle], client
                     ).average_minutes,
                     client,
@@ -185,7 +190,7 @@ class MonteCarloPolicy(Policy):
             possible_actions = list(set(possible_actions))
 
             if (
-                self.spm.path_between(
+                self.shortest_path_cache.path_between(
                     self.state.vehicle_position[vehicle], self.depot
                 ).average_minutes
                 + self.state.tau_episode
@@ -216,7 +221,7 @@ class MonteCarloPolicy(Policy):
                 if vehicle_position == self.depot and self.state.tau_episode > 310:
                     continue
 
-                travel_time = self.spm.path_between(vehicle_position, client).average_minutes
+                travel_time = self.shortest_path_cache.path_between(vehicle_position, client).average_minutes
                 if travel_time < min_travel_time:
                     min_travel_time = travel_time
                     assigned_vehicle = vehicle_idx
@@ -249,7 +254,7 @@ class MonteCarloPolicy(Policy):
                     continue
 
                 total_distance = sum(
-                    self.spm.path_between(vehicle_position, client).average_minutes
+                    self.shortest_path_cache.path_between(vehicle_position, client).average_minutes
                     for client in self.state.clients_not_visited
                 )
                 vehicle_distances.append((total_distance, vehicle_idx))
@@ -258,7 +263,7 @@ class MonteCarloPolicy(Policy):
 
             for _, vehicle_idx in closest_two_vehicles:
                 for client in self.state.clients_not_visited:
-                    travel_time = self.spm.path_between(
+                    travel_time = self.shortest_path_cache.path_between(
                         self.state.vehicle_position[vehicle_idx], client
                     ).average_minutes
                     self.shortest_distance_clients[vehicle_idx].append((travel_time, client))
@@ -270,7 +275,7 @@ class MonteCarloPolicy(Policy):
                 if vehicle_position == self.depot and self.state.tau_episode > 310:
                     continue
 
-                travel_time = self.spm.path_between(vehicle_position, client).average_minutes
+                travel_time = self.shortest_path_cache.path_between(vehicle_position, client).average_minutes
                 distances.append((travel_time, vehicle_idx))
 
             closest_vehicle = min(distances)
@@ -348,7 +353,7 @@ class MonteCarloPolicy(Policy):
     def _extract_state_action_features(self, action: list[int]) -> None:
         """Ports the live ``extract_state_action_features`` (7 features)."""
         cg_clients = self.time_windows
-        spm = self.spm
+        paths = self.shortest_path_cache
         state = self.state
         tau = state.tau_episode
         clients_all = state.clients_not_visited
@@ -368,10 +373,12 @@ class MonteCarloPolicy(Policy):
 
         late_count = sum(1 for c in clients_left if tau > cg_clients[c][1])
         features.append(late_count / 13)
+        # Preserved quirk: a permanently-zero feature. Removing it would shrink W
+        # from 19 components and invalidate every stored weight vector.
         features.append(0)
 
         total_dist = sum(
-            spm.path_between(state.vehicle_position[i], action[i]).length for i in range(n_veh)
+            paths.path_between(state.vehicle_position[i], action[i]).length for i in range(n_veh)
         )
         features.append(total_dist / 100.0)
 
@@ -379,7 +386,7 @@ class MonteCarloPolicy(Policy):
         delay_cost = 0.0
         for i, a in enumerate(action):
             if a in clients_all and a != depot:
-                travel_time = spm.path_between(state.vehicle_position[i], a).average_minutes
+                travel_time = paths.path_between(state.vehicle_position[i], a).average_minutes
                 est_arrival = tau + travel_time
                 earl_tw, due_tw = cg_clients[a]
 
@@ -395,8 +402,8 @@ class MonteCarloPolicy(Policy):
         for veh in range(n_veh):
             for _, client in self.vehicle_to_clients[veh]:
                 if client not in action:
-                    t1 = spm.path_between(state.vehicle_position[veh], action[veh]).average_minutes
-                    t2 = spm.path_between(action[veh], client).average_minutes
+                    t1 = paths.path_between(state.vehicle_position[veh], action[veh]).average_minutes
+                    t2 = paths.path_between(action[veh], client).average_minutes
                     est = tau + t1 + t2 + service_time
                     _, due_tw = cg_clients[client]
                     if est > due_tw:
@@ -407,11 +414,11 @@ class MonteCarloPolicy(Policy):
         overtime_cost = 0.0
         for i, a in enumerate(action):
             if a != depot:
-                t1 = spm.path_between(state.vehicle_position[i], a).average_minutes
-                t2 = spm.path_between(a, depot).average_minutes
+                t1 = paths.path_between(state.vehicle_position[i], a).average_minutes
+                t2 = paths.path_between(a, depot).average_minutes
                 est_ret = tau + t1 + t2 + service_time
             else:
-                est_ret = tau + spm.path_between(state.vehicle_position[i], depot).average_minutes
+                est_ret = tau + paths.path_between(state.vehicle_position[i], depot).average_minutes
 
             if est_ret > end_horizon:
                 base = end_horizon if tau < end_horizon else tau

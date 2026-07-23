@@ -16,7 +16,7 @@ compare equal to the int arc keys used elsewhere).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -48,10 +48,12 @@ class ArcProbabilityCongestionGenerator(CongestionGenerator):
     congestion_lower_bound: float
     congestion_upper_bound: float
     max_congestion_duration: int
-    # The legacy model hardcoded max_depth=3 and passed probability_input=1; the
-    # latter's only role is this generator's != 0 enablement check.
+    # The legacy model hardcoded max_depth=3. probability_input mirrors the legacy
+    # enablement argument, which was the event-probability dict itself — always
+    # ``!= 0``, so congestion was never actually disabled; a nonzero float keeps
+    # that behavior.
     max_depth: int = 3
-    probability_input: float = field(default=1.0)
+    probability_input: float = 1.0
 
     def generate(self, minute_start: float, congested_arcs: CongestedArcs) -> None:
         if self.probability_input != 0:
