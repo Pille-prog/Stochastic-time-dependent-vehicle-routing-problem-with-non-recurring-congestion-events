@@ -67,8 +67,6 @@ class TestMissingEndpoints:
         ("minute", "present_endpoint"),
         [(480, 418), (480, 542), (720, 658), (720, 842), (1020, 958), (1020, 1082)],
     )
-    def test_window_minute_with_a_missing_endpoint_gets_no_entry(
-        self, minute, present_endpoint
-    ):
+    def test_window_minute_with_a_missing_endpoint_gets_no_entry(self, minute, present_endpoint):
         lookup = _build_speed_std_lookup(make_table({minute: 0.5, present_endpoint: 0.5}))
         assert (*ARC, minute) not in lookup

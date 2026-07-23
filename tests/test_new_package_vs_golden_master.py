@@ -1,19 +1,20 @@
-"""Tickets 07/08/09 acceptance: the new package reproduces the golden master exactly.
+"""Tickets 07/08/09 acceptance: the new package reproduces its golden baseline exactly.
 
-Ticket 07 — for every golden-master test episode (full Chengdu data, marker
-``golden``): the episode total cost and all four components — distance, delay,
-earliness, overtime — plus tau, state count and the delay/earliness client counts
-must equal the stored values bit-for-bit. W is injected from the stored
-post-training trajectory, exactly as the legacy's ``Best_W`` drives its test
-episodes.
+For every stored test episode (full Chengdu data, marker ``golden``): the episode
+total cost and all four components — distance, delay, earliness, overtime — plus
+tau, state count and the delay/earliness client counts must equal the stored
+values bit-for-bit; re-running the stored training protocol (warm-up learning
+rate on the first Episode, capture-convention exploration seeding) must
+reproduce the stored W trajectory after every Episode; and one Trainer.run()
+driven by an ExperimentConfig assembled from the stored protocol must reproduce
+the whole baseline and write the per-run outputs.
 
-Ticket 08 — re-running the stored training protocol through the new package
-(warm-up learning rate on the first Episode, capture-convention exploration
-seeding) must reproduce the stored W trajectory bit-for-bit after every Episode.
-
-Ticket 09 — one Trainer.run() driven by an ExperimentConfig assembled from the
-stored protocol must reproduce the whole golden master — W trajectory, per-seed
-evaluation costs and every test episode — and write the per-run outputs.
+The baseline is ``chengdu_full_phase2.json`` — the ticket 12 re-baseline
+(``scripts/rebaseline_golden_master.py``): the phase-2 fixes deliberately change
+episode outcomes (ADR-0001 change log), so these tests pin the NEW package's
+behavior under the legacy capture's protocol. The legacy capture itself
+(``chengdu_full.json``) stays frozen and is still verified against the monolith
+by ``tests/test_golden_master.py``.
 
 Skips when the local dataset is absent (e.g. CI); building the world through the
 new package re-reads the 88 speed files and the 907 MB path cache (~15 minutes).
@@ -36,7 +37,7 @@ from stdvrp.traffic import CsvDataSource, TravelTimeModel
 from stdvrp.training import Trainer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "golden_master" / "chengdu_full.json"
+GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "golden_master" / "chengdu_full_phase2.json"
 LEGACY_DAYS = tuple(range(601, 631)) + tuple(range(701, 715))
 
 spec = importlib.util.spec_from_file_location(
@@ -52,7 +53,7 @@ pytestmark = pytest.mark.golden
 @pytest.fixture(scope="module")
 def golden() -> dict[str, Any]:
     if not GOLDEN_PATH.exists():
-        pytest.skip("golden master not captured yet (scripts/capture_golden_master.py)")
+        pytest.skip("phase-2 baseline not generated yet (scripts/rebaseline_golden_master.py)")
     return json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
 
 
@@ -109,8 +110,9 @@ def test_w_trajectory_matches_exactly(golden: dict[str, Any], world: dict[str, A
     expected_trajectory = golden["training"]["w_trajectory"]
 
     w = None
-    # Legacy warm-up quirk (pending ticket 12 triage): the first training Episode
-    # always runs with the hardcoded tiny rate, later ones with the configured one.
+    # Legacy warm-up quirk (opt-in since ticket 12; the protocol supplies it):
+    # the first training Episode runs with the tiny warm-up rate, later ones
+    # with the configured one.
     learning_rate = protocol["warmup_learning_rate"]
     produced = []
     for train_seed in protocol["train_seeds"]:

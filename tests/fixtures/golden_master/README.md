@@ -1,5 +1,17 @@
 # Golden master (legacy monolith, full Chengdu data)
 
+Two baselines live here since ticket 12:
+
+- `chengdu_full.json` — the frozen legacy capture (described below). Still
+  verified against the monolith by `tests/test_golden_master.py`; never
+  re-captured.
+- `chengdu_full_phase2.json` — the same protocol run through the NEW package
+  (`scripts/rebaseline_golden_master.py`). The phase-2 fixes deliberately
+  change episode outcomes (ADR-0001 change log), so the new-package golden
+  tests (`tests/test_new_package_vs_golden_master.py`) compare against this
+  file. Regenerate it (and commit the result with its justification) whenever
+  a later phase-2 change deliberately shifts outcomes again.
+
 `chengdu_full.json` pins the exact behavior of the untouched legacy script
 (`Main_Chengdu_Sirve_2_Acciones_Sin_Algunas_Variables.py`, frozen at the
 `legacy-monolith` tag; since ticket 14 the capture and tests extract it from
