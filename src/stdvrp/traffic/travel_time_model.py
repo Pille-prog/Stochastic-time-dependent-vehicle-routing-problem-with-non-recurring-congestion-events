@@ -19,13 +19,12 @@ Known preserved behaviors (do not "fix" before Phase 2, see ADR-0001):
 - The per-arc event probability divides by the day count (the legacy hardcoded 44,
   its day count); identical whenever all 44 archive days are configured.
 
-- The standard-deviation lookup stores the *raw* std for minutes 421-539 (the
-  interpolated value is computed and discarded).
-
 Phase-2 deliberate fixes (ticket 12, ADR-0001 change log):
 
 - A (Period, Link) with a single observation gets std 0.0, not NaN (the legacy
   ``dropna()`` no-op let ``random.gauss(speed, nan)`` produce NaN velocities).
+- Minutes 421-539 store the interpolated std like the other two windows (the
+  legacy computed the blend into a discarded row copy and kept the raw value).
 """
 
 from __future__ import annotations
@@ -230,9 +229,11 @@ def _interpolated_speed(row: pd.Series[Any], speed_lookup: dict[Any, float]) -> 
 def _build_speed_std_lookup(speed_table: pd.DataFrame) -> dict[ArcMinuteKey, float]:
     """(node_start, node_end, minute) -> speed std, ports ``get_standard_deviation``.
 
-    Legacy bugs preserved (ADR-0001): in the 420-540 window the interpolated value is
-    discarded and the raw std stored instead; every endpoint lookup is offset by two
-    minutes (418/542, 658/842, 958/1082).
+    Preserved legacy behavior (ADR-0001): every endpoint lookup is offset by two
+    minutes (418/542, 658/842, 958/1082 — the last/first observed minutes around
+    each data gap). Phase-2 fix (ticket 12, ADR-0001 change log): the 420-540
+    window stores the blend like the other two — the legacy computed it into a
+    discarded row copy and kept the raw gap-filled value.
     """
     std_lookup = speed_table.set_index(["Node_Start", "Node_End", "Minute_start"])[
         "speed_std"
@@ -243,12 +244,12 @@ def _build_speed_std_lookup(speed_table: pd.DataFrame) -> dict[ArcMinuteKey, flo
         minute_start = row["Minute_start"]
 
         if 420 < minute_start < 540:
+            ratio_540 = (minute_start - 420) / (540 - 420)
+            ratio_420 = 1 - ratio_540
             sp_420 = std_lookup.get((row["Node_Start"], row["Node_End"], 418))
             sp_540 = std_lookup.get((row["Node_Start"], row["Node_End"], 542))
             if sp_420 is not None and sp_540 is not None:
-                # The legacy computed the blend into a discarded row copy and stored
-                # the raw value; the blend is therefore not computed at all here.
-                result[key] = row["speed_std"]
+                result[key] = (sp_420 * ratio_420) + (ratio_540 * sp_540)
         elif 660 < minute_start < 840:
             ratio_840 = (minute_start - 660) / (840 - 660)
             ratio_660 = 1 - ratio_840

@@ -34,6 +34,7 @@ Also noted: the legacy `test_model` report includes three mean-time metrics (`me
 Each entry is a deliberate behavior change with its own test, applied after the user triaged the full candidate list (2026-07-23). Where a fix changes episode outcomes, the golden master is re-baselined from the new code (the exact legacy capture remains in git history) and the vs-legacy comparisons compensate exactly computable deltas.
 
 1. **Single-observation speed std is 0.0, not NaN** (`_aggregate_speed_statistics`). A (Period, Link) seen on one day has a NaN pandas std (ddof=1); the legacy `dropna()` that should have removed those rows discarded its result, so `random.gauss(speed, nan)` produced NaN velocities. A single observation now means a deterministic speed. Multi-observation stds are bit-identical; golden outcomes are unaffected unless an episode traversed a NaN-std arc (the golden capture's finite costs show none did).
+2. **The 420-540 std window blends like the other two** (`_build_speed_std_lookup`). The legacy computed the interpolation into a discarded row copy and stored the raw gap-filled std for minutes 421-539. The window now stores the blend of the (off-by-two, preserved) 418/542 endpoints, mirroring the 660-840 and 960-1080 branches. Changes every stochastic velocity drawn in that window on real multi-day data → golden re-baseline; the 44-copy characterization world is unaffected (all stds 0.0), so the vs-legacy gates stay bit-exact.
 
 ## Addendum (2026-07-23, ticket 14): the monolith left the working tree
 
