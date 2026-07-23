@@ -16,7 +16,6 @@ The 44-day exact-equality run against the unmodified legacy classes lives in
 tests/test_travel_time_model_vs_legacy.py.
 """
 
-import importlib.util
 import math
 from pathlib import Path
 
@@ -27,7 +26,6 @@ from stdvrp.network import RoadNetwork
 from stdvrp.traffic import CsvDataSource, TravelTimeModel, period_start_minute
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "chengdu_mini"
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Arc of fixture Link 1 (verified unique: the fixture has no duplicate arcs).
 ARC_START, ARC_END, ARC_LINK = 0, 4, 1
@@ -202,26 +200,6 @@ def test_mean_arc_data_is_internally_consistent(travel_time_model: TravelTimeMod
     table = travel_time_model.mean_arc_data
     assert len(table) == 116
     assert (table["Travel_Time"] == table["Length"] / table["Speed"]).all()
-
-
-def test_entry_script_builds_the_instance_and_prints_a_summary(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    spec = importlib.util.spec_from_file_location(
-        "chengdu_run", REPO_ROOT / "experiments" / "chengdu" / "run.py"
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    module.main(["--config", str(FIXTURE_DIR / "config.yaml")])
-
-    output = capsys.readouterr().out
-    assert "road network: 116 arcs" in output
-    assert "instance day 601" in output
-    assert "event probabilities: 116 arcs" in output
-    assert "shortest path cache: 2025 node-client pairs" in output
-    assert "demand (seed 1000):" in output
 
 
 def test_data_source_loads_the_shortest_path_cache(data_source: CsvDataSource) -> None:

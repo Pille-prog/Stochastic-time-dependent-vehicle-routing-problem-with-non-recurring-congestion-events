@@ -19,3 +19,12 @@ The legacy monolith (`Main_Chengdu_Sirve_2_Acciones_Sin_Algunas_Variables.py`, ~
 ## Addendum (2026-07-21, ticket 03): golden-master venue
 
 The original plan ("golden master captured on a small committed fixture") proved impossible: the legacy hardcodes a 1,900-node client universe (`random.sample(range(1, 1900))`), a 60-client minimum, a vehicle-ratio table defined only for 150/250 mean clients, and aggregates over 88 speed files plus a 907 MB precomputed path file — no sub-megabyte fixture can satisfy that. Revised split: the committed mini fixture (45 nodes, day 601, <0.5 MB, regenerable via `scripts/make_fixture.py`) serves the config-driven new code's tests in CI; the exact golden master (ticket 04) runs the legacy on the full local dataset (or a large gitignored fixture from the same script), with the exact-equality test skipping when the data is absent. CI therefore guards structure and new-code behavior; exact legacy equality is verified locally where the data lives. All legacy data paths are relative, so ticket 04 can redirect them by running the script with a different working directory instead of editing code.
+
+## Addendum (2026-07-23, ticket 09): Trainer deviations from the legacy loops
+
+Two documented deviations in the ported Trainer (`src/stdvrp/training/trainer.py`), both outside the golden-master path:
+
+- **Best-W fallback.** When fewer training episodes than `test_frequency` run, no evaluation block ever executes; the legacy would then run its final test with `Best_W = []` and crash. The Trainer runs the final test with the last trained W instead. Any run whose iteration count reaches `test_frequency` is unaffected.
+- **Best-cost sentinel.** The legacy initializes `Q_pred = 1e11`; the Trainer uses `inf`. Behavior differs only if a mean evaluation cost exceeded 1e11, where the legacy would keep `Best_W = []` and crash in the final test.
+
+Also noted: the legacy `test_model` report includes three mean-time metrics (`mean_delay_time`, `mean_earliness_time`, `mean_overtime`) that ticket 07's Model port does not expose — the golden master does not pin them. The Trainer reports the nine golden-pinned metrics; resurrect the other three deliberately (with Model support and tests) if a study needs them.

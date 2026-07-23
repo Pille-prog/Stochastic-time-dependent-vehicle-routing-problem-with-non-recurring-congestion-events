@@ -1,4 +1,4 @@
-"""Tickets 07/08 acceptance: the new package reproduces the golden master exactly.
+"""Tickets 07/08/09 acceptance: the new package reproduces the golden master exactly.
 
 Ticket 07 — for every golden-master test episode (full Chengdu data, marker
 ``golden``): the episode total cost and all four components — distance, delay,
@@ -10,6 +10,10 @@ episodes.
 Ticket 08 — re-running the stored training protocol through the new package
 (warm-up learning rate on the first Episode, capture-convention exploration
 seeding) must reproduce the stored W trajectory bit-for-bit after every Episode.
+
+Ticket 09 — one Trainer.run() driven by an ExperimentConfig assembled from the
+stored protocol must reproduce the whole golden master — W trajectory, per-seed
+evaluation costs and every test episode — and write the per-run outputs.
 
 Skips when the local dataset is absent (e.g. CI); building the world through the
 new package re-reads the 88 speed files and the 907 MB path cache (~15 minutes).
@@ -23,11 +27,13 @@ from typing import Any
 import numpy as np
 import pytest
 
+from stdvrp.config import ExperimentConfig
 from stdvrp.congestion import ArcProbabilityCongestionGenerator
 from stdvrp.demand import ClientGenerator
 from stdvrp.network import ShortestPathCache
 from stdvrp.simulation import run_evaluation_episode, run_training_episode
 from stdvrp.traffic import CsvDataSource, TravelTimeModel
+from stdvrp.training import Trainer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "golden_master" / "chengdu_full.json"
@@ -136,6 +142,103 @@ def test_w_trajectory_matches_exactly(golden: dict[str, Any], world: dict[str, A
         for diff in capture.compare_results(expected, actual)
     ]
     assert not mismatches, "W trajectory mismatch:\n" + "\n".join(mismatches[:50])
+
+
+def config_from_protocol(protocol: dict[str, Any], data_dir: Path) -> ExperimentConfig:
+    """The stored capture protocol expressed as one ExperimentConfig (ticket 09).
+
+    The Trainer derives its seed sequences from start + count, so the protocol's
+    explicit lists must be contiguous ranges — asserted here rather than assumed.
+    """
+    train_seeds = protocol["train_seeds"]
+    eval_seeds = protocol["eval_seeds"]
+    assert train_seeds == list(range(train_seeds[0], train_seeds[0] + len(train_seeds)))
+    assert eval_seeds == list(range(eval_seeds[0], eval_seeds[0] + len(eval_seeds)))
+    return ExperimentConfig(
+        data_dir=data_dir,
+        links_file="link.csv",
+        shortest_paths_file="all_shortest_paths.csv",
+        instance_day=601,
+        traffic_days=LEGACY_DAYS,
+        horizon_start_minute=protocol["horizon_start_time"],
+        horizon_end_minute=protocol["horizon_end_time"],
+        # The legacy ClientGenerator hardcodes (see the ``world`` fixture).
+        mean_number_clients=protocol["mean_number_clients"],
+        client_count_stddev=30.0,
+        min_number_clients=60,
+        clients_per_vehicle=28,
+        time_window_spread=protocol["diff_TW"],
+        client_universe_seed=0,
+        client_universe_size=150,
+        client_universe_node_range=(1, 1900),
+        congestion_lower_bound=protocol["congestion_lower_bound"],
+        congestion_upper_bound=protocol["congestion_upper_bound"],
+        max_congestion_duration=protocol["max_congestion_duration"],
+        total_train_iterations=len(train_seeds),
+        # One evaluation block right after the last training episode, as captured.
+        test_frequency=len(train_seeds),
+        learning_rate=protocol["learning_rate"],
+        warmup_learning_rate=protocol["warmup_learning_rate"],
+        epsilon=protocol["epsilon"],
+        n_observed_arcs=protocol["n_arcs"],
+        first_train_seed=train_seeds[0],
+        evaluation_seed_start=eval_seeds[0],
+        evaluation_seed_count=len(eval_seeds),
+        test_episodes=1,
+        test_action_counts=tuple(protocol["test_actions"]),
+        test_seeds=tuple(protocol["test_seeds"]),
+        test_vehicle_counts=tuple(protocol["test_vehicles"]),
+        train_exploration_seed_offset=protocol["train_exploration_seed_offset"],
+        train_repair_seed_offset=protocol["train_repair_seed_offset"],
+        static_policy_mean_cost=None,
+    )
+
+
+def test_trainer_run_reproduces_the_whole_golden_master(
+    golden: dict[str, Any], data_dir: Path, world: dict[str, Any], tmp_path: Path
+) -> None:
+    """Ticket 09: one config-driven Trainer.run() equals the stored capture bit-for-bit."""
+    protocol = golden["protocol"]
+    config = config_from_protocol(protocol, data_dir)
+    trainer = Trainer(
+        config,
+        client_generator=world["client_generator"],
+        travel_time_model=world["travel_time_model"],
+        shortest_path_cache=world["cache"],
+        congestion_generator=world["congestion_generator"],
+    )
+    result = trainer.run(tmp_path / "run")
+
+    produced_trajectory = [[float(x) for x in w] for w in result.training.w_trajectory]
+    mismatches = capture.compare_results(golden["training"]["w_trajectory"], produced_trajectory)
+
+    # The single evaluation block is the capture's eval pass: same per-seed costs,
+    # and (having beaten the initial best-cost sentinel) it pins Best_W = Newest_W.
+    assert [block.episodes_completed for block in result.training.evaluations] == [
+        len(protocol["train_seeds"])
+    ]
+    mismatches += capture.compare_results(
+        golden["training"]["eval_costs"], list(result.training.evaluations[0].seed_costs)
+    )
+    assert result.training.best_w is not None
+    assert list(result.tested_w) == list(result.training.best_w) == produced_trajectory[-1]
+
+    # test_episodes=1: each per-seed mean IS the single captured episode.
+    for report in result.test:
+        for entry, expected in zip(
+            report.per_seed, golden["test"][str(report.action_count)], strict=True
+        ):
+            produced = {"seed": entry.seed, "vehicles": entry.vehicle_count, **entry.metrics}
+            for key, value in expected.items():
+                if produced[key] != value:
+                    mismatches.append(
+                        f"actions={report.action_count} seed={entry.seed} {key}: "
+                        f"{value!r} != {produced[key]!r}"
+                    )
+
+    assert not mismatches, "golden mismatch:\n" + "\n".join(mismatches[:50])
+    assert (tmp_path / "run" / "results.json").is_file()
+    assert (tmp_path / "run" / "training_plot.png").stat().st_size > 0
 
 
 def test_every_golden_test_episode_matches_exactly(

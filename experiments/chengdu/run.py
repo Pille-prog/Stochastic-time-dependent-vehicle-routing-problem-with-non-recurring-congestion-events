@@ -1,21 +1,24 @@
-"""Build the Chengdu instance from an experiment config and print a summary.
+"""Run the complete Chengdu experiment from its ExperimentConfig (ticket 09).
 
-Tickets 05-06 scope: config -> DataSource -> RoadNetwork + TrafficHistory ->
-TravelTimeModel, plus the ShortestPathCache and one ClientGenerator draw. Later
-tickets extend this into full training/evaluation runs.
+Loads the world through the config's DataSource, trains with periodic evaluation
+and best-W tracking, runs the final test over the configured seed/vehicle tables,
+and writes ``results.json`` plus the training plot to a per-run output directory:
 
-    uv run python experiments/chengdu/run.py [--config path/to/config.yaml]
+    uv run python experiments/chengdu/run.py [--config config.yaml] [--output-dir DIR]
+
+The default output directory is ``runs/<timestamp>`` next to the config file
+(gitignored). Loading the full Chengdu data takes ~15 minutes; the training run
+itself depends on ``total_train_iterations``.
 """
 
 from __future__ import annotations
 
 import argparse
-import math
+from datetime import datetime
 from pathlib import Path
 
 from stdvrp.config import ExperimentConfig
-from stdvrp.demand import ClientGenerator
-from stdvrp.traffic import CsvDataSource, TravelTimeModel
+from stdvrp.training import Trainer
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -26,42 +29,31 @@ def main(argv: list[str] | None = None) -> None:
         default=Path(__file__).parent / "config.yaml",
         help="experiment config YAML (default: config.yaml next to this script)",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="per-run output directory (default: runs/<timestamp> next to the config)",
+    )
     args = parser.parse_args(argv)
 
     config = ExperimentConfig.from_yaml(args.config)
-    source = CsvDataSource.from_config(config)
-    road_network = source.load_road_network()
-    traffic_history = source.load_traffic_history()
-    travel_time_model = TravelTimeModel(
-        road_network,
-        traffic_history,
-        config.max_congestion_duration,
-        config.horizon_start_minute,
-    )
+    output_dir = args.output_dir
+    if output_dir is None:
+        output_dir = args.config.parent / "runs" / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-    minutes = sorted({key[2] for key in travel_time_model.travel_data})
-    nan_stds = sum(1 for value in travel_time_model.speed_std.values() if math.isnan(value))
     print(f"config: {args.config}")
-    print(f"road network: {road_network.arc_count} arcs, {len(road_network.node_ids)} start nodes")
-    print(f"traffic history: days {list(traffic_history.days)}, instance day {config.instance_day}")
-    print(
-        f"travel data: {len(travel_time_model.travel_data)} (arc, minute) entries, "
-        f"minutes {minutes[0]}..{minutes[-1]}"
-    )
-    print(
-        f"speed std entries: {len(travel_time_model.speed_std)} "
-        f"({nan_stds} NaN — expected with a single traffic day)"
-    )
-    print(f"event probabilities: {len(travel_time_model.event_probability)} arcs")
+    print("loading world data (the full Chengdu archive takes ~15 minutes)...")
+    trainer = Trainer.from_config(config, log=print)
+    result = trainer.run(output_dir)
 
-    shortest_path_cache = source.load_shortest_path_cache()
-    print(f"shortest path cache: {len(shortest_path_cache)} node-client pairs")
-
-    demand = ClientGenerator.from_config(config).generate(config.first_train_seed)
-    print(
-        f"demand (seed {config.first_train_seed}): "
-        f"{len(demand.clients)} clients, {demand.vehicle_count} vehicles"
-    )
+    best = result.training.best_mean_cost
+    if best is not None:
+        print(f"best evaluation mean cost: {best:.4f}")
+    for report in result.test:
+        mean, std = report.summary["total_cost"]
+        print(f"final test actions={report.action_count}: mean cost {mean:.4f} (std {std:.4f})")
+    print(f"outputs: {output_dir}")
 
 
 if __name__ == "__main__":

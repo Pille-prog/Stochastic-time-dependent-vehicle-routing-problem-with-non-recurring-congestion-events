@@ -8,6 +8,16 @@ Research laboratory for the STDVRP: simulation and policy optimization on time-d
 
 Instance data is not committed. See [`data/README.md`](data/README.md) for the expected files and how to place them. Tests run on a small committed fixture and never need the full dataset.
 
+## Running the Chengdu experiment
+
+The complete experiment — training with periodic evaluation and best-W tracking, then the final test — is one command, driven entirely by `experiments/chengdu/config.yaml`:
+
+```
+uv run python experiments/chengdu/run.py
+```
+
+Results (`results.json`) and the training plot land in a per-run directory under `experiments/chengdu/runs/` (gitignored); `--config` and `--output-dir` override the defaults. It needs the full dataset in place (see above) and spends ~15 minutes loading it before training starts. CI exercises a smoke-sized version of the same path on the committed fixture (`tests/test_trainer_smoke.py`).
+
 ## Documentation
 
 - `CONTEXT.md` — domain glossary (the vocabulary used everywhere in code, tests and issues)

@@ -43,5 +43,28 @@ evaluation_seed_start: 100000
 evaluation_seed_count: 50
 test_episodes: 50
 
-# Legacy plot baseline for upper bound 0.4, duration 120, 150 mean clients.
+# Final test: the legacy test_model hardcodes (action-count list and the per-seed
+# fleet-size table for mean_number_clients 150, monolith lines 6397-6404).
+test_action_counts: [2, 10, 20, 30, 40, 50]
+test_seeds: [100, 101, 102, 103, 104, 105, 106, 107, 108, 109,
+             110, 112, 113, 114, 115, 116, 117, 118, 119, 120,
+             121, 122, 124, 125, 126, 127, 128, 129, 130, 131,
+             132, 133, 135, 136, 137, 138, 139, 140, 141, 143,
+             144, 145, 146, 147, 148, 149, 150, 151, 152, 153]
+test_vehicle_counts: [6, 5, 5, 7, 7, 6, 6, 5, 6, 5,
+                      6, 4, 7, 5, 6, 6, 5, 5, 6, 5,
+                      6, 4, 7, 6, 5, 7, 8, 4, 4, 4,
+                      4, 4, 5, 4, 5, 6, 8, 5, 5, 7,
+                      5, 7, 6, 6, 4, 6, 7, 5, 6, 6]
+
+# Golden-capture convention (ticket 04 finding 1): the legacy policy's exploration
+# RNGs are unseeded, so a plain legacy run trains differently every time. These
+# offsets seed them per episode (offset + train seed) for reproducible training;
+# null restores the legacy's nondeterminism.
+train_exploration_seed_offset: 10000000
+train_repair_seed_offset: 20000000
+
+# Legacy plot baseline for THIS parameter combination (upper bound 0.4, duration
+# 120, 150 mean clients). The legacy's full 16-entry lookup table lives in the
+# `legacy-monolith` tag (lines 6153-6203); each config carries only its own value.
 static_policy_mean_cost: 2490

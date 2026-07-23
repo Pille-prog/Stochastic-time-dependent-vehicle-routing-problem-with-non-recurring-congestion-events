@@ -62,6 +62,19 @@ class ExperimentConfig:
     evaluation_seed_count: int
     test_episodes: int
 
+    # Final test (former test_model hardcodes: the action-count list [2,10,20,30,40,50]
+    # and the per-seed fleet-size tables keyed by mean_number_clients).
+    test_action_counts: tuple[int, ...]
+    test_seeds: tuple[int, ...]
+    test_vehicle_counts: tuple[int, ...]
+
+    # Exploration seeding (golden-capture convention, ticket 04 finding 1): the
+    # legacy policy's training-only exploration RNGs are unseeded; these offsets
+    # seed them per episode (offset + train seed). Null restores the legacy's
+    # nondeterministic training.
+    train_exploration_seed_offset: int | None
+    train_repair_seed_offset: int | None
+
     # Plot baseline (was a hardcoded lookup table keyed by experiment parameters).
     static_policy_mean_cost: float | None
 
@@ -108,6 +121,16 @@ class ExperimentConfig:
                 raise ValueError(f"{name} must be positive")
         if self.learning_rate <= 0 or self.warmup_learning_rate <= 0:
             raise ValueError("learning rates must be positive")
+        if not self.test_action_counts or any(count <= 0 for count in self.test_action_counts):
+            raise ValueError("test_action_counts must be a non-empty list of positive integers")
+        if not self.test_seeds:
+            raise ValueError("test_seeds must not be empty")
+        if len(self.test_vehicle_counts) != len(self.test_seeds) or any(
+            count <= 0 for count in self.test_vehicle_counts
+        ):
+            raise ValueError(
+                "test_vehicle_counts must pair a positive fleet size with every test seed"
+            )
         if not 0 <= self.epsilon <= 1:
             raise ValueError("epsilon must be in [0, 1]")
         if self.static_policy_mean_cost is not None and self.static_policy_mean_cost <= 0:
@@ -142,9 +165,8 @@ class ExperimentConfig:
         if not data_dir.is_absolute():
             data_dir = path.parent / data_dir
         values["data_dir"] = data_dir
-        values["traffic_days"] = tuple(
-            _require_int_list(path, "traffic_days", values["traffic_days"])
-        )
+        for name in ("traffic_days", "test_action_counts", "test_seeds", "test_vehicle_counts"):
+            values[name] = tuple(_require_int_list(path, name, values[name]))
         node_range = _require_int_list(
             path, "client_universe_node_range", values["client_universe_node_range"]
         )
@@ -164,6 +186,9 @@ class ExperimentConfig:
             values["static_policy_mean_cost"] = _require_float(
                 path, "static_policy_mean_cost", values["static_policy_mean_cost"]
             )
+        for name in ("train_exploration_seed_offset", "train_repair_seed_offset"):
+            if values[name] is not None:
+                values[name] = _require_int(path, name, values[name])
         for name in ("links_file", "shortest_paths_file"):
             if not isinstance(values[name], str) or not values[name]:
                 raise ValueError(f"{path}: {name} must be a non-empty string")

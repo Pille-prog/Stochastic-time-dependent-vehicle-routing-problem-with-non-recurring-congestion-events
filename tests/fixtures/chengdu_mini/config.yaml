@@ -36,4 +36,14 @@ evaluation_seed_start: 100000
 evaluation_seed_count: 50
 test_episodes: 10
 
+# The mini fixture has no legacy vehicle table; any small fleet works.
+test_action_counts: [2]
+test_seeds: [100, 101]
+test_vehicle_counts: [4, 4]
+
+# Golden-capture convention: seed the legacy's unseeded exploration RNGs per
+# episode (offset + train seed); null restores nondeterministic training.
+train_exploration_seed_offset: 10000000
+train_repair_seed_offset: 20000000
+
 static_policy_mean_cost: null
