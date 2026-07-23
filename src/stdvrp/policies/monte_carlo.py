@@ -1,16 +1,24 @@
 """MonteCarloPolicy: linear function approximation over state and action features.
 
 Phase-1 structural port (ADR-0001) of the legacy ``policy`` class, restricted to the
-evaluation path ``main()`` actually executes: ``monte_carlo_policy_test`` →
+paths ``main()`` actually executes. Evaluation: ``monte_carlo_policy_test`` →
 ``select_epsilon_greedy_action_test`` → the single live ``select_vehicle_possible_actions``
 definition (the per-vehicle one; every other definition in the monolith sits inside a
 string literal) → ``generate_best_Q_pred_for_1_vehicle`` with the live feature
 extractors ``extract_general_state_features`` / ``extract_state_action_features``.
-The training-mode methods arrive with ticket 08.
+Training (ticket 08): ``monte_carlo_policy_train`` → ``select_epsilon_greedy_action_train``
+plus the Monte Carlo weight update ``actualize_W`` → ``update_W``.
 
 Global-RNG order is behavior (ADR-0001): construction consumes one ``random.choice``
 per vehicle for the initial action and then runs one full greedy decision, exactly
 like the legacy constructor. Evaluation decisions themselves consume no randomness.
+Training decisions draw from three streams exactly like the legacy: ``local_rng``
+gates exploration and ``local_rng_2`` repairs infeasible carried-over actions (both
+constructed UNSEEDED, so training is nondeterministic unless the caller seeds them —
+the golden-master capture seeds them per Episode as offset + train seed), while the
+exploratory action itself is drawn from the **global** ``random`` stream, interleaved
+with the transition function's velocity draws. The weight update consumes no
+randomness.
 
 Feature normalization constants (150, 850, 1150, 13, 60, 100, 180, 2500, the
 earliness bins) are part of the feature definition and stay literal; only the values
@@ -65,6 +73,9 @@ class MonteCarloPolicy(Policy):
         number_actions_test: int,
         horizon_end_minute: int,
         W: NDArray[np.float64] | None,
+        *,
+        number_actions_train: int | None = None,
+        learning_rate: float = 0.0,
     ) -> None:
         self.number_vehicles = number_vehicles
         self.shortest_path_cache = shortest_path_cache
@@ -74,7 +85,16 @@ class MonteCarloPolicy(Policy):
         self.epsilon = epsilon
         self.depot = depot
         self.number_actions_test = number_actions_test
+        self.number_actions_train = number_actions_train
+        self.learning_rate = learning_rate
         self.W = W
+
+        # Legacy quirk (ticket 04 finding 1): two UNSEEDED private RNGs drive the
+        # training exploration gate (``local_rng``) and the infeasible-action
+        # repair (``local_rng_2``). A caller wanting reproducible training must
+        # seed them right after construction, exactly like the capture driver.
+        self.local_rng = random.Random()
+        self.local_rng_2 = random.Random()
 
         # Cost factors as the legacy hardcodes them inside the policy.
         self.delay_cost_factor = 1
@@ -117,6 +137,83 @@ class MonteCarloPolicy(Policy):
                 self._select_vehicle_possible_actions(self.number_of_actions, vehicle)
             )
             self._select_best_q_action_for_vehicle(vehicle)
+
+    def decide_train(self, state: State) -> list[int]:
+        """Ports ``monte_carlo_policy_train``: ε-greedy per-vehicle decision."""
+        if self.number_actions_train is None:
+            raise ValueError("number_actions_train is required for training decisions")
+        self.state = state
+        self.number_of_actions = self.number_actions_train
+        self._select_epsilon_greedy_actions_train()
+        return self.action
+
+    def _select_epsilon_greedy_actions_train(self) -> None:
+        """Ports ``select_epsilon_greedy_action_train``: repair pass, then ε-greedy."""
+        self._classify_delayed_clients()
+        self._extract_general_state_features()
+
+        # Repair pass: replace any carried-over action no longer feasible.
+        for vehicle in range(self.number_vehicles):
+            self.possible_actions = self._select_vehicle_possible_actions(
+                self.number_of_actions, vehicle
+            )
+            if self.action[vehicle] not in self.possible_actions:
+                self.action[vehicle] = self.local_rng_2.choice(self.possible_actions)
+
+        for vehicle in range(self.number_vehicles):
+            self.possible_actions = self._select_vehicle_possible_actions(
+                self.number_of_actions, vehicle
+            )
+            if self.local_rng.random() < self.epsilon:
+                # Exploration draws from the GLOBAL stream, interleaved with the
+                # Model's velocity draws — order is behavior (ADR-0001).
+                self.action[vehicle] = random.choice(self.possible_actions)
+            else:
+                self._select_best_q_action_for_vehicle(vehicle)
+
+    def update_W(self, states: list[State], actions: list[list[int]], rewards: list[float]) -> None:
+        """Ports ``actualize_W``: backward Monte Carlo return, one SGD step per epoch.
+
+        Replays each saved decision epoch newest-first, accumulating the observed
+        return ``U_t`` and stepping W against the already-acquired cost baseline.
+        Consumes no randomness; rebinds ``self.state`` to each historical snapshot.
+        The legacy's dead diagnostics (``self.rewards``, ``self.Q_preds``,
+        ``self.error``) are not ported — nothing live reads them and they do not
+        touch W.
+        """
+        T = len(actions)
+        U_t: float = 0
+        lr = self.learning_rate
+        for t in range(T - 1, -1, -1):
+            U_t += rewards[t + 1]
+            self.state = states[t]
+            self._calculate_already_acquired_cost()
+            self._extract_general_state_features()
+            self._extract_state_action_features(actions[t])
+            X = np.array(list(itertools.chain(self.X_general_state, self.X_state_action)))
+            assert self.W is not None
+
+            Q_pred = np.dot(X, self.W)
+            gradient = lr * ((U_t - self.total_cost_acquired - Q_pred) * X)
+            self.W = self.W + gradient
+
+    def _calculate_already_acquired_cost(self) -> None:
+        """Ports ``calculate_already_acquired_cost``: sunk delay and overtime at tau."""
+        self.total_cost_acquired = 0.0
+        for client in self.state.clients_not_visited:
+            delay_tw = self.time_windows[client][1]
+            if delay_tw < self.state.tau_episode:
+                self.total_cost_acquired += (
+                    self.state.tau_episode - delay_tw
+                ) * self.delay_cost_factor
+        for vehicle in range(self.number_vehicles):
+            if (
+                self.state.vehicle_position[vehicle] != self.depot
+                and self.state.tau_episode > self.end_of_horizon
+            ):
+                self.total_cost_acquired += (
+                    self.state.tau_episode - self.end_of_horizon
+                ) * self.overtime_cost
 
     def _select_best_q_action_for_vehicle(self, vehicle: int) -> None:
         """Ports ``generate_best_Q_pred_for_1_vehicle``: strict argmin, ties keep first."""

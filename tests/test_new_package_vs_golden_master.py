@@ -1,10 +1,15 @@
-"""Ticket 07 acceptance: the new package reproduces the golden master exactly.
+"""Tickets 07/08 acceptance: the new package reproduces the golden master exactly.
 
-For every golden-master test episode (full Chengdu data, marker ``golden``): the
-episode total cost and all four components — distance, delay, earliness, overtime —
-plus tau, state count and the delay/earliness client counts must equal the stored
-values bit-for-bit. W is injected from the stored post-training trajectory, exactly
-as the legacy's ``Best_W`` drives its test episodes.
+Ticket 07 — for every golden-master test episode (full Chengdu data, marker
+``golden``): the episode total cost and all four components — distance, delay,
+earliness, overtime — plus tau, state count and the delay/earliness client counts
+must equal the stored values bit-for-bit. W is injected from the stored
+post-training trajectory, exactly as the legacy's ``Best_W`` drives its test
+episodes.
+
+Ticket 08 — re-running the stored training protocol through the new package
+(warm-up learning rate on the first Episode, capture-convention exploration
+seeding) must reproduce the stored W trajectory bit-for-bit after every Episode.
 
 Skips when the local dataset is absent (e.g. CI); building the world through the
 new package re-reads the 88 speed files and the 907 MB path cache (~15 minutes).
@@ -21,7 +26,7 @@ import pytest
 from stdvrp.congestion import ArcProbabilityCongestionGenerator
 from stdvrp.demand import ClientGenerator
 from stdvrp.network import ShortestPathCache
-from stdvrp.simulation import run_evaluation_episode
+from stdvrp.simulation import run_evaluation_episode, run_training_episode
 from stdvrp.traffic import CsvDataSource, TravelTimeModel
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +95,47 @@ def world(golden: dict[str, Any], data_dir: Path) -> dict[str, Any]:
             max_congestion_duration=protocol["max_congestion_duration"],
         ),
     }
+
+
+def test_w_trajectory_matches_exactly(golden: dict[str, Any], world: dict[str, Any]) -> None:
+    """Ticket 08: the training W sequence equals the stored trajectory bit-for-bit."""
+    protocol = golden["protocol"]
+    expected_trajectory = golden["training"]["w_trajectory"]
+
+    w = None
+    # Legacy warm-up quirk (pending ticket 12 triage): the first training Episode
+    # always runs with the hardcoded tiny rate, later ones with the configured one.
+    learning_rate = protocol["warmup_learning_rate"]
+    produced = []
+    for train_seed in protocol["train_seeds"]:
+        result = run_training_episode(
+            seed=train_seed,
+            client_generator=world["client_generator"],
+            travel_time_model=world["travel_time_model"],
+            shortest_path_cache=world["cache"],
+            congestion_generator=world["congestion_generator"],
+            W=w,
+            learning_rate=learning_rate,
+            epsilon=protocol["epsilon"],
+            max_congestion_duration=protocol["max_congestion_duration"],
+            horizon_start_minute=protocol["horizon_start_time"],
+            horizon_end_minute=protocol["horizon_end_time"],
+            n_observed_arcs=protocol["n_arcs"],
+            exploration_seed=protocol["train_exploration_seed_offset"] + train_seed,
+            repair_seed=protocol["train_repair_seed_offset"] + train_seed,
+        )
+        learning_rate = protocol["learning_rate"]
+        w = result.w
+        produced.append([float(component) for component in result.w])
+
+    mismatches = [
+        f"episode {i} (seed {seed}): {diff}"
+        for i, (seed, expected, actual) in enumerate(
+            zip(protocol["train_seeds"], expected_trajectory, produced, strict=True)
+        )
+        for diff in capture.compare_results(expected, actual)
+    ]
+    assert not mismatches, "W trajectory mismatch:\n" + "\n".join(mismatches[:50])
 
 
 def test_every_golden_test_episode_matches_exactly(

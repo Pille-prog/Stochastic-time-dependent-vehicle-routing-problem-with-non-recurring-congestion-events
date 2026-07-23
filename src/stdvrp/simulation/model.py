@@ -1,10 +1,11 @@
 """Model: the sequential decision model owning the transition function (Powell).
 
 Phase-1 structural port (ADR-0001) of the legacy ``model`` class, restricted to the
-evaluation path ``main()`` executes: ``transition_function`` with all its callees and
-the evaluation Episode loop (``create_monte_carlo_episode_test``). Training episodes
-arrive with ticket 08. Deliberately concrete — no interface (ADR-0002); the
-CongestionGenerator seam is injected instead of the legacy's hardcoded event method.
+path ``main()`` executes: ``transition_function`` with all its callees, the
+evaluation Episode loop (``create_monte_carlo_episode_test``) and the training
+Episode loop (``create_monte_carlo_episode_train``, ticket 08). Deliberately
+concrete — no interface (ADR-0002); the CongestionGenerator seam is injected
+instead of the legacy's hardcoded event method.
 
 Stochastic velocities are sampled from the **global** ``random`` stream
 (``random.gauss`` per arc-minute, memoized per Episode) and congestion events from
@@ -27,13 +28,14 @@ Preserved legacy quirks (do not fix before Phase 2; ADR-0001):
 
 from __future__ import annotations
 
+import copy
 import math
 import random
 
 from stdvrp.congestion import CongestedArcs, CongestionGenerator
 from stdvrp.network.shortest_path_cache import ShortestPathCache
 from stdvrp.policies.base import Policy
-from stdvrp.policies.monte_carlo import TimeWindows
+from stdvrp.policies.monte_carlo import MonteCarloPolicy, TimeWindows
 from stdvrp.simulation.state import State
 from stdvrp.traffic.travel_time_model import TravelTimeModel
 
@@ -124,6 +126,37 @@ class Model:
             self.transition_function(action)
             self.total_state_counter += 1
 
+        self.congested_arcs = {}
+        self.sampled_arc_velocities = {}
+
+    def run_training_episode(self) -> None:
+        """Ports ``create_monte_carlo_episode_train``: ε-greedy Episode, then one W update.
+
+        Snapshots the State and decision before every transition, replays them
+        through ``MonteCarloPolicy.update_W`` when the Episode terminates.
+        """
+        policy = self.policy
+        if not isinstance(policy, MonteCarloPolicy):
+            raise TypeError("training episodes require a MonteCarloPolicy")
+
+        self.episode_states: list[State] = []
+        self.episode_actions: list[list[int]] = []
+        self.episode_rewards: list[float] = [0]
+        self.congested_arcs = {}
+        while not self.state.terminal:
+            action = policy.decide_train(self.state)
+            # Snapshot BEFORE the transition — the weight update replays these epochs.
+            self.episode_states.append(copy.deepcopy(self.state))
+            self.episode_actions.append(copy.deepcopy(action))
+            reward = self.transition_function(action)
+            self.episode_rewards.append(reward)
+            # Preserved quirk (pending ticket 12 triage): the legacy training loop
+            # zeroes the distance-cost accumulator every step, so a training
+            # Episode ends with ``total_distance_cost`` holding 0, never the total.
+            self.total_distance_cost = 0
+            self.total_state_counter += 1
+
+        policy.update_W(self.episode_states, self.episode_actions, self.episode_rewards)
         self.congested_arcs = {}
         self.sampled_arc_velocities = {}
 
