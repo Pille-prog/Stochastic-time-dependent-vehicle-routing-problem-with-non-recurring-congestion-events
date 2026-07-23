@@ -1,0 +1,139 @@
+"""Ticket 07 acceptance: the new package reproduces the golden master exactly.
+
+For every golden-master test episode (full Chengdu data, marker ``golden``): the
+episode total cost and all four components — distance, delay, earliness, overtime —
+plus tau, state count and the delay/earliness client counts must equal the stored
+values bit-for-bit. W is injected from the stored post-training trajectory, exactly
+as the legacy's ``Best_W`` drives its test episodes.
+
+Skips when the local dataset is absent (e.g. CI); building the world through the
+new package re-reads the 88 speed files and the 907 MB path cache (~15 minutes).
+"""
+
+import importlib.util
+import json
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pytest
+
+from stdvrp.congestion import ArcProbabilityCongestionGenerator
+from stdvrp.demand import ClientGenerator
+from stdvrp.network import ShortestPathCache
+from stdvrp.simulation import run_evaluation_episode
+from stdvrp.traffic import CsvDataSource, TravelTimeModel
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "golden_master" / "chengdu_full.json"
+LEGACY_DAYS = tuple(range(601, 631)) + tuple(range(701, 715))
+
+spec = importlib.util.spec_from_file_location(
+    "capture_golden_master", REPO_ROOT / "scripts" / "capture_golden_master.py"
+)
+assert spec is not None and spec.loader is not None
+capture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(capture)
+
+pytestmark = pytest.mark.golden
+
+
+@pytest.fixture(scope="module")
+def golden() -> dict[str, Any]:
+    if not GOLDEN_PATH.exists():
+        pytest.skip("golden master not captured yet (scripts/capture_golden_master.py)")
+    return json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def data_dir() -> Path:
+    directory = capture.default_data_dir()
+    missing = capture.missing_data_files(directory)
+    if missing:
+        pytest.skip(
+            f"full Chengdu dataset not available under {directory} "
+            f"({len(missing)} files missing, first: {missing[0]})"
+        )
+    return directory
+
+
+@pytest.fixture(scope="module")
+def world(golden: dict[str, Any], data_dir: Path) -> dict[str, Any]:
+    protocol = golden["protocol"]
+    source = CsvDataSource(data_dir, "link.csv", 601, LEGACY_DAYS, "all_shortest_paths.csv")
+    travel_time_model = TravelTimeModel(
+        source.load_road_network(),
+        source.load_traffic_history(),
+        protocol["max_congestion_duration"],
+        horizon_start_minute=protocol["horizon_start_time"],
+    )
+    return {
+        "travel_time_model": travel_time_model,
+        "cache": ShortestPathCache.from_csv(data_dir / "all_shortest_paths.csv"),
+        # The legacy ClientGenerator hardcodes: gauss stddev 30, 60-client floor,
+        # universe range(1, 1900), and 28 clients per vehicle at 150 mean clients.
+        "client_generator": ClientGenerator(
+            mean_number_clients=protocol["mean_number_clients"],
+            client_count_stddev=30.0,
+            min_number_clients=60,
+            client_universe_node_range=(1, 1900),
+            clients_per_vehicle=28,
+            time_window_spread=protocol["diff_TW"],
+            horizon_start_minute=protocol["horizon_start_time"],
+            horizon_end_minute=protocol["horizon_end_time"],
+        ),
+        "congestion_generator": ArcProbabilityCongestionGenerator(
+            event_probability=travel_time_model.event_probability,
+            successors=travel_time_model.successors,
+            congestion_lower_bound=protocol["congestion_lower_bound"],
+            congestion_upper_bound=protocol["congestion_upper_bound"],
+            max_congestion_duration=protocol["max_congestion_duration"],
+        ),
+    }
+
+
+def test_every_golden_test_episode_matches_exactly(
+    golden: dict[str, Any], world: dict[str, Any]
+) -> None:
+    protocol = golden["protocol"]
+    best_w = np.array(golden["training"]["w_trajectory"][-1])
+
+    mismatches = []
+    for actions, episodes in golden["test"].items():
+        for entry in episodes:
+            result = run_evaluation_episode(
+                seed=entry["seed"],
+                client_generator=world["client_generator"],
+                travel_time_model=world["travel_time_model"],
+                shortest_path_cache=world["cache"],
+                congestion_generator=world["congestion_generator"],
+                W=best_w,
+                epsilon=protocol["epsilon"],
+                max_congestion_duration=protocol["max_congestion_duration"],
+                horizon_start_minute=protocol["horizon_start_time"],
+                horizon_end_minute=protocol["horizon_end_time"],
+                n_observed_arcs=protocol["n_arcs"],
+                vehicle_count=entry["vehicles"],
+                number_actions_test=entry["vehicles"] + int(actions),
+            )
+            produced = {
+                "seed": entry["seed"],
+                "vehicles": entry["vehicles"],
+                "total_cost": result.total_cost,
+                "distance_cost": result.distance_cost,
+                "delay_cost": result.delay_cost,
+                "earliness_cost": result.earliness_cost,
+                "overtime_cost": result.overtime_cost,
+                "tau": result.tau,
+                "state_count": result.state_count,
+                "delay_clients": result.delay_clients,
+                "earliness_clients": result.earliness_clients,
+            }
+            for key, expected in entry.items():
+                if produced[key] != expected:
+                    mismatches.append(
+                        f"actions={actions} seed={entry['seed']} {key}: "
+                        f"{expected!r} != {produced[key]!r}"
+                    )
+
+    assert not mismatches, "golden mismatch:\n" + "\n".join(mismatches[:50])

@@ -26,13 +26,13 @@ class ShortestPath(NamedTuple):
 class ShortestPathCache:
     """Lookup of the precomputed shortest path between any node and Client node."""
 
-    def __init__(self, paths: dict[tuple[int, int], ShortestPath]) -> None:
+    def __init__(self, paths: dict[tuple[float, float], ShortestPath]) -> None:
         self._paths = paths
 
     @classmethod
     def from_csv(cls, path: Path) -> ShortestPathCache:
         """Read the legacy CSV format: Node, Client, ``a->b->c`` path, time, length."""
-        paths: dict[tuple[int, int], ShortestPath] = {}
+        paths: dict[tuple[float, float], ShortestPath] = {}
         with open(path, newline="") as file:
             reader = csv.reader(file)
             next(reader)  # header
@@ -44,16 +44,16 @@ class ShortestPathCache:
                 )
         return cls(paths)
 
-    def path_between(self, node: int, client: int) -> ShortestPath:
+    def path_between(self, node: float, client: float) -> ShortestPath:
         """The cached path from ``node`` to ``client``; KeyError when the pair is absent."""
         return self._paths[(node, client)]
 
-    def __contains__(self, pair: tuple[int, int]) -> bool:
+    def __contains__(self, pair: tuple[float, float]) -> bool:
         return pair in self._paths
 
     def __len__(self) -> int:
         return len(self._paths)
 
-    def as_dict(self) -> dict[tuple[int, int], ShortestPath]:
+    def as_dict(self) -> dict[tuple[float, float], ShortestPath]:
         """A copy of the full mapping — characterization tests only; it is large."""
         return dict(self._paths)
