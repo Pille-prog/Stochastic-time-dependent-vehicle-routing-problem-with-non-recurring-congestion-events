@@ -22,7 +22,7 @@ from stdvrp.training.trainer import EPISODE_METRICS
 
 
 def _legacy_mean(
-    trainer: Trainer, w: Any, seed: int, vehicle_count: int, action_count: int, test_episodes: int
+    world: Any, w: Any, seed: int, vehicle_count: int, action_count: int, test_episodes: int
 ) -> dict[str, float]:
     """The retired ``Trainer.final_test`` inner loop: sum ``test_episodes``
     bit-identical episodes, then divide — reimplemented here only to document
@@ -34,7 +34,7 @@ def _legacy_mean(
             W=w,
             vehicle_count=vehicle_count,
             number_actions_test=vehicle_count + action_count,
-            **trainer._episode_kwargs(),
+            **world.episode_kwargs(),
         )
         for name in EPISODE_METRICS:
             totals[name] += float(getattr(episode, name))
@@ -71,7 +71,7 @@ def test_deduplicated_metrics_match_the_legacy_mean_within_one_ulp(
     ulp_matches = 0
     for entry in report.per_seed:
         legacy = _legacy_mean(
-            trainer, w, entry.seed, entry.vehicle_count, report.action_count, config.test_episodes
+            world, w, entry.seed, entry.vehicle_count, report.action_count, config.test_episodes
         )
         for name in EPISODE_METRICS:
             deduped, mean = entry.metrics[name], legacy[name]

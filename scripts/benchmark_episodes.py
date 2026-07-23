@@ -24,10 +24,13 @@ projection is the effort's success denominator::
     total = load
           + train_iterations * t_train
           + eval_episodes    * t_eval
-          + test_seeds * test_episodes * Σ_actions interp(t_test; measured 2..50)
+          + test_seeds * Σ_actions interp(t_test; measured 2..50)
 
 with the middle action counts linearly interpolated between the two measured
-endpoints. See the ticket's ``## Comments`` for the recorded numbers::
+endpoints (``test_episodes`` no longer multiplies the test term: ticket 02,
+simulation-performance, deduplicated ``Trainer.final_test`` to one episode per
+action-count/seed cell, so ``full_run_shape()`` hardcodes that factor to 1).
+See the ticket's ``## Comments`` for the recorded numbers::
 
     uv run python scripts/benchmark_episodes.py \
         --config experiments/chengdu/baseline_scaled.yaml \

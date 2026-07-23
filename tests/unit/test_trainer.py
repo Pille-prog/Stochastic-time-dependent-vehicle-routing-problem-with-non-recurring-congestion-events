@@ -210,21 +210,21 @@ def test_final_test_walks_the_configured_tables(
     assert reports[0].summary["total_cost"] == (100.0, 0.0)
 
 
+@pytest.mark.parametrize("test_episodes", [1, 2, 50])
 def test_final_test_ignores_test_episodes(
-    training_stub: TrainingStub, monkeypatch: pytest.MonkeyPatch
+    training_stub: TrainingStub, monkeypatch: pytest.MonkeyPatch, test_episodes: int
 ) -> None:
     """Ticket 02: test_episodes stays in ExperimentConfig but no longer drives
     repetition — final_test runs each (action count, seed) pair exactly once
     regardless of its value."""
-    for test_episodes in (1, 2, 50):
-        evaluation_stub = EvaluationStub()
-        monkeypatch.setattr(trainer_module, "run_evaluation_episode", evaluation_stub)
-        config = make_config(test_action_counts=(2,), test_episodes=test_episodes)
-        trainer = make_trainer(config)
+    evaluation_stub = EvaluationStub()
+    monkeypatch.setattr(trainer_module, "run_evaluation_episode", evaluation_stub)
+    config = make_config(test_action_counts=(2,), test_episodes=test_episodes)
+    trainer = make_trainer(config)
 
-        trainer.final_test(np.array([1.0]))
+    trainer.final_test(np.array([1.0]))
 
-        assert len(evaluation_stub.calls) == 2  # 1 action count x 2 seeds, always
+    assert len(evaluation_stub.calls) == 2  # 1 action count x 2 seeds, always
 
 
 def test_run_writes_results_and_plot(
