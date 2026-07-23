@@ -221,7 +221,9 @@ class MonteCarloPolicy(Policy):
                 if vehicle_position == self.depot and self.state.tau_episode > 310:
                     continue
 
-                travel_time = self.shortest_path_cache.path_between(vehicle_position, client).average_minutes
+                travel_time = self.shortest_path_cache.path_between(
+                    vehicle_position, client
+                ).average_minutes
                 if travel_time < min_travel_time:
                     min_travel_time = travel_time
                     assigned_vehicle = vehicle_idx
@@ -275,7 +277,9 @@ class MonteCarloPolicy(Policy):
                 if vehicle_position == self.depot and self.state.tau_episode > 310:
                     continue
 
-                travel_time = self.shortest_path_cache.path_between(vehicle_position, client).average_minutes
+                travel_time = self.shortest_path_cache.path_between(
+                    vehicle_position, client
+                ).average_minutes
                 distances.append((travel_time, vehicle_idx))
 
             closest_vehicle = min(distances)
@@ -402,7 +406,9 @@ class MonteCarloPolicy(Policy):
         for veh in range(n_veh):
             for _, client in self.vehicle_to_clients[veh]:
                 if client not in action:
-                    t1 = paths.path_between(state.vehicle_position[veh], action[veh]).average_minutes
+                    t1 = paths.path_between(
+                        state.vehicle_position[veh], action[veh]
+                    ).average_minutes
                     t2 = paths.path_between(action[veh], client).average_minutes
                     est = tau + t1 + t2 + service_time
                     _, due_tw = cg_clients[client]

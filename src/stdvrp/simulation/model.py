@@ -276,7 +276,9 @@ class Model:
                 if self.departure_tau[vehicle] == self.state.tau_episode:
                     # At a node: route straight from the current position.
                     shortest_path = list(
-                        self.shortest_path_cache.path_between(vehicle_position, vehicle_destination).nodes
+                        self.shortest_path_cache.path_between(
+                            vehicle_position, vehicle_destination
+                        ).nodes
                     )
                     self.vehicles_shortest_path[vehicle] = shortest_path[:]
                     self.create_and_actualize_state_velocity(vehicle)
