@@ -12,6 +12,7 @@ from typing import NamedTuple
 import numpy as np
 import pytest
 
+from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPath, ShortestPathCache
 from stdvrp.policies.monte_carlo import MonteCarloPolicy, TimeWindows
 from stdvrp.simulation.state import State, TrainingSnapshot
@@ -56,13 +57,17 @@ class ScriptedRng:
         return self._randoms.pop(0)
 
 
+def make_geometry(world: World) -> EpisodeGeometry:
+    return EpisodeGeometry.build(world.cache, clients=list(world.time_windows), depot=DEPOT)
+
+
 def make_policy(world: World, *, epsilon=0.0, W=None, lr=0.0, seed=0, rng=None):
     # The constructor draws one exploration_rng choice per vehicle (ticket 13).
     if rng is None:
         rng = np.random.default_rng(seed)
     return MonteCarloPolicy(
         number_vehicles=1,
-        shortest_path_cache=world.cache,
+        geometry=make_geometry(world),
         time_windows=world.time_windows,
         state=world.state,
         number_clients=len(world.time_windows),
@@ -278,7 +283,7 @@ class TestEpsilonGreedy:
         world = make_update_world()
         policy = MonteCarloPolicy(
             number_vehicles=1,
-            shortest_path_cache=world.cache,
+            geometry=make_geometry(world),
             time_windows=world.time_windows,
             state=world.state,
             number_clients=len(world.time_windows),

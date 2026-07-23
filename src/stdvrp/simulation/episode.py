@@ -41,6 +41,7 @@ from numpy.typing import NDArray
 
 from stdvrp.congestion import CongestionGenerator
 from stdvrp.demand.client_generator import ClientGenerator
+from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPathCache
 from stdvrp.policies.monte_carlo import MonteCarloPolicy
 from stdvrp.simulation.model import Model
@@ -116,9 +117,10 @@ def run_evaluation_episode(
     }
 
     state = State(number_vehicles, clients, n_observed_arcs, horizon_start_minute, depot)
+    geometry = EpisodeGeometry.build(shortest_path_cache, clients, depot)
     policy = MonteCarloPolicy(
         number_vehicles,
-        shortest_path_cache,
+        geometry,
         time_windows,
         state,
         len(clients),
@@ -213,9 +215,10 @@ def run_training_episode(
     }
 
     state = State(number_vehicles, clients, n_observed_arcs, horizon_start_minute, depot)
+    geometry = EpisodeGeometry.build(shortest_path_cache, clients, depot)
     policy = MonteCarloPolicy(
         number_vehicles,
-        shortest_path_cache,
+        geometry,
         time_windows,
         state,
         len(clients),

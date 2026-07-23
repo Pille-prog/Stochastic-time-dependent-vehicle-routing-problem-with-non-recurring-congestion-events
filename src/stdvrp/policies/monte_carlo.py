@@ -20,6 +20,14 @@ UNSEEDED ``random.Random`` instances plus the global ``random`` stream — Phase
 ADR-0001; consolidated here since exact draw-order equality with the legacy is
 no longer a goal). The weight update consumes no randomness.
 
+Ticket 04 (simulation-performance, ADR-0003): every ``ShortestPathCache.path_between``
+time/length read is replaced by an ``EpisodeGeometry`` array lookup — a pure
+representation change, bit-identical to the dict lookups it replaces. The caller
+builds one ``EpisodeGeometry`` per Episode (depot + that Episode's Clients as
+columns) and injects it here; this Policy no longer touches the ShortestPathCache
+directly. Path *node sequences* stay on the ShortestPathCache, read only by the
+Model for routing.
+
 Feature normalization constants (150, 850, 1150, 13, 60, 100, 180, 2500, the
 earliness bins) are part of the feature definition and stay literal; only the values
 the legacy read from argv or hardcoded as *experiment* knobs (horizon end, action
@@ -51,7 +59,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
-from stdvrp.network.shortest_path_cache import ShortestPathCache
+from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.policies.base import Policy
 
 if TYPE_CHECKING:
@@ -66,7 +74,7 @@ class MonteCarloPolicy(Policy):
     def __init__(
         self,
         number_vehicles: int,
-        shortest_path_cache: ShortestPathCache,
+        geometry: EpisodeGeometry,
         time_windows: TimeWindows,
         state: State,
         number_clients: int,
@@ -81,7 +89,7 @@ class MonteCarloPolicy(Policy):
         learning_rate: float = 0.0,
     ) -> None:
         self.number_vehicles = number_vehicles
-        self.shortest_path_cache = shortest_path_cache
+        self.geometry = geometry
         self.time_windows = time_windows
         # ``update_W`` rebinds this to each historical ``TrainingSnapshot`` in turn
         # (see its docstring) — every method that reads ``self.state`` during that
@@ -273,9 +281,7 @@ class MonteCarloPolicy(Policy):
             clients = self.state.clients_not_visited
             travel_times = [
                 (
-                    self.shortest_path_cache.path_between(
-                        self.state.vehicle_position[vehicle], client
-                    ).average_minutes,
+                    self.geometry.average_minutes(self.state.vehicle_position[vehicle], client),
                     client,
                 )
                 for client in clients
@@ -293,9 +299,7 @@ class MonteCarloPolicy(Policy):
             possible_actions = list(set(possible_actions))
 
             if (
-                self.shortest_path_cache.path_between(
-                    self.state.vehicle_position[vehicle], self.depot
-                ).average_minutes
+                self.geometry.average_minutes(self.state.vehicle_position[vehicle], self.depot)
                 + self.state.tau_episode
                 > self.end_of_horizon
             ):
@@ -324,9 +328,7 @@ class MonteCarloPolicy(Policy):
                 if vehicle_position == self.depot and self.state.tau_episode > 310:
                     continue
 
-                travel_time = self.shortest_path_cache.path_between(
-                    vehicle_position, client
-                ).average_minutes
+                travel_time = self.geometry.average_minutes(vehicle_position, client)
                 if travel_time < min_travel_time:
                     min_travel_time = travel_time
                     assigned_vehicle = vehicle_idx
@@ -359,7 +361,7 @@ class MonteCarloPolicy(Policy):
                     continue
 
                 total_distance = sum(
-                    self.shortest_path_cache.path_between(vehicle_position, client).average_minutes
+                    self.geometry.average_minutes(vehicle_position, client)
                     for client in self.state.clients_not_visited
                 )
                 vehicle_distances.append((total_distance, vehicle_idx))
@@ -368,9 +370,9 @@ class MonteCarloPolicy(Policy):
 
             for _, vehicle_idx in closest_two_vehicles:
                 for client in self.state.clients_not_visited:
-                    travel_time = self.shortest_path_cache.path_between(
+                    travel_time = self.geometry.average_minutes(
                         self.state.vehicle_position[vehicle_idx], client
-                    ).average_minutes
+                    )
                     self.shortest_distance_clients[vehicle_idx].append((travel_time, client))
 
         elif clients_remaining == 1:
@@ -380,9 +382,7 @@ class MonteCarloPolicy(Policy):
                 if vehicle_position == self.depot and self.state.tau_episode > 310:
                     continue
 
-                travel_time = self.shortest_path_cache.path_between(
-                    vehicle_position, client
-                ).average_minutes
+                travel_time = self.geometry.average_minutes(vehicle_position, client)
                 distances.append((travel_time, vehicle_idx))
 
             closest_vehicle = min(distances)
@@ -460,7 +460,7 @@ class MonteCarloPolicy(Policy):
     def _extract_state_action_features(self, action: list[int]) -> None:
         """Ports the live ``extract_state_action_features`` (7 features)."""
         cg_clients = self.time_windows
-        paths = self.shortest_path_cache
+        geometry = self.geometry
         state = self.state
         tau = state.tau_episode
         clients_all = state.clients_not_visited
@@ -485,7 +485,7 @@ class MonteCarloPolicy(Policy):
         features.append(0)
 
         total_dist = sum(
-            paths.path_between(state.vehicle_position[i], action[i]).length for i in range(n_veh)
+            geometry.length(state.vehicle_position[i], action[i]) for i in range(n_veh)
         )
         features.append(total_dist / 100.0)
 
@@ -493,7 +493,7 @@ class MonteCarloPolicy(Policy):
         delay_cost = 0.0
         for i, a in enumerate(action):
             if a in clients_all and a != depot:
-                travel_time = paths.path_between(state.vehicle_position[i], a).average_minutes
+                travel_time = geometry.average_minutes(state.vehicle_position[i], a)
                 est_arrival = tau + travel_time
                 earl_tw, due_tw = cg_clients[a]
 
@@ -509,10 +509,8 @@ class MonteCarloPolicy(Policy):
         for veh in range(n_veh):
             for _, client in self.vehicle_to_clients[veh]:
                 if client not in action:
-                    t1 = paths.path_between(
-                        state.vehicle_position[veh], action[veh]
-                    ).average_minutes
-                    t2 = paths.path_between(action[veh], client).average_minutes
+                    t1 = geometry.average_minutes(state.vehicle_position[veh], action[veh])
+                    t2 = geometry.average_minutes(action[veh], client)
                     est = tau + t1 + t2 + service_time
                     _, due_tw = cg_clients[client]
                     if est > due_tw:
@@ -523,11 +521,11 @@ class MonteCarloPolicy(Policy):
         overtime_cost = 0.0
         for i, a in enumerate(action):
             if a != depot:
-                t1 = paths.path_between(state.vehicle_position[i], a).average_minutes
-                t2 = paths.path_between(a, depot).average_minutes
+                t1 = geometry.average_minutes(state.vehicle_position[i], a)
+                t2 = geometry.average_minutes(a, depot)
                 est_ret = tau + t1 + t2 + service_time
             else:
-                est_ret = tau + paths.path_between(state.vehicle_position[i], depot).average_minutes
+                est_ret = tau + geometry.average_minutes(state.vehicle_position[i], depot)
 
             if est_ret > end_horizon:
                 base = end_horizon if tau < end_horizon else tau
