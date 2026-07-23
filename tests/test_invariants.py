@@ -68,6 +68,10 @@ PERTURBED_DAYS = tuple(range(601, 609))
 # 0-2 (``_reachable_nodes`` receives ``max_depth - 1``), so 0.78 is the divisor
 # of the widest reachable spread.
 MAX_SPREAD_DAMPING = 0.78
+# The generator draws event durations from ``uniform(30, max_congestion_duration)``.
+MIN_EVENT_DURATION = 30
+# 12 general-state + 7 state-action features (see the MonteCarloPolicy docstring).
+FEATURE_COUNT = 19
 
 FIXTURE_DEMAND = dict(
     mean_number_clients=20,
@@ -106,6 +110,8 @@ class RecordingModel(Model):
         self.velocity_observations: list[tuple[float, float, float]] = []
         self.terminate_passing_horizon_calls = 0
         self.terminate_all_back_calls = 0
+        # Delay charged to unserved Clients by each termination call.
+        self.termination_delay_charges: list[float] = []
         super().__init__(*args, **kwargs)
         RecordingModel.last_instance = self
 
@@ -118,11 +124,15 @@ class RecordingModel(Model):
 
     def terminate_state_passing_horizon(self) -> None:
         self.terminate_passing_horizon_calls += 1
+        delay_before = self.total_delay_cost
         super().terminate_state_passing_horizon()
+        self.termination_delay_charges.append(self.total_delay_cost - delay_before)
 
     def terminate_state_if_all_vehicles_come_back(self) -> None:
         self.terminate_all_back_calls += 1
+        delay_before = self.total_delay_cost
         super().terminate_state_if_all_vehicles_come_back()
+        self.termination_delay_charges.append(self.total_delay_cost - delay_before)
 
 
 class RecordingCongestionGenerator(CongestionGenerator):
@@ -199,8 +209,8 @@ def episode_configs(draw: st.DrawFn) -> dict[str, Any]:
             st.none()
             | st.lists(
                 st.floats(-1, 1, allow_nan=False, allow_infinity=False),
-                min_size=19,
-                max_size=19,
+                min_size=FEATURE_COUNT,
+                max_size=FEATURE_COUNT,
             ).map(np.array)
         ),
         "vehicle_count": draw(st.none() | st.integers(1, 8)),
@@ -273,6 +283,25 @@ def test_episode_invariants(
     assert termination_charges <= 1, "unserved Clients were penalized more than once"
     if unserved:
         assert termination_charges == 1, "unserved Clients were never penalized"
+    if termination_charges:
+        # The single termination call charges each late unserved Client its delay
+        # exactly once: ``tau - due`` past the horizon, the legacy hardcoded
+        # ``1150 - due`` when every vehicle is already back (ADR-0001 quirk).
+        time_windows = {
+            client.node: (client.time_window_start, client.time_window_end)
+            for client in demand.clients
+        }
+        charge_base = (
+            state.tau_episode if model.terminate_passing_horizon_calls else EMERGENCY_HORIZON
+        )
+        expected_delay = sum(
+            charge_base - time_windows[client][1]
+            for client in state.clients_not_visited
+            if state.tau_episode > time_windows[client][1]
+        )
+        assert math.isclose(
+            model.termination_delay_charges[0], expected_delay, rel_tol=1e-9, abs_tol=1e-9
+        )
 
     # Travel times and velocities are strictly positive and finite.
     for travel_time, velocity, length in model.velocity_observations:
@@ -285,7 +314,7 @@ def test_episode_invariants(
     highest_factor = config["congestion_upper_bound"] / MAX_SPREAD_DAMPING
     for minute_start, _arc, multiplier, end_minute in generator.events:
         assert config["congestion_lower_bound"] <= multiplier <= highest_factor + 1e-9
-        assert minute_start + 30 <= end_minute <= minute_start + duration
+        assert minute_start + MIN_EVENT_DURATION <= end_minute <= minute_start + duration
 
     # Total cost equals the sum of the four components (float accumulation order),
     # except the documented double-charge when terminating past the horizon.
@@ -299,6 +328,10 @@ def test_episode_invariants(
         result.overtime_cost,
     ):
         assert component_total >= 0
+    # The correction applies to ANY ``terminate_state_passing_horizon`` call: the
+    # only reachable call site is the decision-epoch branch (the ``> 1198`` sites
+    # cannot fire because epoch termination at 1150 always precedes them), and
+    # there the ``% 6`` epoch-end gate always re-adds the final transition cost.
     if model.terminate_passing_horizon_calls:
         expected_total = component_sum + model.transition_cost
     else:
@@ -352,4 +385,4 @@ def test_congestion_generator_stays_in_bounds(
 
     for multiplier, end_minute in congested.values():
         assert lower <= multiplier <= upper / MAX_SPREAD_DAMPING + 1e-9
-        assert minute_start + 30 <= end_minute <= minute_start + duration
+        assert minute_start + MIN_EVENT_DURATION <= end_minute <= minute_start + duration
