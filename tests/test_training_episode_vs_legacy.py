@@ -25,6 +25,7 @@ from characterization_world import (
     HORIZON_START,
     MAX_CONGESTION_DURATION,
     N_OBSERVED_ARCS,
+    count_horizon_terminations,
 )
 from stdvrp.demand import ClientGenerator
 from stdvrp.simulation import run_training_episode
@@ -98,12 +99,16 @@ def run_legacy_training_episode(
     # construction, before any training decision runs.
     policy.local_rng.seed(EXPLORATION_SEED_OFFSET + seed)
     policy.local_rng_2.seed(REPAIR_SEED_OFFSET + seed)
-    model.create_monte_carlo_episode_train()
+    with count_horizon_terminations(legacy_module) as horizon_calls:
+        model.create_monte_carlo_episode_train()
 
     return {
         "w": np.array(model.policy.W, copy=True),
         "w_forward": model.policy.W,
         "total_cost": model.total_cost,
+        # Ticket 12 fix 6: the legacy double-adds the terminating transition's
+        # cost past the horizon; the comparison compensates the exact delta.
+        "double_added_cost": model.transition_cost if horizon_calls else 0.0,
         "distance_cost": model.total_distance_cost,
         "delay_cost": model.total_delay_cost,
         "earliness_cost": model.total_earliness_cost,
@@ -159,7 +164,9 @@ def test_chained_training_episodes_are_bit_identical(
         ported_stream = (random.random(), float(np.random.uniform(0, 1)))
 
         assert list(result.w) == list(legacy["w"]), f"W diverged at seed {seed}"
-        assert result.episode.total_cost == legacy["total_cost"]
+        # Ticket 12 fix 6: adding the legacy's double-added terminating cost
+        # back reproduces its sum bit-for-bit (same operands, same order).
+        assert result.episode.total_cost + legacy["double_added_cost"] == legacy["total_cost"]
         assert result.episode.delay_cost == legacy["delay_cost"]
         assert result.episode.earliness_cost == legacy["earliness_cost"]
         assert result.episode.overtime_cost == legacy["overtime_cost"]

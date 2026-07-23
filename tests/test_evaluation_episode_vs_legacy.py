@@ -28,6 +28,7 @@ from characterization_world import (
     HORIZON_START,
     MAX_CONGESTION_DURATION,
     N_OBSERVED_ARCS,
+    count_horizon_terminations,
 )
 from stdvrp.demand import ClientGenerator
 from stdvrp.simulation import run_evaluation_episode
@@ -89,10 +90,14 @@ def run_legacy_episode(
         CONGESTION_UPPER,
         MAX_CONGESTION_DURATION,
     )
-    model.create_monte_carlo_episode_test()
+    with count_horizon_terminations(legacy_module) as horizon_calls:
+        model.create_monte_carlo_episode_test()
 
     outcome = {
         "total_cost": model.total_cost,
+        # Ticket 12 fix 6: the legacy double-adds the terminating transition's
+        # cost past the horizon; the comparison compensates the exact delta.
+        "double_added_cost": model.transition_cost if horizon_calls else 0.0,
         "distance_cost": model.total_distance_cost,
         "delay_cost": model.total_delay_cost,
         "earliness_cost": model.total_earliness_cost,
@@ -133,7 +138,11 @@ def test_evaluation_episode_is_bit_identical(
     )
     ported_stream = (random.random(), float(np.random.uniform(0, 1)))
 
-    assert result.total_cost == legacy_outcome["total_cost"]
+    # Ticket 12 fix 6: the legacy adds the terminating transition's cost to
+    # total_cost twice past the horizon; the port counts it once. Adding the
+    # delta back reproduces the legacy sum bit-for-bit (same operands, same
+    # accumulation order), so the comparison stays exact.
+    assert result.total_cost + legacy_outcome["double_added_cost"] == legacy_outcome["total_cost"]
     assert result.distance_cost == legacy_outcome["distance_cost"]
     assert result.delay_cost == legacy_outcome["delay_cost"]
     assert result.earliness_cost == legacy_outcome["earliness_cost"]

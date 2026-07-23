@@ -14,11 +14,8 @@ fixture and regardless of policy quality:
   ``[lower_bound, upper_bound / 0.78]``) and events expire inside
   ``[start + 30, start + max_congestion_duration]``;
 - the Episode total cost equals distance + delay + earliness + overtime, up to
-  float accumulation order — with one documented legacy exception: when the
-  Episode terminates through ``terminate_state_passing_horizon`` inside a
-  decision epoch, the epoch-end branch adds the final ``transition_cost`` to
-  ``total_cost`` a second time, so the total exceeds the component sum by
-  exactly that transition's cost (preserved bug, ADR-0001; ticket 12 triage).
+  float accumulation order (the legacy double-charged the terminating
+  transition past the horizon; fixed in ticket 12, ADR-0001 change log).
 
 Randomness comes from real gauss draws: the module fixture builds a multi-day
 traffic world by deterministically perturbing the fixture day's speeds, giving
@@ -313,8 +310,9 @@ def test_episode_invariants(
         assert config["congestion_lower_bound"] <= multiplier <= highest_factor + 1e-9
         assert minute_start + MIN_EVENT_DURATION <= end_minute <= minute_start + duration
 
-    # Total cost equals the sum of the four components (float accumulation order),
-    # except the documented double-charge when terminating past the horizon.
+    # Total cost equals the sum of the four components, up to float accumulation
+    # order (ticket 12 removed the legacy's double-charge of the terminating
+    # transition past the horizon).
     component_sum = (
         result.distance_cost + result.delay_cost + result.earliness_cost + result.overtime_cost
     )
@@ -325,15 +323,49 @@ def test_episode_invariants(
         result.overtime_cost,
     ):
         assert component_total >= 0
-    # The correction applies to ANY ``terminate_state_passing_horizon`` call: the
-    # only reachable call site is the decision-epoch branch (the ``> 1198`` sites
-    # cannot fire because epoch termination at 1150 always precedes them), and
-    # there the ``% 6`` epoch-end gate always re-adds the final transition cost.
-    if model.terminate_passing_horizon_calls:
-        expected_total = component_sum + model.transition_cost
-    else:
-        expected_total = component_sum
-    assert math.isclose(result.total_cost, expected_total, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(result.total_cost, component_sum, rel_tol=1e-9, abs_tol=1e-9)
+
+
+def test_horizon_terminated_episode_counts_the_terminating_transition_once(
+    sim_world: dict[str, Any], instrumented_episode: Any
+) -> None:
+    """Ticket 12 fix: the legacy added the terminating transition's cost twice.
+
+    When ``terminate_state_passing_horizon`` fired inside a decision epoch, the
+    epoch-end gate (which always fires at the emergency horizon) re-added the
+    same ``transition_cost`` to ``total_cost``. A single-vehicle fleet with a
+    full client set reliably runs past the horizon (probed: seed 0 terminates
+    at clock 1148 with unserved Clients).
+    """
+    generator = ArcProbabilityCongestionGenerator(
+        event_probability=dict.fromkeys(sim_world["arcs"], 0.05),
+        successors=sim_world["travel_time_model"].successors,
+        congestion_lower_bound=0.3,
+        congestion_upper_bound=0.4,
+        max_congestion_duration=120,
+    )
+    result = run_evaluation_episode(
+        seed=0,
+        client_generator=sim_world["client_generator"],
+        travel_time_model=sim_world["travel_time_model"],
+        shortest_path_cache=sim_world["cache"],
+        congestion_generator=generator,
+        W=None,
+        epsilon=0.05,
+        max_congestion_duration=120,
+        horizon_start_minute=HORIZON_START,
+        horizon_end_minute=HORIZON_END,
+        n_observed_arcs=3,
+        vehicle_count=1,
+    )
+    model = RecordingModel.last_instance
+    assert isinstance(model, RecordingModel)
+    assert model.terminate_passing_horizon_calls == 1, "the probe precondition broke"
+
+    component_sum = (
+        result.distance_cost + result.delay_cost + result.earliness_cost + result.overtime_cost
+    )
+    assert math.isclose(result.total_cost, component_sum, rel_tol=1e-9, abs_tol=1e-9)
 
 
 # --- The CongestionGenerator bounds property (cheap, no fixture) ------------------

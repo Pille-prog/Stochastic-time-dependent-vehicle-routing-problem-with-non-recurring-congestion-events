@@ -16,6 +16,8 @@ import builtins
 import importlib.util
 import os
 import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -70,6 +72,29 @@ def load_legacy_module() -> ModuleType:
     # calls the literal ``__builtins__.min`` (script-style), so restore the module.
     module.__dict__["__builtins__"] = builtins
     return module
+
+
+@contextmanager
+def count_horizon_terminations(legacy_module: ModuleType) -> Iterator[list[int]]:
+    """Count legacy ``terminate_state_passing_horizon`` calls during the block.
+
+    Ticket 12 fix 6 removed the port's double-add of the terminating
+    transition's cost past the emergency horizon; the episode comparisons
+    compensate the exact legacy delta, which applies whenever this method fired
+    (the legacy epoch-end gate always re-added the final transition cost).
+    """
+    calls: list[int] = []
+    original = legacy_module.model.terminate_state_passing_horizon
+
+    def counting(self: Any) -> None:
+        calls.append(1)
+        original(self)
+
+    legacy_module.model.terminate_state_passing_horizon = counting
+    try:
+        yield calls
+    finally:
+        legacy_module.model.terminate_state_passing_horizon = original
 
 
 def build_legacy_calc(legacy_module: ModuleType, legacy_world: Path) -> Any:

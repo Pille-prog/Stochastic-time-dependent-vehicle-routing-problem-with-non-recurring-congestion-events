@@ -276,16 +276,20 @@ class Model:
 
                     self.tau_multiplicator += self.tau_multiplicator_difference
 
+                    # Phase-2 fix (ticket 12, ADR-0001 change log): the epoch-end
+                    # gate below always fires at the emergency horizon, so the
+                    # legacy fell through it after terminating and added the same
+                    # transition_cost to total_cost a second time.
                     if self.tau_multiplicator >= 1150:
                         self.terminate_state_passing_horizon()
-
-                    # Preserved quirk: the transition only ends on epochs where the
-                    # shifted clock (tau + 178) is a multiple of 6 — same arithmetic
-                    # family as the congestion gate above.
-                    time = self.state.tau_episode + 180 - 2
-                    if time % 6 == 0:
-                        self.end_transition_function = 2
-                        self.total_cost += self.transition_cost
+                    else:
+                        # Preserved quirk: the transition only ends on epochs where
+                        # the shifted clock (tau + 178) is a multiple of 6 — same
+                        # arithmetic family as the congestion gate above.
+                        time = self.state.tau_episode + 180 - 2
+                        if time % 6 == 0:
+                            self.end_transition_function = 2
+                            self.total_cost += self.transition_cost
 
         return self.transition_cost
 
