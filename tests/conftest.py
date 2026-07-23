@@ -3,8 +3,11 @@
 import importlib.util
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
+
+import characterization_world
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,3 +22,31 @@ def capture() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# --- Episode characterization venue (tickets 07/08; see characterization_world) ---
+
+
+@pytest.fixture(scope="module")
+def legacy_world(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return characterization_world.build_legacy_world(tmp_path_factory.mktemp("legacy_world"))
+
+
+@pytest.fixture(scope="module")
+def legacy_module() -> ModuleType:
+    return characterization_world.load_legacy_module()
+
+
+@pytest.fixture(scope="module")
+def legacy_calc(legacy_module: ModuleType, legacy_world: Path) -> Any:
+    return characterization_world.build_legacy_calc(legacy_module, legacy_world)
+
+
+@pytest.fixture(scope="module")
+def legacy_spm(legacy_module: ModuleType) -> Any:
+    return characterization_world.build_legacy_spm(legacy_module)
+
+
+@pytest.fixture(scope="module")
+def ported_world(legacy_world: Path) -> dict[str, Any]:
+    return characterization_world.build_ported_world(legacy_world)

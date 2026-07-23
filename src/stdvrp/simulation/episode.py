@@ -123,6 +123,11 @@ def run_evaluation_episode(
     )
     model.run_evaluation_episode()
 
+    return _episode_result(model)
+
+
+def _episode_result(model: Model) -> EpisodeResult:
+    """Read the Episode outcome off a finished Model."""
     return EpisodeResult(
         total_cost=model.total_cost,
         distance_cost=model.total_distance_cost,
@@ -223,17 +228,4 @@ def run_training_episode(
     model.run_training_episode()
 
     assert policy.W is not None
-    return TrainingEpisodeResult(
-        w=policy.W,
-        episode=EpisodeResult(
-            total_cost=model.total_cost,
-            distance_cost=model.total_distance_cost,
-            delay_cost=model.total_delay_cost,
-            earliness_cost=model.total_earliness_cost,
-            overtime_cost=model.total_overtime_cost,
-            tau=model.state.tau_episode,
-            state_count=model.total_state_counter,
-            delay_clients=model.total_delay_clients,
-            earliness_clients=model.total_earliness_clients,
-        ),
-    )
+    return TrainingEpisodeResult(w=policy.W, episode=_episode_result(model))
