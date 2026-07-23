@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
-from stdvrp.network.episode_geometry import EpisodeGeometry
+from stdvrp.network.shortest_path_cache import ShortestPathCache
 from stdvrp.policies.base import Policy
 
 if TYPE_CHECKING:
