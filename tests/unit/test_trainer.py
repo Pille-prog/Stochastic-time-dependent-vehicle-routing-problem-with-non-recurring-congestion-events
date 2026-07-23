@@ -192,31 +192,39 @@ def test_final_test_walks_the_configured_tables(
     best_w = np.array([7.0])
     reports = trainer.final_test(best_w)
 
-    # 2 action counts x 2 seeds x 2 episodes.
-    assert len(evaluation_stub.calls) == 8
-    assert [call["seed"] for call in evaluation_stub.calls] == [100, 100, 101, 101] * 2
-    assert [call["vehicle_count"] for call in evaluation_stub.calls] == [6, 6, 5, 5] * 2
+    # 2 action counts x 2 seeds, ONE episode each (ticket 02: test_episodes is inert).
+    assert len(evaluation_stub.calls) == 4
+    assert [call["seed"] for call in evaluation_stub.calls] == [100, 101, 100, 101]
+    assert [call["vehicle_count"] for call in evaluation_stub.calls] == [6, 5, 6, 5]
     # The action pool widens by the action count on top of the fleet size.
-    assert [call["number_actions_test"] for call in evaluation_stub.calls] == [
-        8,
-        8,
-        7,
-        7,
-        11,
-        11,
-        10,
-        10,
-    ]
+    assert [call["number_actions_test"] for call in evaluation_stub.calls] == [8, 7, 11, 10]
     assert all(list(call["W"]) == [7.0] for call in evaluation_stub.calls)
 
     assert [report.action_count for report in reports] == [2, 5]
     per_seed = reports[0].per_seed
     assert [(entry.seed, entry.vehicle_count) for entry in per_seed] == [(100, 6), (101, 5)]
-    # Metrics are means over test_episodes identical runs.
+    # Metrics are the single episode's raw values, not a mean over repeats.
     assert per_seed[0].metrics["total_cost"] == 100.0
     assert per_seed[0].metrics["state_count"] == 10.0
     # Summary is mean/std across seeds.
     assert reports[0].summary["total_cost"] == (100.0, 0.0)
+
+
+def test_final_test_ignores_test_episodes(
+    training_stub: TrainingStub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ticket 02: test_episodes stays in ExperimentConfig but no longer drives
+    repetition — final_test runs each (action count, seed) pair exactly once
+    regardless of its value."""
+    for test_episodes in (1, 2, 50):
+        evaluation_stub = EvaluationStub()
+        monkeypatch.setattr(trainer_module, "run_evaluation_episode", evaluation_stub)
+        config = make_config(test_action_counts=(2,), test_episodes=test_episodes)
+        trainer = make_trainer(config)
+
+        trainer.final_test(np.array([1.0]))
+
+        assert len(evaluation_stub.calls) == 2  # 1 action count x 2 seeds, always
 
 
 def test_run_writes_results_and_plot(

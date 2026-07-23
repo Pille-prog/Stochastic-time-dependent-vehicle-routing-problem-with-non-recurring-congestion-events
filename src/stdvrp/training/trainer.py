@@ -22,10 +22,15 @@ Legacy fidelity notes:
 * **Best-W fallback**: with fewer episodes than ``test_frequency`` the legacy
   would run its test with ``Best_W = []`` and crash; the Trainer falls back to
   the final trained W instead (documented deviation, same information).
-* **Final test**: each (action count, seed) pair reruns ``test_episodes``
-  episodes and averages, verbatim from ``test_model`` — every episode draws its
-  own per-Episode Generators from its seed (ticket 13, ADR-0001 phase 2), so the
-  iterations are identical and the mean equals a single episode's value.
+* **Final test** (deduplicated, ticket 02, simulation-performance): each
+  (action count, seed) pair runs a **single** evaluation episode. Every
+  episode draws its own per-Episode Generators from its seed (ticket 13,
+  ADR-0001 phase 2), so the legacy ``test_episodes`` repeats of the same
+  episode were bit-identical and their mean equaled one episode's value —
+  computed directly now instead of summed and divided (avoiding the sum/k
+  division-order float noise that quirk could otherwise leak into the
+  report). ``test_episodes`` stays in ``ExperimentConfig`` for config-file
+  compatibility but is no longer read.
 * **Reported metrics**: the nine golden-pinned Episode metrics. The legacy
   report's three mean-time metrics (``mean_delay_time``, ``mean_earliness_time``,
   ``mean_overtime``) were not ported with the ticket 07 Model and are not pinned
@@ -52,7 +57,7 @@ from stdvrp.congestion import ArcProbabilityCongestionGenerator, CongestionGener
 from stdvrp.demand import ClientGenerator
 from stdvrp.network import ShortestPathCache
 from stdvrp.simulation import run_evaluation_episode, run_training_episode
-from stdvrp.traffic import CsvDataSource, TravelTimeModel
+from stdvrp.traffic import TravelTimeModel, world_cache
 
 W = NDArray[np.float64]
 
@@ -102,7 +107,11 @@ class TrainingResult:
 
 @dataclass(frozen=True, slots=True)
 class SeedTestResult:
-    """Final-test metrics for one seed: means over ``test_episodes`` runs."""
+    """Final-test metrics for one seed: one evaluation episode's raw values.
+
+    (Ticket 02, simulation-performance) The legacy ``test_episodes`` repeats of
+    this episode were bit-identical, so their mean equaled this value anyway.
+    """
 
     seed: int
     vehicle_count: int
@@ -150,21 +159,26 @@ class Trainer:
 
     @classmethod
     def from_config(
-        cls, config: ExperimentConfig, *, log: Callable[[str], None] | None = None
+        cls,
+        config: ExperimentConfig,
+        *,
+        cache_dir: Path | None = None,
+        log: Callable[[str], None] | None = None,
     ) -> Trainer:
-        """Load the world from the config's DataSource and wire the Trainer."""
-        source = CsvDataSource.from_config(config)
-        travel_time_model = TravelTimeModel(
-            source.load_road_network(),
-            source.load_traffic_history(),
-            config.max_congestion_duration,
-            horizon_start_minute=config.horizon_start_minute,
-        )
+        """Load the world from the config's DataSource and wire the Trainer.
+
+        ``cache_dir`` (ticket 03, simulation-performance) opts into the binary
+        world cache: ``None`` (the default) parses the CSVs fresh every call,
+        exactly as before; a directory reuses a matching prior snapshot instead
+        of re-parsing, and writes one on a miss. See ``stdvrp.traffic.world_cache``.
+        """
+        world = world_cache.load_world(config, cache_dir=cache_dir)
+        travel_time_model = world.travel_time_model
         return cls(
             config,
             client_generator=ClientGenerator.from_config(config),
             travel_time_model=travel_time_model,
-            shortest_path_cache=source.load_shortest_path_cache(),
+            shortest_path_cache=world.shortest_path_cache,
             congestion_generator=ArcProbabilityCongestionGenerator(
                 event_probability=travel_time_model.event_probability,
                 successors=travel_time_model.successors,
@@ -247,7 +261,15 @@ class Trainer:
         )
 
     def final_test(self, w: W) -> tuple[ActionCountReport, ...]:
-        """The legacy ``test_model``: fixed seed/fleet tables at widening action pools."""
+        """The legacy ``test_model``: fixed seed/fleet tables at widening action pools.
+
+        Ticket 02 (simulation-performance): runs each (action count, seed) pair
+        **once**. With per-seed Generators (ticket 13), every one of the legacy
+        ``test_episodes`` repeats was bit-identical, so the mean equaled a single
+        episode's value — computed directly here rather than via a legacy
+        sum/``test_episodes`` division that could round differently in its last
+        bit. ``config.test_episodes`` is not read.
+        """
         config = self.config
         reports = []
         for action_count in config.test_action_counts:
@@ -255,18 +277,14 @@ class Trainer:
             for seed, vehicle_count in zip(
                 config.test_seeds, config.test_vehicle_counts, strict=True
             ):
-                totals = dict.fromkeys(EPISODE_METRICS, 0.0)
-                for _ in range(config.test_episodes):
-                    episode = run_evaluation_episode(
-                        seed=seed,
-                        W=w,
-                        vehicle_count=vehicle_count,
-                        number_actions_test=vehicle_count + action_count,
-                        **self._episode_kwargs(),
-                    )
-                    for name in EPISODE_METRICS:
-                        totals[name] += float(getattr(episode, name))
-                metrics = {name: value / config.test_episodes for name, value in totals.items()}
+                episode = run_evaluation_episode(
+                    seed=seed,
+                    W=w,
+                    vehicle_count=vehicle_count,
+                    number_actions_test=vehicle_count + action_count,
+                    **self._episode_kwargs(),
+                )
+                metrics = {name: float(getattr(episode, name)) for name in EPISODE_METRICS}
                 per_seed.append(SeedTestResult(seed, vehicle_count, metrics))
             summary = {
                 name: _mean_and_std([entry.metrics[name] for entry in per_seed])
