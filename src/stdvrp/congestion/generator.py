@@ -11,6 +11,11 @@ Congested arcs are recorded as ``(float(node_start), float(node_end)) ->
 [velocity_multiplier, end_minute]`` — the float keys are a legacy quirk that must
 stay aligned with the float node ids of cached shortest paths (they hash and
 compare equal to the int arc keys used elsewhere).
+
+Phase-2 deliberate fixes (ticket 12, ADR-0001 change log): the spread walks the
+full ``max_depth`` (the legacy passed ``max_depth - 1``, leaving the depth-3
+damping dead), and spread multipliers saturate at ``congestion_upper_bound``
+(damping divides by a factor < 1, which let them exceed the configured bound).
 """
 
 from __future__ import annotations
@@ -48,10 +53,11 @@ class ArcProbabilityCongestionGenerator(CongestionGenerator):
     congestion_lower_bound: float
     congestion_upper_bound: float
     max_congestion_duration: int
-    # The legacy model hardcoded max_depth=3. probability_input mirrors the legacy
-    # enablement argument, which was the event-probability dict itself — always
-    # ``!= 0``, so congestion was never actually disabled; a nonzero float keeps
-    # that behavior.
+    # The legacy model hardcoded max_depth=3; the damping table below covers
+    # depths 0-3 only. probability_input mirrors the legacy enablement argument,
+    # which was the event-probability dict itself — always ``!= 0``, so
+    # congestion was never actually disabled; a nonzero float keeps that
+    # behavior.
     max_depth: int = 3
     probability_input: float = 1.0
 
@@ -74,7 +80,10 @@ class ArcProbabilityCongestionGenerator(CongestionGenerator):
                     ]
 
                     for node in congestion_road:
-                        node_starts, depth = self._reachable_nodes(node, 0, self.max_depth - 1)
+                        # Phase-2 fix (ticket 12, ADR-0001 change log): the legacy
+                        # passed ``max_depth - 1`` here, so the depth-3 damping
+                        # branch was dead code and the spread stopped one hop short.
+                        node_starts, depth = self._reachable_nodes(node, 0, self.max_depth)
                         for node_start in node_starts:
                             connected_nodes = self.successors.get(node_start, [])
 
@@ -93,7 +102,14 @@ class ArcProbabilityCongestionGenerator(CongestionGenerator):
                                 else:  # unreachable: recursion depth is capped at 3
                                     raise AssertionError(f"depth {depth[node_start]} > 3")
 
-                                velocity_penalization_for_depth = velocity_penalization / factor
+                                # Phase-2 fix (ticket 12): damping divides by a
+                                # factor < 1 (milder congestion farther out), which
+                                # let spread multipliers exceed the configured
+                                # upper bound; they now saturate at it.
+                                velocity_penalization_for_depth = min(
+                                    velocity_penalization / factor,
+                                    self.congestion_upper_bound,
+                                )
                                 if (node_start, affected_node) in congested_arcs and (
                                     congested_arcs[(node_start, affected_node)][1] > minute_start
                                     and congested_arcs[(node_start, affected_node)][0]

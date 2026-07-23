@@ -22,6 +22,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+import numpy as np
+
 from legacy_source import legacy_script_path
 from stdvrp.congestion import ArcProbabilityCongestionGenerator
 from stdvrp.demand import ClientGenerator
@@ -72,6 +74,53 @@ def load_legacy_module() -> ModuleType:
     # calls the literal ``__builtins__.min`` (script-style), so restore the module.
     module.__dict__["__builtins__"] = builtins
     return module
+
+
+class LegacySpreadCongestionGenerator(ArcProbabilityCongestionGenerator):
+    """The pre-ticket-12 congestion spread, for the vs-legacy comparisons only.
+
+    Ticket 12 fix 7 clamps spread multipliers at the upper bound and walks the
+    full ``max_depth``; the legacy did neither, so episodes with spread events
+    diverge from it. This test-local override reproduces the legacy spread
+    (``max_depth - 1``, unclamped) so the episode comparisons stay bit-exact for
+    everything else. The fixed generator is covered by its unit tests and the
+    invariant suite; this shim retires with the vs-legacy suites.
+    """
+
+    def generate(self, minute_start: float, congested_arcs: Any) -> None:
+        if self.probability_input != 0:
+            for key in self.event_probability:
+                probability_for_congestion = np.random.uniform(0, 1)
+                if probability_for_congestion < self.event_probability[key]:
+                    congestion_road = [key[0], key[1]]
+                    velocity_penalization = np.random.uniform(
+                        self.congestion_lower_bound, self.congestion_upper_bound
+                    )
+                    state_time_elimination = np.random.uniform(30, self.max_congestion_duration)
+
+                    congested_arcs[(float(key[0]), float(key[1]))] = [
+                        float(velocity_penalization),
+                        float(minute_start + state_time_elimination),
+                    ]
+
+                    for node in congestion_road:
+                        node_starts, depth = self._reachable_nodes(node, 0, self.max_depth - 1)
+                        for node_start in node_starts:
+                            for affected_node in self.successors.get(node_start, []):
+                                if node_start == affected_node:
+                                    continue
+                                factor = {0: 1.0, 1: 0.83, 2: 0.78, 3: 0.73}[depth[node_start]]
+                                penalization_for_depth = velocity_penalization / factor
+                                if (node_start, affected_node) in congested_arcs and (
+                                    congested_arcs[(node_start, affected_node)][1] > minute_start
+                                    and congested_arcs[(node_start, affected_node)][0]
+                                    <= penalization_for_depth
+                                ):
+                                    continue
+                                congested_arcs[(float(node_start), float(affected_node))] = [
+                                    float(penalization_for_depth),
+                                    float(minute_start + state_time_elimination),
+                                ]
 
 
 @contextmanager
@@ -135,7 +184,9 @@ def build_ported_world(legacy_world: Path) -> dict[str, Any]:
         "travel_time_model": travel_time_model,
         "cache": ShortestPathCache.from_csv(FIXTURE_DIR / "all_shortest_paths.csv"),
         "client_generator": ClientGenerator(**FIXTURE_DEMAND),
-        "congestion_generator": ArcProbabilityCongestionGenerator(
+        # The legacy-faithful spread (see LegacySpreadCongestionGenerator): the
+        # comparisons must generate the exact congested sets the legacy does.
+        "congestion_generator": LegacySpreadCongestionGenerator(
             event_probability=travel_time_model.event_probability,
             successors=travel_time_model.successors,
             congestion_lower_bound=CONGESTION_LOWER,

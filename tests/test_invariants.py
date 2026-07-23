@@ -9,9 +9,8 @@ fixture and regardless of policy quality:
 - every Client ends the Episode served exactly once or left unserved and
   penalized by exactly one termination charge;
 - every sampled travel time and velocity is strictly positive and finite;
-- congestion factors stay within the configured bounds (spread arcs divide the
-  drawn factor by the depth damping, so the reachable range is
-  ``[lower_bound, upper_bound / 0.78]``) and events expire inside
+- congestion factors stay within the configured bounds (ticket 12 clamped
+  spread multipliers at the upper bound) and events expire inside
   ``[start + 30, start + max_congestion_duration]``;
 - the Episode total cost equals distance + delay + earliness + overtime, up to
   float accumulation order (the legacy double-charged the terminating
@@ -61,10 +60,6 @@ HORIZON_START, HORIZON_END = 300, 780
 # configured horizon end (see the Model module docstring).
 EMERGENCY_HORIZON = 1150
 PERTURBED_DAYS = tuple(range(601, 609))
-# Spread arcs divide the drawn factor by the depth damping; reachable depths are
-# 0-2 (``_reachable_nodes`` receives ``max_depth - 1``), so 0.78 is the divisor
-# of the widest reachable spread.
-MAX_SPREAD_DAMPING = 0.78
 # The generator draws event durations from ``uniform(30, max_congestion_duration)``.
 MIN_EVENT_DURATION = 30
 # 12 general-state + 7 state-action features (see the MonteCarloPolicy docstring).
@@ -304,10 +299,10 @@ def test_episode_invariants(
         assert travel_time > 0
         assert math.isfinite(travel_time)
 
-    # Congestion factors and durations stay within the configured bounds.
-    highest_factor = config["congestion_upper_bound"] / MAX_SPREAD_DAMPING
+    # Congestion factors and durations stay within the configured bounds
+    # (ticket 12 clamped spread multipliers at the upper bound).
     for minute_start, _arc, multiplier, end_minute in generator.events:
-        assert config["congestion_lower_bound"] <= multiplier <= highest_factor + 1e-9
+        assert config["congestion_lower_bound"] <= multiplier <= config["congestion_upper_bound"]
         assert minute_start + MIN_EVENT_DURATION <= end_minute <= minute_start + duration
 
     # Total cost equals the sum of the four components, up to float accumulation
@@ -413,5 +408,5 @@ def test_congestion_generator_stays_in_bounds(
     generator.generate(minute_start, congested)
 
     for multiplier, end_minute in congested.values():
-        assert lower <= multiplier <= upper / MAX_SPREAD_DAMPING + 1e-9
+        assert lower <= multiplier <= upper
         assert minute_start + MIN_EVENT_DURATION <= end_minute <= minute_start + duration
