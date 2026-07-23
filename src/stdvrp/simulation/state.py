@@ -11,6 +11,8 @@ depot id but used as a 0/1 service flag — identical only because the depot is 
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 
 class State:
     """Mutable per-Episode state: the Model's transition function advances it."""
@@ -56,3 +58,36 @@ class State:
 
         # 0/1 flag: vehicle is inside a Client's service time (see module docstring).
         self.vehicle_completing_service: list[float] = [depot for _ in range(number_vehicles)]
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingSnapshot:
+    """Immutable capture of the State surface ``MonteCarloPolicy.update_W`` replays.
+
+    ``Model.run_training_episode`` snapshots the State before every transition;
+    ``update_W`` walks the snapshots backward, rebinding ``MonteCarloPolicy.state``
+    to each in turn. Its replay path (``_calculate_already_acquired_cost``,
+    ``_extract_general_state_features``, ``_classify_delayed_clients``,
+    ``_extract_state_action_features``) reads exactly these four fields and never
+    mutates them — narrower and cheaper to copy than ``copy.deepcopy(state)``,
+    which also duplicated fields the replay never touches (``clients_arrival``,
+    ``total_vehicle_distance_travelled``, ...). ``State`` mutates
+    ``clients_not_visited``, ``vehicle_position`` and ``observed_velocity`` in
+    place across the Episode, so ``capture`` must copy them, not alias them; the
+    tuples below make that copy and the resulting snapshot immutable in one step.
+    """
+
+    tau_episode: float
+    clients_not_visited: tuple[int, ...]
+    vehicle_position: tuple[float, ...]
+    observed_velocity: tuple[tuple[float, ...], ...]
+
+    @classmethod
+    def capture(cls, state: State) -> TrainingSnapshot:
+        """Copy the four fields ``update_W``'s replay path reads off ``state``."""
+        return cls(
+            tau_episode=state.tau_episode,
+            clients_not_visited=tuple(state.clients_not_visited),
+            vehicle_position=tuple(state.vehicle_position),
+            observed_velocity=tuple(tuple(v) for v in state.observed_velocity),
+        )

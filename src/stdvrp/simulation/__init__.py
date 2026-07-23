@@ -7,13 +7,14 @@ from stdvrp.simulation.episode import (
     run_training_episode,
 )
 from stdvrp.simulation.model import Model
-from stdvrp.simulation.state import State
+from stdvrp.simulation.state import State, TrainingSnapshot
 
 __all__ = [
     "EpisodeResult",
     "Model",
     "State",
     "TrainingEpisodeResult",
+    "TrainingSnapshot",
     "run_evaluation_episode",
     "run_training_episode",
 ]

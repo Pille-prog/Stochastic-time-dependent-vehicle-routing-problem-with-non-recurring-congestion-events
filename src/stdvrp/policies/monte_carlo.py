@@ -51,11 +51,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
-from stdvrp.network.shortest_path_cache import ShortestPathCache
+from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.policies.base import Policy
 
 if TYPE_CHECKING:
-    from stdvrp.simulation.state import State
+    from stdvrp.simulation.state import State, TrainingSnapshot
 
 TimeWindows = dict[int, tuple[int, int]]
 
@@ -83,7 +83,10 @@ class MonteCarloPolicy(Policy):
         self.number_vehicles = number_vehicles
         self.shortest_path_cache = shortest_path_cache
         self.time_windows = time_windows
-        self.state = state
+        # ``update_W`` rebinds this to each historical ``TrainingSnapshot`` in turn
+        # (see its docstring) — every method that reads ``self.state`` during that
+        # replay only touches the four fields the two types share.
+        self.state: State | TrainingSnapshot = state
         self.number_clients = number_clients
         self.epsilon = epsilon
         self.depot = depot
@@ -170,12 +173,16 @@ class MonteCarloPolicy(Policy):
             else:
                 self._select_best_q_action_for_vehicle(vehicle)
 
-    def update_W(self, states: list[State], actions: list[list[int]], rewards: list[float]) -> None:
+    def update_W(
+        self, states: list[TrainingSnapshot], actions: list[list[int]], rewards: list[float]
+    ) -> None:
         """Ports ``actualize_W``: backward Monte Carlo return, one SGD step per epoch.
 
         Replays each saved decision epoch newest-first, accumulating the observed
         return ``U_t`` and stepping W against the already-acquired cost baseline.
-        Consumes no randomness; rebinds ``self.state`` to each historical snapshot.
+        Consumes no randomness; rebinds ``self.state`` to each historical
+        ``TrainingSnapshot`` (ticket 06) — a purpose-built immutable capture of
+        only the State fields this replay path reads, cheaper than a full State.
         The legacy's dead diagnostics (``self.rewards``, ``self.Q_preds``,
         ``self.error``) are not ported — nothing live reads them and they do not
         touch W.

@@ -36,7 +36,6 @@ Phase-2 deliberate fixes (ticket 12, ADR-0001 change log):
 
 from __future__ import annotations
 
-import copy
 import math
 
 import numpy as np
@@ -45,7 +44,7 @@ from stdvrp.congestion import CongestedArcs, CongestionGenerator
 from stdvrp.network.shortest_path_cache import ShortestPathCache
 from stdvrp.policies.base import Policy
 from stdvrp.policies.monte_carlo import MonteCarloPolicy, TimeWindows
-from stdvrp.simulation.state import State
+from stdvrp.simulation.state import State, TrainingSnapshot
 from stdvrp.traffic.travel_time_model import TravelTimeModel
 
 ArcMinuteKey = tuple[float, float, int]
@@ -154,15 +153,18 @@ class Model:
         if not isinstance(policy, MonteCarloPolicy):
             raise TypeError("training episodes require a MonteCarloPolicy")
 
-        self.episode_states: list[State] = []
+        self.episode_states: list[TrainingSnapshot] = []
         self.episode_actions: list[list[int]] = []
         self.episode_rewards: list[float] = [0]
         self.congested_arcs = {}
         while not self.state.terminal:
             action = policy.decide_train(self.state)
             # Snapshot BEFORE the transition — the weight update replays these epochs.
-            self.episode_states.append(copy.deepcopy(self.state))
-            self.episode_actions.append(copy.deepcopy(action))
+            # ``self.state`` is mutated in place for the rest of the Episode, and
+            # ``policy.action`` (aliased by ``action``) is mutated on every later
+            # decision, so both need a real copy here, not a reference.
+            self.episode_states.append(TrainingSnapshot.capture(self.state))
+            self.episode_actions.append(list(action))
             reward = self.transition_function(action)
             self.episode_rewards.append(reward)
             self.total_state_counter += 1

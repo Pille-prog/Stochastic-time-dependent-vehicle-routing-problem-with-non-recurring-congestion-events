@@ -14,7 +14,7 @@ import pytest
 
 from stdvrp.network.shortest_path_cache import ShortestPath, ShortestPathCache
 from stdvrp.policies.monte_carlo import MonteCarloPolicy, TimeWindows
-from stdvrp.simulation.state import State
+from stdvrp.simulation.state import State, TrainingSnapshot
 
 DEPOT = 0
 HORIZON_END = 780
@@ -147,7 +147,7 @@ class TestWUpdate:
         world = make_update_world()
         policy = make_policy(world, W=np.zeros(19), lr=0.5)
 
-        policy.update_W([world.state], [[1]], [0.0, 20.0])
+        policy.update_W([TrainingSnapshot.capture(world.state)], [[1]], [0.0, 20.0])
 
         assert policy.W.shape == (19,)
 
@@ -155,7 +155,7 @@ class TestWUpdate:
         world = make_update_world()
         policy = make_policy(world, W=np.zeros(19), lr=0.5)
 
-        policy.update_W([world.state], [[1]], [0.0, 20.0])
+        policy.update_W([TrainingSnapshot.capture(world.state)], [[1]], [0.0, 20.0])
 
         # U_t = rewards[1] = 20; acquired-cost baseline and Q_pred are both 0,
         # so W steps from zero to lr * U_t * X = 10 * X.
@@ -166,7 +166,7 @@ class TestWUpdate:
         initial = np.full(19, 0.3)
         policy = make_policy(world, W=initial.copy(), lr=0.0)
 
-        policy.update_W([world.state], [[1]], [0.0, 20.0])
+        policy.update_W([TrainingSnapshot.capture(world.state)], [[1]], [0.0, 20.0])
 
         np.testing.assert_array_equal(policy.W, initial)
 
@@ -174,7 +174,8 @@ class TestWUpdate:
         world = make_update_world()
         policy = make_policy(world, W=np.zeros(19), lr=0.5)
 
-        policy.update_W([world.state, world.state], [[1], [1]], [0.0, 5.0, 7.0])
+        snapshot = TrainingSnapshot.capture(world.state)
+        policy.update_W([snapshot, snapshot], [[1], [1]], [0.0, 5.0, 7.0])
 
         # Epochs replay newest-first: U_t is 7 for t=1, then 7 + 5 = 12 for t=0,
         # each stepping W against the Q predicted by the weights so far.
