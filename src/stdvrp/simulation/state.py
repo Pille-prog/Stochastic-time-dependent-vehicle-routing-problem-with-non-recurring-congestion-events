@@ -65,10 +65,10 @@ class TrainingSnapshot:
     """Immutable capture of the State surface ``MonteCarloPolicy.update_W`` replays.
 
     ``Model.run_training_episode`` snapshots the State before every transition;
-    ``update_W`` walks the snapshots backward, rebinding ``MonteCarloPolicy.state``
-    to each in turn. Its replay path (``_calculate_already_acquired_cost``,
-    ``_extract_general_state_features``, ``_classify_delayed_clients``,
-    ``_extract_state_action_features``) reads exactly these four fields and never
+    ``update_W`` walks the snapshots backward, handing each in turn to
+    ``MonteCarloPolicy._already_acquired_cost`` and to the ``FeatureExtractor``
+    (``state_features`` / ``action_features``). That replay path reads exactly
+    these four fields and never
     mutates them — narrower and cheaper to copy than ``copy.deepcopy(state)``,
     which also duplicated fields the replay never touches (``clients_arrival``,
     ``total_vehicle_distance_travelled``, ...). ``State`` mutates

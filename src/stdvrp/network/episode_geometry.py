@@ -97,7 +97,9 @@ class EpisodeGeometry:
     vectorized feature extraction and candidate selection built on top of this
     facade (tickets 05, 07); they assume every column is priced for that row —
     true for a real ShortestPathCache — and are not the source of truth for
-    absent-pair semantics.
+    absent-pair semantics. :meth:`average_minutes_at` is the exception that
+    proves that rule: a row restricted to the Client subset at
+    :meth:`column_positions`, keeping the scalar accessors' ``KeyError``.
     """
 
     def __init__(
@@ -110,6 +112,7 @@ class EpisodeGeometry:
     ) -> None:
         self._average_minutes = average_minutes
         self._length = length
+        self._present = present
         self._row_index = row_index
         self._columns = columns
         self._col_index = {client: index for index, client in enumerate(columns)}
@@ -121,6 +124,10 @@ class EpisodeGeometry:
         self._average_minutes_list: list[list[float]] = average_minutes.tolist()
         self._length_list: list[list[float]] = length.tolist()
         self._present_list: list[list[bool]] = present.tolist()
+
+        # Settled once so :meth:`average_minutes_at` can skip its presence check
+        # on a real ShortestPathCache, which prices every (node, client) pair.
+        self._every_pair_present = bool(present.all())
 
     @classmethod
     def build(
@@ -175,6 +182,21 @@ class EpisodeGeometry:
         row: NDArray[np.float64] = self._length[self._row(node)]
         return row
 
+    def average_minutes_rows(self, nodes: Sequence[float]) -> NDArray[np.float64]:
+        """``[node, column]`` travel minutes: one :meth:`average_minutes_row` per node.
+
+        The whole fleet's travel times in one gather, which is how ticket 05's
+        feature extraction reads the geometry — every vehicle against every column,
+        once per decision, instead of once per (vehicle, Client) pair.
+        """
+        rows: NDArray[np.float64] = self._average_minutes[self._rows(nodes)]
+        return rows
+
+    def length_rows(self, nodes: Sequence[float]) -> NDArray[np.float64]:
+        """``[node, column]`` path lengths: one :meth:`length_row` per node."""
+        rows: NDArray[np.float64] = self._length[self._rows(nodes)]
+        return rows
+
     def average_minutes_column(self, client: float) -> NDArray[np.float64]:
         """Travel minutes from every row node to ``client``, in row-build order."""
         return self._average_minutes[:, self._col(client)]
@@ -183,11 +205,44 @@ class EpisodeGeometry:
         """Path length from every row node to ``client``, in row-build order."""
         return self._length[:, self._col(client)]
 
+    def column_positions(self, clients: Sequence[float]) -> NDArray[np.intp]:
+        """Positions of ``clients`` in :attr:`columns`; ``KeyError`` for one not held.
+
+        The index array :meth:`average_minutes_at` reads a Client subset with —
+        the unvisited ones, for the Policy's candidate selection (ticket 07).
+        Callers that slice the same subset repeatedly should hold on to it.
+        """
+        col_index = self._col_index
+        return np.fromiter(
+            (col_index[client] for client in clients), dtype=np.intp, count=len(clients)
+        )
+
+    def average_minutes_at(self, node: float, positions: NDArray[np.intp]) -> NDArray[np.float64]:
+        """Travel minutes from ``node`` to the columns at ``positions``.
+
+        The vectorized counterpart of the *scalar* :meth:`average_minutes`, not of
+        :meth:`average_minutes_row`: it keeps the absent-pair contract, raising
+        ``KeyError`` for a pair the cache never priced rather than reading the
+        zero those cells hold. On a real (dense) ShortestPathCache that check
+        costs nothing — density is settled once at build time.
+        """
+        row = self._row(node)
+        if not self._every_pair_present:
+            present = self._present[row].take(positions)
+            if not present.all():
+                absent = int(np.flatnonzero(~present)[0])
+                raise KeyError((node, self._columns[positions[absent]]))
+        minutes: NDArray[np.float64] = self._average_minutes[row].take(positions)
+        return minutes
+
     def _row(self, node: float) -> int:
         row = self._row_index.get(node)
         if row is None:
             raise KeyError(node)
         return row
+
+    def _rows(self, nodes: Sequence[float]) -> NDArray[np.intp]:
+        return np.fromiter((self._row(node) for node in nodes), dtype=np.intp, count=len(nodes))
 
     def _col(self, client: float) -> int:
         col = self._col_index.get(client)

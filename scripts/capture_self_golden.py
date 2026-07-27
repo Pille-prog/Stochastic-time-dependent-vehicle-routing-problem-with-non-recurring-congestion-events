@@ -26,6 +26,14 @@ and the gate *skips* — rather than falsely fails — when the running environm
 differs from the one that produced the file. Re-run this script to re-capture on a
 new canonical environment. See the ticket ``## Comments`` and ADR-0003.
 
+**Tier-2 check mode.** An optimization that inherently reorders float arithmetic
+(vectorized sums, BLAS batching) cannot meet the bit-exact gate; the spec then
+asks it to prove the fixture outputs still agree to a tight tolerance before
+re-capturing. ``--check`` re-runs the protocol against the *committed* capture and
+reports the worst relative deviation instead of overwriting it::
+
+    uv run python scripts/capture_self_golden.py --check --rtol 1e-9
+
 Usage (writes tests/fixtures/self_golden/mini_fixture.json)::
 
     uv run python scripts/capture_self_golden.py
@@ -33,11 +41,14 @@ Usage (writes tests/fixtures/self_golden/mini_fixture.json)::
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
+import math
 import platform
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -154,7 +165,72 @@ def capture() -> dict[str, Any]:
     }
 
 
+def numeric_pairs(expected: Any, produced: Any, path: str = "") -> Iterator[tuple[str, Any, Any]]:
+    """Walk two capture documents in lockstep, yielding their leaf numbers."""
+    if isinstance(expected, dict):
+        for key in expected:
+            yield from numeric_pairs(expected[key], produced[key], f"{path}.{key}")
+    elif isinstance(expected, list):
+        for index, item in enumerate(expected):
+            yield from numeric_pairs(item, produced[index], f"{path}[{index}]")
+    else:
+        yield path, expected, produced
+
+
+def worst_deviation(golden: dict[str, Any], live: dict[str, Any]) -> tuple[float, str]:
+    """The largest relative deviation between two captures, and where it sits.
+
+    An expected value of exactly zero admits no relative measure, so a produced
+    value that is not also exactly zero counts as infinite deviation — the metrics
+    that are structurally zero (an Episode with no earliness cost, the padding
+    feature) must stay zero however the float sums are reassociated.
+    """
+    worst, where = 0.0, "(identical)"
+    for path, expected, produced in numeric_pairs(golden, live):
+        if produced == expected:
+            continue
+        deviation = math.inf if expected == 0 else abs(produced - expected) / abs(expected)
+        if deviation > worst:
+            worst, where = deviation, path
+    return worst, where
+
+
+def check(rtol: float) -> int:
+    """Compare a fresh run against the committed capture; return a process exit code."""
+    if not SELF_GOLDEN_PATH.exists():
+        print(f"no capture to check against at {SELF_GOLDEN_PATH}")
+        return 1
+    golden = json.loads(SELF_GOLDEN_PATH.read_text(encoding="utf-8"))
+    captured_env = golden["meta"]["environment"]
+    current_env = environment_fingerprint()
+    if current_env != captured_env:
+        print(f"WARNING: captured on {captured_env}, running on {current_env}")
+
+    print("re-running the self-golden protocol against the committed capture ...", flush=True)
+    live = capture()
+    body = {key: value for key, value in golden.items() if key != "meta"}
+    worst, where = worst_deviation(body, live)
+    print(f"  worst relative deviation: {worst:.3e} at {where}")
+    print(f"  tolerance:                {rtol:.3e}")
+    if worst > rtol:
+        print("FAIL: the live package is outside the tolerance")
+        return 1
+    print("OK: within tolerance")
+    return 0
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="compare against the committed capture instead of overwriting it",
+    )
+    parser.add_argument("--rtol", type=float, default=1e-9, help="--check tolerance")
+    arguments = parser.parse_args()
+    if arguments.check:
+        raise SystemExit(check(arguments.rtol))
+
     print("building the mini-fixture world and running the self-golden protocol ...", flush=True)
     document = capture()
     SELF_GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)

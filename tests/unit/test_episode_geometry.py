@@ -73,9 +73,10 @@ class TestScalarAccessorsMatchTheCache:
     def test_average_minutes_matches_path_between(self) -> None:
         geometry = EpisodeGeometry.build(SPARSE_CACHE, clients=[1, 2], depot=DEPOT)
         for node, client in [(0, 0), (0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)]:
-            assert geometry.average_minutes(node, client) == SPARSE_CACHE.path_between(
-                node, client
-            ).average_minutes
+            assert (
+                geometry.average_minutes(node, client)
+                == SPARSE_CACHE.path_between(node, client).average_minutes
+            )
 
     def test_length_matches_path_between(self) -> None:
         geometry = EpisodeGeometry.build(SPARSE_CACHE, clients=[1, 2], depot=DEPOT)
@@ -135,6 +136,51 @@ class TestVectorAccessors:
         column = geometry.average_minutes_column(2)
         expected = [geometry.average_minutes(n, 2) for n in (0, 1, 2)]
         np.testing.assert_array_equal(column, expected)
+
+    def test_average_minutes_at_matches_scalar_reads_of_those_columns(self) -> None:
+        geometry = EpisodeGeometry.build(DENSE_CACHE, clients=[1, 2], depot=DEPOT)
+        positions = geometry.column_positions([2, 0])
+        expected = [geometry.average_minutes(1, 2), geometry.average_minutes(1, 0)]
+        np.testing.assert_array_equal(geometry.average_minutes_at(1, positions), expected)
+
+    def test_column_positions_locate_clients_in_column_order(self) -> None:
+        geometry = EpisodeGeometry.build(DENSE_CACHE, clients=[1, 2], depot=DEPOT)
+        np.testing.assert_array_equal(geometry.column_positions([2, 1, 0]), [2, 1, 0])
+        with pytest.raises(KeyError):
+            geometry.column_positions([99999])
+
+    def test_average_minutes_at_raises_for_a_pair_the_cache_never_priced(self) -> None:
+        # Unlike the raw row accessor, this one keeps the scalar KeyError contract:
+        # (1, 1) is absent from SPARSE_CACHE, so the whole slice must raise.
+        geometry = EpisodeGeometry.build(SPARSE_CACHE, clients=[1, 2], depot=DEPOT)
+        with pytest.raises(KeyError):
+            geometry.average_minutes_at(1, geometry.column_positions([2, 1]))
+        np.testing.assert_array_equal(
+            geometry.average_minutes_at(1, geometry.column_positions([2, 0])),
+            [geometry.average_minutes(1, 2), geometry.average_minutes(1, 0)],
+        )
+
+    def test_average_minutes_rows_stacks_one_row_per_node_in_order(self) -> None:
+        # The whole fleet's travel times in one gather (ticket 05): rows follow the
+        # node order handed in, which is vehicle order, not the matrix's row order.
+        geometry = EpisodeGeometry.build(DENSE_CACHE, clients=[1, 2], depot=DEPOT)
+        rows = geometry.average_minutes_rows([2, 0, 2])
+        expected = [geometry.average_minutes_row(node) for node in (2, 0, 2)]
+        np.testing.assert_array_equal(rows, expected)
+
+    def test_length_rows_stacks_one_row_per_node_in_order(self) -> None:
+        geometry = EpisodeGeometry.build(DENSE_CACHE, clients=[1, 2], depot=DEPOT)
+        rows = geometry.length_rows([1, 0])
+        np.testing.assert_array_equal(rows, [geometry.length_row(1), geometry.length_row(0)])
+
+    def test_rows_for_no_nodes_keeps_the_column_width(self) -> None:
+        geometry = EpisodeGeometry.build(DENSE_CACHE, clients=[1, 2], depot=DEPOT)
+        assert geometry.average_minutes_rows([]).shape == (0, len(geometry.columns))
+
+    def test_rows_for_an_unknown_node_raises_key_error(self) -> None:
+        geometry = EpisodeGeometry.build(DENSE_CACHE, clients=[1, 2], depot=DEPOT)
+        with pytest.raises(KeyError):
+            geometry.average_minutes_rows([0, 99999])
 
     def test_row_for_unknown_node_raises_key_error(self) -> None:
         geometry = EpisodeGeometry.build(DENSE_CACHE, clients=[1, 2], depot=DEPOT)
