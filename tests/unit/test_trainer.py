@@ -1,10 +1,17 @@
 """Trainer loop logic (ticket 09), isolated from real episodes via stubbed runners.
 
 The Trainer's contract with the episode runners is the seam: these tests replace
-``run_training_episode`` / ``run_evaluation_episode`` in the trainer module with
-recording stubs and verify the legacy-faithful orchestration — seed sequences, the
-warm-up learning-rate quirk, evaluation scheduling with best-W tracking, the final
-test over the configured tables, and the per-run output files.
+``run_training_episode`` / ``run_evaluation_episode`` with recording stubs and
+verify the legacy-faithful orchestration — seed sequences, the warm-up
+learning-rate quirk, evaluation scheduling with best-W tracking, the final test
+over the configured tables, and the per-run output files.
+
+The two runners are patched in *different* modules because they are called from
+different places: training stays in ``stdvrp.training.trainer``, while ticket 08
+(simulation-performance) moved every evaluation Episode behind
+``stdvrp.training.episode_pool``, which runs them here or on worker processes.
+These tests exercise the in-process path (no pool), so the batching is visible as
+the same one-call-per-Episode sequence it has always been.
 """
 
 import dataclasses
@@ -15,10 +22,11 @@ from typing import Any
 import numpy as np
 import pytest
 
+import stdvrp.training.episode_pool as episode_pool_module
 import stdvrp.training.trainer as trainer_module
 from stdvrp.config import ExperimentConfig
 from stdvrp.simulation import EpisodeResult, TrainingEpisodeResult
-from stdvrp.training import Trainer
+from stdvrp.training import EpisodeWorld, Trainer
 
 
 def make_config(**overrides: Any) -> ExperimentConfig:
@@ -60,15 +68,16 @@ def make_config(**overrides: Any) -> ExperimentConfig:
     return ExperimentConfig(**values)
 
 
-def make_trainer(config: ExperimentConfig) -> Trainer:
+def make_trainer(config: ExperimentConfig, episode_pool: Any = None, log: Any = None) -> Trainer:
     """World components are opaque to the Trainer's loop logic; sentinels suffice."""
-    return Trainer(
-        config,
-        client_generator=object(),
-        travel_time_model=object(),
-        shortest_path_cache=object(),
-        congestion_generator=object(),
+    world = EpisodeWorld(
+        config=config,
+        client_generator=object(),  # type: ignore[arg-type]
+        travel_time_model=object(),  # type: ignore[arg-type]
+        shortest_path_cache=object(),  # type: ignore[arg-type]
+        congestion_generator=object(),  # type: ignore[arg-type]
     )
+    return Trainer(world, episode_pool=episode_pool, log=log)
 
 
 def episode_result(total_cost: float = 100.0) -> EpisodeResult:
@@ -110,6 +119,27 @@ class EvaluationStub:
         return episode_result(cost)
 
 
+class PoolStub:
+    """Stands in for an ``EpisodePool``: records each batch, counts its shutdown."""
+
+    def __init__(self) -> None:
+        self.batches: list[tuple[Any, tuple[Any, ...]]] = []
+        self.progress: list[int] = []
+        self.closed = 0
+
+    def run(self, w: Any, requests: Any, *, on_progress: Any = None) -> tuple[EpisodeResult, ...]:
+        requests = tuple(requests)
+        self.batches.append((w, requests))
+        results = tuple(episode_result(100.0) for _ in requests)
+        for done in range(1, len(results) + 1):
+            if on_progress is not None:
+                on_progress(done)
+        return results
+
+    def close(self) -> None:
+        self.closed += 1
+
+
 @pytest.fixture
 def training_stub(monkeypatch: pytest.MonkeyPatch) -> TrainingStub:
     stub = TrainingStub()
@@ -120,7 +150,7 @@ def training_stub(monkeypatch: pytest.MonkeyPatch) -> TrainingStub:
 @pytest.fixture
 def evaluation_stub(monkeypatch: pytest.MonkeyPatch) -> EvaluationStub:
     stub = EvaluationStub()
-    monkeypatch.setattr(trainer_module, "run_evaluation_episode", stub)
+    monkeypatch.setattr(episode_pool_module, "run_evaluation_episode", stub)
     return stub
 
 
@@ -159,7 +189,7 @@ def test_evaluation_blocks_and_best_w_tracking(
 ) -> None:
     # Two blocks (after episodes 2 and 4); the second evaluates WORSE than the first.
     evaluation_stub = EvaluationStub(costs=[10.0, 20.0, 50.0, 60.0])
-    monkeypatch.setattr(trainer_module, "run_evaluation_episode", evaluation_stub)
+    monkeypatch.setattr(episode_pool_module, "run_evaluation_episode", evaluation_stub)
 
     config = make_config(total_train_iterations=4, test_frequency=2)
     result = make_trainer(config).train()
@@ -185,8 +215,13 @@ def test_evaluation_blocks_and_best_w_tracking(
 
 
 def test_final_test_walks_the_configured_tables(
-    training_stub: TrainingStub, evaluation_stub: EvaluationStub
+    training_stub: TrainingStub, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A distinct cost per cell, so the report has to put each result back where it
+    # came from: the whole table is requested as ONE batch (ticket 08) and sliced
+    # apart afterwards, and a constant cost would hide an off-by-one slice.
+    evaluation_stub = EvaluationStub(costs=[10.0, 20.0, 30.0, 50.0])
+    monkeypatch.setattr(episode_pool_module, "run_evaluation_episode", evaluation_stub)
     config = make_config(test_action_counts=(2, 5), test_episodes=2)
     trainer = make_trainer(config)
     best_w = np.array([7.0])
@@ -203,11 +238,14 @@ def test_final_test_walks_the_configured_tables(
     assert [report.action_count for report in reports] == [2, 5]
     per_seed = reports[0].per_seed
     assert [(entry.seed, entry.vehicle_count) for entry in per_seed] == [(100, 6), (101, 5)]
-    # Metrics are the single episode's raw values, not a mean over repeats.
-    assert per_seed[0].metrics["total_cost"] == 100.0
+    # Metrics are the single episode's raw values, not a mean over repeats, and each
+    # cell keeps the cost of the Episode that was requested for it.
+    assert [entry.metrics["total_cost"] for entry in per_seed] == [10.0, 20.0]
+    assert [entry.metrics["total_cost"] for entry in reports[1].per_seed] == [30.0, 50.0]
     assert per_seed[0].metrics["state_count"] == 10.0
     # Summary is mean/std across seeds.
-    assert reports[0].summary["total_cost"] == (100.0, 0.0)
+    assert reports[0].summary["total_cost"] == (15.0, 5.0)
+    assert reports[1].summary["total_cost"] == (40.0, 10.0)
 
 
 @pytest.mark.parametrize("test_episodes", [1, 2, 50])
@@ -218,7 +256,7 @@ def test_final_test_ignores_test_episodes(
     repetition — final_test runs each (action count, seed) pair exactly once
     regardless of its value."""
     evaluation_stub = EvaluationStub()
-    monkeypatch.setattr(trainer_module, "run_evaluation_episode", evaluation_stub)
+    monkeypatch.setattr(episode_pool_module, "run_evaluation_episode", evaluation_stub)
     config = make_config(test_action_counts=(2,), test_episodes=test_episodes)
     trainer = make_trainer(config)
 
@@ -263,6 +301,66 @@ def test_run_falls_back_to_final_w_when_no_evaluation_ran(
 
     document = json.loads((tmp_path / "run" / "results.json").read_text(encoding="utf-8"))
     assert document["training"]["best_w"] is None
+
+
+def test_a_worker_pool_takes_every_evaluation_batch(
+    training_stub: TrainingStub, evaluation_stub: EvaluationStub, tmp_path: Path
+) -> None:
+    """Ticket 08: with a pool, no evaluation Episode runs in this process."""
+    pool = PoolStub()
+    config = make_config(total_train_iterations=2, test_frequency=2)
+    make_trainer(config, episode_pool=pool).run(tmp_path / "run")
+
+    # One batch per evaluation block, then the whole final-test table as one batch.
+    evaluation_batch, test_batch = pool.batches
+    assert [request.seed for request in evaluation_batch[1]] == [100000, 100001]
+    assert all(
+        request.vehicle_count is None and request.number_actions_test is None
+        for request in evaluation_batch[1]
+    )
+    assert list(evaluation_batch[0]) == [2.0]  # the block's newest W
+    assert [
+        (request.seed, request.vehicle_count, request.number_actions_test)
+        for request in test_batch[1]
+    ] == [(100, 6, 8), (101, 5, 7)]
+    assert evaluation_stub.calls == []
+    assert pool.closed == 1
+
+
+def test_the_final_test_reports_progress_while_it_runs(
+    training_stub: TrainingStub, evaluation_stub: EvaluationStub
+) -> None:
+    """The whole table is one batch, so it must report as it goes, not only at the end."""
+    messages: list[str] = []
+    config = make_config(
+        test_action_counts=(2, 5),
+        test_seeds=(100, 101, 102, 103, 104),
+        test_vehicle_counts=(4, 4, 5, 5, 6),
+    )
+    make_trainer(config, log=messages.append).final_test(np.array([1.0]))
+
+    assert messages[0] == "final test: 10 episodes"
+    assert "final test: 3/10 episodes" in messages
+    assert "final test: 10/10 episodes" in messages
+    # The per-action-count means still close the phase out.
+    assert messages[-1].startswith("final test actions=5:")
+
+
+def test_the_worker_pool_is_shut_down_even_when_the_run_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed run must not leave 16 worker processes holding a world each."""
+
+    def explode(**kwargs: Any) -> TrainingEpisodeResult:
+        raise RuntimeError("episode blew up")
+
+    monkeypatch.setattr(trainer_module, "run_training_episode", explode)
+    pool = PoolStub()
+
+    with pytest.raises(RuntimeError, match="episode blew up"):
+        make_trainer(make_config(), episode_pool=pool).run(tmp_path / "run")
+
+    assert pool.closed == 1
 
 
 def test_config_serialization_round_trips_paths_and_tuples(tmp_path: Path) -> None:

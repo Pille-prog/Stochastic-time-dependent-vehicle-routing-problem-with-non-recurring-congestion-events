@@ -40,7 +40,7 @@ To run the full Chengdu experiment — training with periodic evaluation and bes
 uv run python experiments/chengdu/run.py
 ```
 
-Results (`results.json`) and the training plot land in a per-run directory under `experiments/chengdu/runs/` (gitignored); `--config` and `--output-dir` override the defaults. It needs the full dataset in place (below) and spends ~15 minutes loading it before training starts. CI exercises a smoke-sized version of the same path on the committed fixture (`tests/test_trainer_smoke.py`).
+Results (`results.json`) and the training plot land in a per-run directory under `experiments/chengdu/runs/` (gitignored); `--config` and `--output-dir` override the defaults. It needs the full dataset in place (below) and spends ~15 minutes loading it the first time; a binary world cache (`--cache-dir`/`--no-cache`, on by default) makes later runs with the same data load in seconds. Training is sequential, but the evaluation blocks and the final test can run on a worker pool: `--workers N` (or `STDVRP_WORKERS`) spreads them over N processes and produces identical results. It is opt-in because the ceiling is memory, not cores — each worker holds its own copy of the world, 8.0 GB of it on the full Chengdu data, so a 32 GB machine fits two workers beside the training process. CI exercises a smoke-sized version of the same path on the committed fixture (`tests/test_trainer_smoke.py`).
 
 ## Data
 

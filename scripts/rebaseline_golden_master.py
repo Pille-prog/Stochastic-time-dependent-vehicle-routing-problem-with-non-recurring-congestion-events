@@ -106,7 +106,7 @@ def run_rebaseline() -> None:
     from stdvrp.demand import ClientGenerator
     from stdvrp.network import ShortestPathCache
     from stdvrp.traffic import CsvDataSource, TravelTimeModel
-    from stdvrp.training import Trainer
+    from stdvrp.training import EpisodeWorld, Trainer
 
     capture = _load_capture_module()
     golden = json.loads(LEGACY_BASELINE.read_text(encoding="utf-8"))
@@ -130,8 +130,8 @@ def run_rebaseline() -> None:
         horizon_start_minute=protocol["horizon_start_time"],
     )
     config = config_from_protocol(protocol, data_dir)
-    trainer = Trainer(
-        config,
+    world = EpisodeWorld(
+        config=config,
         client_generator=ClientGenerator(
             mean_number_clients=protocol["mean_number_clients"],
             client_count_stddev=30.0,
@@ -151,8 +151,8 @@ def run_rebaseline() -> None:
             congestion_upper_bound=protocol["congestion_upper_bound"],
             max_congestion_duration=protocol["max_congestion_duration"],
         ),
-        log=lambda message: print(message, flush=True),
     )
+    trainer = Trainer(world, log=lambda message: print(message, flush=True))
     print(f"world ready after {time.monotonic() - started:.0f}s; running the protocol", flush=True)
 
     with tempfile.TemporaryDirectory(prefix="rebaseline_run_") as run_dir:

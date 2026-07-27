@@ -55,13 +55,7 @@ def test_deduplicated_metrics_match_the_legacy_mean_within_one_ulp(
         test_vehicle_counts=(4, 4),
     )
     world, _ = benchmark_module.load_world(config)
-    trainer = Trainer(
-        config,
-        client_generator=world.client_generator,
-        travel_time_model=world.travel_time_model,
-        shortest_path_cache=world.shortest_path_cache,
-        congestion_generator=world.congestion_generator,
-    )
+    trainer = Trainer(world)
     training = trainer.train()
     w = training.best_w if training.best_w is not None else training.w_trajectory[-1]
 

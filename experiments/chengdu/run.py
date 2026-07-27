@@ -12,6 +12,13 @@ world cache (ticket 03, simulation-performance) makes a repeat run with the same
 data and world-shaping config load in seconds instead — on by default, see
 ``--cache-dir``/``--no-cache``. The training run itself depends on
 ``total_train_iterations``.
+
+The evaluation blocks and the final test can run on a worker pool (ticket 08,
+simulation-performance): ``--workers N`` (or ``STDVRP_WORKERS``) spreads them
+over N processes, and the results are identical either way. It is opt-in, and
+the ceiling is memory rather than cores: each worker holds its own copy of the
+world, 8.0 GB of it on the full Chengdu data, so a 32 GB machine fits two
+workers beside the training process. See the ticket's benchmark.
 """
 
 from __future__ import annotations
@@ -22,7 +29,7 @@ from pathlib import Path
 
 from stdvrp.config import ExperimentConfig
 from stdvrp.traffic import world_cache
-from stdvrp.training import Trainer
+from stdvrp.training import Trainer, default_worker_count
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -53,7 +60,26 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="always rebuild the world from the CSVs and do not write the cache",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=(
+            "worker processes for the evaluation blocks and the final test, ticket 08 "
+            "(default: STDVRP_WORKERS, else 1 — everything in this process). Each "
+            "worker holds its own copy of the world: 8.0 GB on the full Chengdu data"
+        ),
+    )
     args = parser.parse_args(argv)
+    # Resolved after parsing, never as an argparse default: reading the
+    # environment eagerly would make a malformed STDVRP_WORKERS break --help too.
+    if args.workers is None:
+        args.workers = default_worker_count()
+    if args.no_cache and args.workers > 1:
+        parser.error(
+            "--no-cache needs --workers 1: each worker loads its world through the "
+            "binary cache, so without it every worker would re-parse the CSVs"
+        )
 
     config = ExperimentConfig.from_yaml(args.config)
     output_dir = args.output_dir
@@ -62,8 +88,9 @@ def main(argv: list[str] | None = None) -> None:
     cache_dir = None if args.no_cache else args.cache_dir
 
     print(f"config: {args.config}")
+    print(f"evaluating on {args.workers} worker process(es)")
     print("loading world data (the full Chengdu archive takes ~15 minutes cold)...")
-    trainer = Trainer.from_config(config, cache_dir=cache_dir, log=print)
+    trainer = Trainer.from_config(config, cache_dir=cache_dir, worker_count=args.workers, log=print)
     result = trainer.run(output_dir)
 
     best = result.training.best_mean_cost

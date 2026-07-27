@@ -44,7 +44,7 @@ from stdvrp.demand import ClientGenerator
 from stdvrp.network import ShortestPathCache
 from stdvrp.simulation import run_evaluation_episode
 from stdvrp.traffic import CsvDataSource, TravelTimeModel
-from stdvrp.training import Trainer
+from stdvrp.training import EpisodeWorld, Trainer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "golden_master" / "chengdu_full_phase2.json"
@@ -176,11 +176,13 @@ def test_trainer_run_produces_finite_costs_near_the_baseline(
     protocol = golden["protocol"]
     config = config_from_protocol(protocol, data_dir)
     trainer = Trainer(
-        config,
-        client_generator=world["client_generator"],
-        travel_time_model=world["travel_time_model"],
-        shortest_path_cache=world["cache"],
-        congestion_generator=world["congestion_generator"],
+        EpisodeWorld(
+            config=config,
+            client_generator=world["client_generator"],
+            travel_time_model=world["travel_time_model"],
+            shortest_path_cache=world["cache"],
+            congestion_generator=world["congestion_generator"],
+        )
     )
     result = trainer.run(tmp_path / "run")
 

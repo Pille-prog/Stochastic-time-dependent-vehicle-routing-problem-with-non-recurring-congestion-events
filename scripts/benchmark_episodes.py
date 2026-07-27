@@ -38,6 +38,19 @@ See the ticket's ``## Comments`` for the recorded numbers::
 
 The projection arithmetic (``project_full_run`` / ``interpolate_test_time``) is
 pure and unit-tested in ``tests/test_benchmark_projection.py``.
+
+**Worker sweep (``--workers``, ticket 08).** Times the two phases that ticket 08
+parallelizes — an evaluation block and the final test — at each worker count, on
+one world loaded once, and projects the full run for each. The per-episode means
+it feeds the projection with are already divided by whatever parallelism the run
+achieved, so the same arithmetic answers "how long at N workers?"::
+
+    uv run python scripts/benchmark_episodes.py \
+        --config experiments/chengdu/parallel_scaled.yaml \
+        --project experiments/chengdu/config.yaml --workers 1,2,3
+
+Every count above 1 needs the world cache: each worker loads its own world
+through it (and holds it — see ticket 08's Comments for the memory ceiling).
 """
 
 from __future__ import annotations
@@ -49,16 +62,13 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
 from stdvrp.config import ExperimentConfig
-from stdvrp.congestion import ArcProbabilityCongestionGenerator
-from stdvrp.demand import ClientGenerator
-from stdvrp.network import ShortestPathCache
 from stdvrp.simulation import run_evaluation_episode, run_training_episode
-from stdvrp.traffic import TravelTimeModel, world_cache
+from stdvrp.traffic import world_cache
+from stdvrp.training import EpisodePool, EpisodeRequest, EpisodeWorld, Trainer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "chengdu_mini"
@@ -69,31 +79,11 @@ LEGACY_DAYS = tuple(range(601, 631)) + tuple(range(701, 715))
 
 
 # --- The world every episode runner shares -----------------------------------
-
-
-@dataclass(frozen=True)
-class World:
-    """The loaded, immutable-per-run objects an Episode is built from."""
-
-    config: ExperimentConfig
-    client_generator: ClientGenerator
-    travel_time_model: TravelTimeModel
-    shortest_path_cache: ShortestPathCache
-    congestion_generator: ArcProbabilityCongestionGenerator
-
-    def episode_kwargs(self) -> dict[str, Any]:
-        config = self.config
-        return {
-            "client_generator": self.client_generator,
-            "travel_time_model": self.travel_time_model,
-            "shortest_path_cache": self.shortest_path_cache,
-            "congestion_generator": self.congestion_generator,
-            "epsilon": config.epsilon,
-            "max_congestion_duration": config.max_congestion_duration,
-            "horizon_start_minute": config.horizon_start_minute,
-            "horizon_end_minute": config.horizon_end_minute,
-            "n_observed_arcs": config.n_observed_arcs,
-        }
+#
+# ``EpisodeWorld`` (stdvrp.training.episode_pool) is exactly this: the loaded
+# world plus the config scalars, and one ``episode_kwargs()`` both Episode
+# runners take. It is what the Trainer and its worker processes run on, so the
+# benchmark times the same object the experiment uses rather than a lookalike.
 
 
 def build_fixture_data_dir(destination: Path) -> Path:
@@ -119,30 +109,16 @@ def fixture_config(data_dir: Path) -> ExperimentConfig:
     )
 
 
-def load_world(config: ExperimentConfig, *, cache_dir: Path | None = None) -> tuple[World, float]:
+def load_world(
+    config: ExperimentConfig, *, cache_dir: Path | None = None
+) -> tuple[EpisodeWorld, float]:
     """Build the world from ``config``; return it with the world-load wall-clock.
 
     ``cache_dir`` (ticket 03) opts into the binary world cache: ``None`` parses
     the CSVs fresh, exactly as before; a directory reuses a matching snapshot.
     """
     started = time.perf_counter()
-    loaded = world_cache.load_world(config, cache_dir=cache_dir)
-    travel_time_model = loaded.travel_time_model
-    shortest_path_cache = loaded.shortest_path_cache
-    congestion_generator = ArcProbabilityCongestionGenerator(
-        event_probability=travel_time_model.event_probability,
-        successors=travel_time_model.successors,
-        congestion_lower_bound=config.congestion_lower_bound,
-        congestion_upper_bound=config.congestion_upper_bound,
-        max_congestion_duration=config.max_congestion_duration,
-    )
-    world = World(
-        config=config,
-        client_generator=ClientGenerator.from_config(config),
-        travel_time_model=travel_time_model,
-        shortest_path_cache=shortest_path_cache,
-        congestion_generator=congestion_generator,
-    )
+    world = EpisodeWorld.load(config, cache_dir=cache_dir)
     return world, time.perf_counter() - started
 
 
@@ -165,7 +141,7 @@ class PhaseTiming:
         return self.episodes / self.total_seconds if self.total_seconds else 0.0
 
 
-def time_training(world: World, seeds: list[int]) -> tuple[PhaseTiming, np.ndarray | None]:
+def time_training(world: EpisodeWorld, seeds: list[int]) -> tuple[PhaseTiming, np.ndarray | None]:
     """Sequential training episodes carrying W, warm-up on the first (legacy quirk).
 
     Returns the phase timing and the final trained W (so callers can evaluate with
@@ -192,7 +168,7 @@ def time_training(world: World, seeds: list[int]) -> tuple[PhaseTiming, np.ndarr
     return PhaseTiming(len(seeds), time.perf_counter() - started), w
 
 
-def time_evaluation(world: World, seeds: list[int], w: np.ndarray | None) -> PhaseTiming:
+def time_evaluation(world: EpisodeWorld, seeds: list[int], w: np.ndarray | None) -> PhaseTiming:
     """Greedy evaluation episodes with a fixed W, generated fleet and action pool."""
     started = time.perf_counter()
     for seed in seeds:
@@ -200,7 +176,9 @@ def time_evaluation(world: World, seeds: list[int], w: np.ndarray | None) -> Pha
     return PhaseTiming(len(seeds), time.perf_counter() - started)
 
 
-def time_test_at_action_count(world: World, action_count: int, w: np.ndarray | None) -> PhaseTiming:
+def time_test_at_action_count(
+    world: EpisodeWorld, action_count: int, w: np.ndarray | None
+) -> PhaseTiming:
     """Final-test episodes at one action-pool width over the config's seed/fleet table."""
     config = world.config
     started = time.perf_counter()
@@ -213,6 +191,54 @@ def time_test_at_action_count(world: World, action_count: int, w: np.ndarray | N
             **world.episode_kwargs(),
         )
     return PhaseTiming(len(config.test_seeds), time.perf_counter() - started)
+
+
+# --- Worker sweep (ticket 08) --------------------------------------------------
+
+
+def time_worker_count(
+    world: EpisodeWorld, cache_dir: Path | None, worker_count: int, w: np.ndarray | None
+) -> tuple[float, PhaseTiming, dict[int, PhaseTiming]]:
+    """Time the two parallelizable phases at one worker count, on one loaded world.
+
+    Returns the pool's startup (one Episode per worker, so every worker has loaded
+    its world), the evaluation block, and the final test *per action count* — the
+    per-episode means the projection needs, already divided by whatever
+    parallelism the run achieved. The final test goes through ``Trainer.final_test``
+    itself, one action count at a time, so the phase being timed is the phase the
+    experiment runs rather than a lookalike.
+    """
+    config = world.config
+    pool = EpisodePool.for_worker_count(config, cache_dir=cache_dir, worker_count=worker_count)
+    requests = tuple(EpisodeRequest(seed) for seed in config.evaluation_seeds)
+    try:
+        prime_seconds = 0.0
+        if pool is not None:
+            started = time.perf_counter()
+            pool.run(w, tuple(requests[0] for _ in range(worker_count)))
+            prime_seconds = time.perf_counter() - started
+
+        started = time.perf_counter()
+        # Exactly what Trainer._run_evaluation_batch dispatches an evaluation
+        # block to, on each side of its one branch.
+        if pool is None:
+            world.run_episodes(w, requests)
+        else:
+            pool.run(w, requests)
+        evaluation = PhaseTiming(len(requests), time.perf_counter() - started)
+
+        test: dict[int, PhaseTiming] = {}
+        for action_count in config.test_action_counts:
+            scoped = dataclasses.replace(
+                world, config=dataclasses.replace(config, test_action_counts=(action_count,))
+            )
+            started = time.perf_counter()
+            Trainer(scoped, episode_pool=pool).final_test(w)
+            test[action_count] = PhaseTiming(len(config.test_seeds), time.perf_counter() - started)
+    finally:
+        if pool is not None:
+            pool.close()
+    return prime_seconds, evaluation, test
 
 
 # --- Full-run projection (pure; unit-tested) ----------------------------------
@@ -404,6 +430,72 @@ def run_config_baseline(
         )
 
 
+def run_worker_sweep(
+    config_path: Path,
+    full_config_path: Path | None,
+    worker_counts: list[int],
+    cache_dir: Path | None,
+) -> None:
+    """Ticket 08: the parallelizable phases at each worker count, and what they project to.
+
+    One world is loaded and one W trained here; every worker count then replays the
+    same two phases on it, so the counts differ only in how many processes ran them.
+    """
+    config = ExperimentConfig.from_yaml(config_path)
+    print(f"config: {config_path}")
+    print("loading world (seconds warm-cached, minutes cold) ...", flush=True)
+    world, load_seconds = load_world(config, cache_dir=cache_dir)
+    print(f"world loaded in {load_seconds:.1f}s", flush=True)
+
+    train_seeds = [config.first_train_seed + i for i in range(config.total_train_iterations)]
+    training, trained_w = time_training(world, train_seeds)
+    print(f"training (stays sequential): {training.per_episode:.3f} s/ep", flush=True)
+
+    rows = []
+    for worker_count in worker_counts:
+        print(f"\nworkers = {worker_count}", flush=True)
+        prime, evaluation, test = time_worker_count(world, cache_dir, worker_count, trained_w)
+        print(f"  pool start        {prime:8.1f}s", flush=True)
+        print(
+            f"  evaluation        {evaluation.total_seconds:8.1f}s "
+            f"({evaluation.per_episode:.3f} s/ep over {evaluation.episodes})",
+            flush=True,
+        )
+        for action_count, timing in test.items():
+            print(
+                f"  final test @{action_count:<3}   {timing.total_seconds:8.1f}s "
+                f"({timing.per_episode:.3f} s/ep over {timing.episodes})",
+                flush=True,
+            )
+        rows.append((worker_count, prime, evaluation, test))
+
+    print("\nworker sweep")
+    baseline = rows[0][2].total_seconds + sum(t.total_seconds for t in rows[0][3].values())
+    for worker_count, prime, evaluation, test in rows:
+        phases = evaluation.total_seconds + sum(t.total_seconds for t in test.values())
+        _print_table(
+            [
+                (
+                    f"{worker_count} worker(s)",
+                    f"phases {phases:8.1f}s   speedup {baseline / phases:5.2f}x"
+                    f"   pool start {prime:6.1f}s",
+                )
+            ]
+        )
+        if full_config_path is not None:
+            shape = full_run_shape(ExperimentConfig.from_yaml(full_config_path))
+            projection = project_full_run(
+                PhaseTimes(
+                    world_load_seconds=load_seconds,
+                    train_seconds=training.per_episode,
+                    eval_seconds=evaluation.per_episode,
+                    test_seconds={a: timing.per_episode for a, timing in test.items()},
+                ),
+                shape,
+            )
+            _print_table([("  projected full run", _hms(projection["total_seconds"] + prime))])
+
+
 def _test_episode_count(shape: FullRunShape) -> int:
     return len(shape.test_action_counts) * shape.test_seed_count * shape.test_episodes_per_cell
 
@@ -453,10 +545,28 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="always rebuild the world from the CSVs and do not write the cache",
     )
+    parser.add_argument(
+        "--workers",
+        default=None,
+        help=(
+            "comma-separated worker counts to sweep the parallelizable phases over, "
+            "ticket 08 (e.g. 1,2,3); needs --config, and every count above 1 needs the "
+            "world cache because each worker loads its own world through it"
+        ),
+    )
     args = parser.parse_args(argv)
     cache_dir = None if args.no_cache else args.cache_dir
 
-    if args.config is None:
+    if args.workers is not None:
+        if args.config is None:
+            parser.error("--workers sweeps a real-dataset config: pass --config too")
+        run_worker_sweep(
+            args.config,
+            args.project,
+            [int(count) for count in args.workers.split(",")],
+            cache_dir=cache_dir,
+        )
+    elif args.config is None:
         run_fixture_benchmark(args.train, args.eval, cache_dir=cache_dir)
     else:
         run_config_baseline(
