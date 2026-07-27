@@ -48,6 +48,7 @@ from stdvrp.congestion import (
 from stdvrp.demand import ClientGenerator
 from stdvrp.network import ShortestPathCache
 from stdvrp.simulation import run_evaluation_episode
+from stdvrp.simulation.episode_velocities import ArcVelocity, EpisodeVelocities
 from stdvrp.simulation.model import Model
 from stdvrp.simulation.state import State
 from stdvrp.traffic import CsvDataSource, TravelTimeModel
@@ -93,38 +94,65 @@ class TauRecordingState(State):
         super().__setattr__(name, value)
 
 
+class RecordingVelocities:
+    """Delegates to the Episode's real sampler, recording every sample it returns.
+
+    A wrapper rather than a subclass: the Model constructs its own
+    :class:`EpisodeVelocities`, and ADR-0002 forbids adding a seam so a test can
+    inject one. Everything the Model asks of it is forwarded, and
+    ``congested_arcs`` is the same dict object (``release`` clears it in place),
+    so the CongestionGenerator and the Model still share one event book.
+    """
+
+    def __init__(self, inner: EpisodeVelocities, samples: list[ArcVelocity]) -> None:
+        self.inner = inner
+        self.samples = samples
+        self.congested_arcs = inner.congested_arcs
+
+    def sample(self, node_start: float, node_end: float, tau_episode: float) -> ArcVelocity:
+        sampled = self.inner.sample(node_start, node_end, tau_episode)
+        self.samples.append(sampled)
+        return sampled
+
+    @property
+    def any_congestion(self) -> bool:
+        return self.inner.any_congestion
+
+    def congestion_expiry(self, arc: tuple[float, float]) -> float | None:
+        return self.inner.congestion_expiry(arc)
+
+    def release(self) -> None:
+        self.inner.release()
+
+
 class RecordingModel(Model):
     """Model that records velocity samples and termination calls."""
 
     last_instance: RecordingModel | None = None
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self.velocity_observations: list[tuple[float, float, float]] = []
+        self.velocity_observations: list[ArcVelocity] = []
         self.terminate_passing_horizon_calls = 0
         self.terminate_all_back_calls = 0
         # Delay charged to unserved Clients by each termination call.
         self.termination_delay_charges: list[float] = []
         super().__init__(*args, **kwargs)
+        self.velocities = RecordingVelocities(  # type: ignore[assignment]
+            self.velocities, self.velocity_observations
+        )
         RecordingModel.last_instance = self
-
-    def create_random_velocity(
-        self, node_start: float, node_end: float, tau_episode: float
-    ) -> tuple[float, float, float]:
-        result = super().create_random_velocity(node_start, node_end, tau_episode)
-        self.velocity_observations.append(result)
-        return result
 
     def terminate_state_passing_horizon(self) -> None:
         self.terminate_passing_horizon_calls += 1
-        delay_before = self.total_delay_cost
+        delay_before = self.costs.delay_cost
         super().terminate_state_passing_horizon()
-        self.termination_delay_charges.append(self.total_delay_cost - delay_before)
+        self.termination_delay_charges.append(self.costs.delay_cost - delay_before)
 
     def terminate_state_if_all_vehicles_come_back(self) -> None:
         self.terminate_all_back_calls += 1
-        delay_before = self.total_delay_cost
+        delay_before = self.costs.delay_cost
         super().terminate_state_if_all_vehicles_come_back()
-        self.termination_delay_charges.append(self.total_delay_cost - delay_before)
+        self.termination_delay_charges.append(self.costs.delay_cost - delay_before)
 
 
 class RecordingCongestionGenerator(CongestionGenerator):
