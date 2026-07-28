@@ -18,3 +18,7 @@ Issues and specs live as markdown files under `.scratch/<feature-slug>/`. See `d
 ### Domain docs
 
 Single-context layout — `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+`docs/simulator-review.md` — auditoría de correctitud del simulador (velocidades, posiciones,
+costes, congestión, features de la Policy): bugs confirmados frente a quirks heredados
+preservados por ADR-0001. Consultar antes de tocar `simulation/`, `policies/` o `congestion/`.

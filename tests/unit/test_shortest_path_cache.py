@@ -43,6 +43,13 @@ def test_missing_pair_raises_key_error_like_legacy_indexing(cache: ShortestPathC
         cache.path_between(0, 99999)
 
 
+def test_items_is_a_live_view_not_a_copy(cache: ShortestPathCache) -> None:
+    items = cache.items()
+    assert len(items) == len(cache)
+    assert (0, 1) in dict(items)
+    assert dict(items)[(0, 1)] == cache.path_between(0, 1)
+
+
 def test_contains_and_tuple_indexing(cache: ShortestPathCache) -> None:
     assert (0, 1) in cache
     assert (0, 99999) not in cache

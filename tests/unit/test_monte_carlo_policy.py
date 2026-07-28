@@ -1,20 +1,32 @@
-"""Unit tests for MonteCarloPolicy's W update and epsilon-greedy selection (ticket 11).
+"""Unit tests for MonteCarloPolicy's W update, epsilon-greedy and candidate selection.
 
 These pin the pure computations on a world small enough to verify by hand: the
 19-component feature/weight dimensions, one hand-computed SGD step, the backward
 accumulation of the Monte Carlo return, and the two epsilon extremes (0 = pure
 greedy, 1 = pure random from the injected exploration Generator, ticket 13).
+
+``TestCandidateSelection`` (simulation-performance ticket 07) pins the vectorized
+per-vehicle candidate selection against :func:`reference_possible_actions`, the
+pre-vectorization implementation kept here verbatim as a differential oracle.
+
+Since ticket 05 the per-decision State features are an argument rather than an
+attribute, so these tests build one with :func:`state_features` and hand it in —
+exactly as ``decide``/``decide_train`` do. Feature *arithmetic* is pinned in
+``tests/unit/test_feature_extraction.py``, not here.
 """
 
+import heapq
 import math
 from typing import NamedTuple
 
 import numpy as np
 import pytest
 
+from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPath, ShortestPathCache
+from stdvrp.policies.feature_extraction import StateFeatures
 from stdvrp.policies.monte_carlo import MonteCarloPolicy, TimeWindows
-from stdvrp.simulation.state import State
+from stdvrp.simulation.state import State, TrainingSnapshot
 
 DEPOT = 0
 HORIZON_END = 780
@@ -56,13 +68,22 @@ class ScriptedRng:
         return self._randoms.pop(0)
 
 
-def make_policy(world: World, *, epsilon=0.0, W=None, lr=0.0, seed=0, rng=None):
+def make_geometry(world: World) -> EpisodeGeometry:
+    return EpisodeGeometry.build(world.cache, clients=list(world.time_windows), depot=DEPOT)
+
+
+def state_features(policy: MonteCarloPolicy) -> StateFeatures:
+    """The per-decision State features for the policy's current State."""
+    return policy.feature_extractor.state_features(policy.state)
+
+
+def make_policy(world: World, *, epsilon=0.0, W=None, lr=0.0, seed=0, rng=None, vehicles=1):
     # The constructor draws one exploration_rng choice per vehicle (ticket 13).
     if rng is None:
         rng = np.random.default_rng(seed)
     return MonteCarloPolicy(
-        number_vehicles=1,
-        shortest_path_cache=world.cache,
+        number_vehicles=vehicles,
+        geometry=make_geometry(world),
         time_windows=world.time_windows,
         state=world.state,
         number_clients=len(world.time_windows),
@@ -140,14 +161,15 @@ class TestWUpdate:
 
         assert policy.W is not None  # created by the constructor's greedy pass
         assert policy.W.shape == (19,)
-        assert len(policy.X_general_state) == 12
-        assert len(policy.X_state_action) == 7
+        features = state_features(policy)
+        assert features.general.shape == (12,)
+        assert policy.feature_extractor.action_features(features, policy.action).shape == (19,)
 
     def test_update_preserves_w_dimensions(self):
         world = make_update_world()
         policy = make_policy(world, W=np.zeros(19), lr=0.5)
 
-        policy.update_W([world.state], [[1]], [0.0, 20.0])
+        policy.update_W([TrainingSnapshot.capture(world.state)], [[1]], [0.0, 20.0])
 
         assert policy.W.shape == (19,)
 
@@ -155,7 +177,7 @@ class TestWUpdate:
         world = make_update_world()
         policy = make_policy(world, W=np.zeros(19), lr=0.5)
 
-        policy.update_W([world.state], [[1]], [0.0, 20.0])
+        policy.update_W([TrainingSnapshot.capture(world.state)], [[1]], [0.0, 20.0])
 
         # U_t = rewards[1] = 20; acquired-cost baseline and Q_pred are both 0,
         # so W steps from zero to lr * U_t * X = 10 * X.
@@ -166,7 +188,7 @@ class TestWUpdate:
         initial = np.full(19, 0.3)
         policy = make_policy(world, W=initial.copy(), lr=0.0)
 
-        policy.update_W([world.state], [[1]], [0.0, 20.0])
+        policy.update_W([TrainingSnapshot.capture(world.state)], [[1]], [0.0, 20.0])
 
         np.testing.assert_array_equal(policy.W, initial)
 
@@ -174,7 +196,8 @@ class TestWUpdate:
         world = make_update_world()
         policy = make_policy(world, W=np.zeros(19), lr=0.5)
 
-        policy.update_W([world.state, world.state], [[1], [1]], [0.0, 5.0, 7.0])
+        snapshot = TrainingSnapshot.capture(world.state)
+        policy.update_W([snapshot, snapshot], [[1], [1]], [0.0, 5.0, 7.0])
 
         # Epochs replay newest-first: U_t is 7 for t=1, then 7 + 5 = 12 for t=0,
         # each stepping W against the Q predicted by the weights so far.
@@ -256,7 +279,7 @@ class TestEpsilonGreedy:
         # always explores) and the exploratory choice itself.
         rng = ScriptedRng(choices=[1, 2], randoms=[0.5])
         policy = make_policy(world, epsilon=1.0, W=distance_only_w(), rng=rng)
-        possible = policy._select_vehicle_possible_actions(2, 0)
+        possible = policy._select_vehicle_possible_actions(2, 0, state_features(policy))
         assert possible == [1, 2]  # precondition: the two closest Clients
 
         assert policy.decide_train(world.state) == [2]
@@ -277,7 +300,7 @@ class TestEpsilonGreedy:
         world = make_update_world()
         policy = MonteCarloPolicy(
             number_vehicles=1,
-            shortest_path_cache=world.cache,
+            geometry=make_geometry(world),
             time_windows=world.time_windows,
             state=world.state,
             number_clients=len(world.time_windows),
@@ -291,3 +314,267 @@ class TestEpsilonGreedy:
 
         with pytest.raises(ValueError, match="number_actions_train"):
             policy.decide_train(world.state)
+
+
+# --- Batched candidate evaluation (ticket 05, simulation-performance) ----------
+
+
+class TestBatchedQEvaluation:
+    """``_best_q_action`` scores a vehicle's whole candidate set in one ``X @ W``."""
+
+    def test_a_tie_keeps_the_first_candidate_in_iteration_order(self):
+        # Every (node, column) pair of this world costs the same, so all
+        # candidates score identically. The legacy scanned them keeping a strict
+        # ``<`` against a running best, which leaves the *first* winner standing;
+        # np.argmin over the batch must break the tie the same way.
+        world = make_fleet_world({}, clients=[7, 3, 5], vehicles=1)
+        policy = make_policy(world, W=np.ones(19))
+        features = state_features(policy)
+
+        for candidates in ([7, 3, 5], [5, 3, 7], [3, 7]):
+            assert policy._best_q_action(features, 0, candidates) == candidates[0]
+
+    def test_the_batch_picks_the_same_winner_as_scoring_candidates_one_by_one(self):
+        # The legacy scored one candidate per pass: build the feature row and dot
+        # it with W. Batching must not move the winner — here the depot, which the
+        # distance-only W prices at zero.
+        world = make_selection_world()
+        policy = make_policy(world, W=distance_only_w())
+        features = state_features(policy)
+        candidates = [1, 2, 3, 4, DEPOT]
+
+        one_by_one = [
+            float(np.dot(policy.feature_extractor.action_features(features, [c]), policy.W))
+            for c in candidates
+        ]
+
+        winner = int(np.argmin(one_by_one))
+        assert one_by_one.count(one_by_one[winner]) == 1  # precondition: no tie to break
+        assert policy._best_q_action(features, 0, candidates) == candidates[winner]
+
+    def test_a_missing_w_is_created_at_the_feature_width(self):
+        world = make_selection_world()
+        policy = make_policy(world, W=None)
+        policy.W = None
+
+        assert policy._best_q_action(state_features(policy), 0, [1, 2]) == 1
+        assert policy.W is not None
+        np.testing.assert_array_equal(policy.W, np.zeros(19))
+
+
+# --- Candidate action selection (ticket 07, simulation-performance) ------------
+
+
+def reference_possible_actions(
+    policy: MonteCarloPolicy, number_of_actions: int, vehicle: int, features: StateFeatures
+) -> list[int]:
+    """``_select_vehicle_possible_actions`` exactly as it read before ticket 07.
+
+    The differential oracle for the vectorized selection: one
+    ``geometry.average_minutes`` lookup per remaining Client into a list of
+    ``(travel time, Client)`` tuples, ``heapq.nsmallest`` over it, then the
+    ``list(set(...))`` dedup, the depot appends and the delayed-client injection.
+    Kept verbatim — if the two ever disagree on any state, the optimization
+    changed behavior. (Only the two collaborators ticket 05 turned from
+    attributes into values — the endgame classifier's return and
+    ``features.delayed_clients`` — read differently here than they did then.)
+    """
+    forbidden_actions = [policy.action[v] for v in range(policy.number_vehicles) if v != vehicle]
+    state = policy.state
+    position = state.vehicle_position[vehicle]
+    possible_actions: list[int] = []
+
+    if (position == policy.depot and state.tau_episode > 350) or len(
+        state.clients_not_visited
+    ) == 0:
+        possible_actions.append(policy.depot)
+
+    elif len(state.clients_not_visited) < 3:
+        shortest_distance_clients = policy._classify_shortest_distance_clients()
+        if shortest_distance_clients[vehicle]:
+            for i in range(len(shortest_distance_clients[vehicle])):
+                possible_actions.append(shortest_distance_clients[vehicle][i][1])
+        else:
+            possible_actions.append(policy.depot)
+
+    else:
+        travel_times = [
+            (policy.geometry.average_minutes(position, client), client)
+            for client in state.clients_not_visited
+        ]
+        allowed = [pair for pair in travel_times if pair[1] not in forbidden_actions]
+        possible_actions = [client for _, client in heapq.nsmallest(number_of_actions, allowed)]
+        possible_actions = list(set(possible_actions))
+
+        if (
+            policy.geometry.average_minutes(position, policy.depot) + state.tau_episode
+            > policy.end_of_horizon
+        ):
+            possible_actions.append(policy.depot)
+
+        for delayed_client in features.delayed_clients[vehicle]:
+            if delayed_client not in possible_actions and delayed_client not in forbidden_actions:
+                possible_actions.append(delayed_client)
+
+        if len(possible_actions) == 0:
+            possible_actions.append(policy.depot)
+
+    return possible_actions
+
+
+def make_dense_cache(minutes: dict[tuple[int, int], float], nodes, columns) -> ShortestPathCache:
+    """A cache dense over ``nodes x columns``; ``minutes`` overrides the default 100.0."""
+    return make_cache(
+        {
+            (node, column): (minutes.get((node, column), 100.0), 1.0)
+            for node in nodes
+            for column in columns
+        }
+    )
+
+
+def make_fleet_world(minutes, *, clients, vehicles, nodes=None, tau=300.0) -> World:
+    """``vehicles`` vehicles at the depot at ``tau`` with every Client unvisited."""
+    nodes = list(nodes if nodes is not None else [DEPOT, *clients])
+    cache = make_dense_cache(minutes, nodes, [DEPOT, *clients])
+    time_windows = {client: (400, 900) for client in clients}
+    state = State(
+        number_vehicles=vehicles,
+        clients=list(clients),
+        n_arcs=3,
+        horizon_start_minute=300,
+        depot=DEPOT,
+    )
+    state.tau_episode = tau
+    return World(cache, time_windows, state)
+
+
+class TestCandidateSelection:
+    def test_top_k_breaks_travel_time_ties_by_client_id(self):
+        # Clients 5 and 3 sit at the same travel time, 5 first in the State's
+        # list: the tuple sort the vectorized top-k replaces broke the tie on the
+        # id, so a merely *stable* sort on the times is not enough.
+        world = make_fleet_world({(0, 3): 7.0, (0, 5): 7.0}, clients=[5, 3, 7, 9], vehicles=1)
+        policy = make_policy(world, W=np.zeros(19))
+        features = state_features(policy)
+
+        assert policy._select_vehicle_possible_actions(1, 0, features) == [3]
+        assert policy._select_vehicle_possible_actions(2, 0, features) == (
+            reference_possible_actions(policy, 2, 0, features)
+        )
+
+    def test_a_pair_the_cache_never_priced_still_raises(self):
+        # The scalar lookups this replaced raised KeyError for an unpriced
+        # (position, Client) pair; a raw row read would instead hand back the 0.0
+        # such a cell holds and make the unreachable Client the nearest candidate.
+        clients = [1, 2, 3]
+        # Node 9 is an intermediate path node, never a Client: the cache prices
+        # it toward every Client but 3.
+        cache = make_cache(
+            {
+                (node, column): (10.0 + node + column, 1.0)
+                for node in [DEPOT, *clients, 9]
+                for column in [DEPOT, *clients]
+                if (node, column) != (9, 3)
+            }
+        )
+        state = State(
+            number_vehicles=1,
+            clients=list(clients),
+            n_arcs=3,
+            horizon_start_minute=300,
+            depot=DEPOT,
+        )
+        world = World(cache, {client: (400, 900) for client in clients}, state)
+        policy = make_policy(world, W=np.zeros(19))
+
+        state.vehicle_position[0] = 9
+
+        with pytest.raises(KeyError):
+            policy.geometry.average_minutes(9, 3)
+        with pytest.raises(KeyError):
+            policy._select_vehicle_possible_actions(2, 0, state_features(policy))
+
+    def test_forbidden_clients_are_replaced_by_the_next_nearest(self):
+        world = make_fleet_world(
+            {(0, 1): 1.0, (0, 2): 2.0, (0, 3): 3.0, (0, 4): 4.0},
+            clients=[1, 2, 3, 4],
+            vehicles=3,
+        )
+        policy = make_policy(world, W=np.zeros(19), vehicles=3)
+        policy.action = [4, 1, 2]  # vehicle 0's two nearest Clients are taken
+
+        # The k nearest are 1 and 2; both forbidden, so selection reaches deeper.
+        assert policy._select_vehicle_possible_actions(2, 0, state_features(policy)) == [3, 4]
+
+    def test_fewer_allowed_clients_than_requested_returns_all_of_them(self):
+        world = make_fleet_world(
+            {(0, 1): 1.0, (0, 2): 2.0, (0, 3): 3.0}, clients=[1, 2, 3], vehicles=3
+        )
+        policy = make_policy(world, W=np.zeros(19), vehicles=3)
+        policy.action = [0, 1, 2]
+
+        assert policy._select_vehicle_possible_actions(5, 0, state_features(policy)) == [3]
+
+    def test_selected_ids_are_the_states_own_python_ints(self):
+        # They land in self.action and flow on into the Model, which indexes
+        # dicts with them — a numpy scalar leaking in here would be invisible
+        # to == comparisons and change hashing downstream.
+        world = make_fleet_world(
+            {(0, 1): 1.0, (0, 2): 2.0, (0, 3): 3.0}, clients=[1, 2, 3, 4], vehicles=1
+        )
+        policy = make_policy(world, W=np.zeros(19))
+
+        actions = policy._select_vehicle_possible_actions(3, 0, state_features(policy))
+
+        assert actions
+        assert all(type(action) is int for action in actions)
+
+    def test_selection_follows_clients_being_served(self):
+        # The Model removes served Clients from the very list the State holds;
+        # the cached remaining-Client arrays must not outlive that mutation.
+        world = make_fleet_world(
+            {(0, 1): 1.0, (0, 2): 2.0, (0, 3): 3.0, (0, 4): 4.0},
+            clients=[1, 2, 3, 4],
+            vehicles=1,
+        )
+        policy = make_policy(world, W=np.zeros(19))
+        assert policy._select_vehicle_possible_actions(2, 0, state_features(policy)) == [1, 2]
+
+        world.state.clients_not_visited.remove(1)
+
+        assert policy._select_vehicle_possible_actions(2, 0, state_features(policy)) == [2, 3]
+
+    def test_matches_the_pre_vectorization_reference_over_random_states(self):
+        """Differential test: every branch, over states no hand-written case would reach.
+
+        Travel times are quantized to half-minutes so float ties between Clients
+        are common — the case ``np.argpartition`` alone would not order the way
+        the ``(time, client)`` tuple sort did.
+        """
+        rng = np.random.default_rng(20260724)
+        clients = list(range(1, 9))
+        nodes = list(range(0, 13))
+        columns = [DEPOT, *clients]
+        minutes = {
+            (node, column): float(rng.integers(2, 12)) / 2 for node in nodes for column in columns
+        }
+        world = make_fleet_world(minutes, clients=clients, vehicles=3, nodes=nodes)
+        policy = make_policy(world, W=np.zeros(19), vehicles=3)
+
+        for _ in range(200):
+            remaining = rng.choice(clients, size=rng.integers(0, len(clients) + 1), replace=False)
+            # In place, exactly as Model.vehicle_reaches_client mutates the list.
+            world.state.clients_not_visited[:] = [int(client) for client in remaining]
+            world.state.vehicle_position[:] = [int(node) for node in rng.choice(nodes, size=3)]
+            world.state.tau_episode = float(rng.integers(300, 800))
+            policy.action = [int(action) for action in rng.choice(columns, size=3)]
+            features = state_features(policy)
+            number_of_actions = int(rng.integers(1, 5))
+
+            for vehicle in range(3):
+                expected = reference_possible_actions(policy, number_of_actions, vehicle, features)
+                assert (
+                    policy._select_vehicle_possible_actions(number_of_actions, vehicle, features)
+                    == expected
+                )

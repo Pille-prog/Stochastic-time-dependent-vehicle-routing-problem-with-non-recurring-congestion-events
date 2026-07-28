@@ -22,14 +22,28 @@ Legacy fidelity notes:
 * **Best-W fallback**: with fewer episodes than ``test_frequency`` the legacy
   would run its test with ``Best_W = []`` and crash; the Trainer falls back to
   the final trained W instead (documented deviation, same information).
-* **Final test**: each (action count, seed) pair reruns ``test_episodes``
-  episodes and averages, verbatim from ``test_model`` — every episode draws its
-  own per-Episode Generators from its seed (ticket 13, ADR-0001 phase 2), so the
-  iterations are identical and the mean equals a single episode's value.
+* **Final test** (deduplicated, ticket 02, simulation-performance): each
+  (action count, seed) pair runs a **single** evaluation episode. Every
+  episode draws its own per-Episode Generators from its seed (ticket 13,
+  ADR-0001 phase 2), so the legacy ``test_episodes`` repeats of the same
+  episode were bit-identical and their mean equaled one episode's value —
+  computed directly now instead of summed and divided (avoiding the sum/k
+  division-order float noise that quirk could otherwise leak into the
+  report). ``test_episodes`` stays in ``ExperimentConfig`` for config-file
+  compatibility but is no longer read.
 * **Reported metrics**: the nine golden-pinned Episode metrics. The legacy
   report's three mean-time metrics (``mean_delay_time``, ``mean_earliness_time``,
   ``mean_overtime``) were not ported with the ticket 07 Model and are not pinned
   by the golden master (ADR-0001 ticket 09 addendum).
+
+Parallelism (ticket 08, simulation-performance): the evaluation blocks and the
+final test are batches of independent Episodes, so they go through
+``stdvrp.training.episode_pool`` — a persistent pool of spawned workers, each
+holding one world loaded from the ticket-03 binary cache. Results come back in
+request order, so every reduction below sees the serial loops' seed order and
+``results.json`` stays bit-identical. ``worker_count=1`` (the default) keeps
+everything in this process. Training itself stays sequential: W is a serial
+dependency.
 """
 
 from __future__ import annotations
@@ -40,21 +54,16 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
 import numpy as np
 from matplotlib import ticker
 from matplotlib.figure import Figure
-from numpy.typing import NDArray
 
 from stdvrp.config import ExperimentConfig
-from stdvrp.congestion import ArcProbabilityCongestionGenerator, CongestionGenerator
-from stdvrp.demand import ClientGenerator
-from stdvrp.network import ShortestPathCache
-from stdvrp.simulation import run_evaluation_episode, run_training_episode
-from stdvrp.traffic import CsvDataSource, TravelTimeModel
-
-W = NDArray[np.float64]
+from stdvrp.simulation import EpisodeResult, run_training_episode
+from stdvrp.training.episode_pool import EpisodePool, EpisodeRequest, EpisodeWorld, W
 
 EPISODE_METRICS = (
     "total_cost",
@@ -102,7 +111,11 @@ class TrainingResult:
 
 @dataclass(frozen=True, slots=True)
 class SeedTestResult:
-    """Final-test metrics for one seed: means over ``test_episodes`` runs."""
+    """Final-test metrics for one seed: one evaluation episode's raw values.
+
+    (Ticket 02, simulation-performance) The legacy ``test_episodes`` repeats of
+    this episode were bit-identical, so their mean equaled this value anyway.
+    """
 
     seed: int
     vehicle_count: int
@@ -133,54 +146,75 @@ class Trainer:
 
     def __init__(
         self,
-        config: ExperimentConfig,
+        world: EpisodeWorld,
         *,
-        client_generator: ClientGenerator,
-        travel_time_model: TravelTimeModel,
-        shortest_path_cache: ShortestPathCache,
-        congestion_generator: CongestionGenerator,
+        episode_pool: EpisodePool | None = None,
         log: Callable[[str], None] | None = None,
     ) -> None:
-        self.config = config
-        self.client_generator = client_generator
-        self.travel_time_model = travel_time_model
-        self.shortest_path_cache = shortest_path_cache
-        self.congestion_generator = congestion_generator
+        self.world = world
+        self.config = world.config
+        # None (the default) evaluates in this process; a pool spreads the
+        # evaluation blocks and the final test over worker processes (ticket 08).
+        self.episode_pool = episode_pool
         self._log = log if log is not None else lambda message: None
 
     @classmethod
     def from_config(
-        cls, config: ExperimentConfig, *, log: Callable[[str], None] | None = None
+        cls,
+        config: ExperimentConfig,
+        *,
+        cache_dir: Path | None = None,
+        worker_count: int = 1,
+        log: Callable[[str], None] | None = None,
     ) -> Trainer:
-        """Load the world from the config's DataSource and wire the Trainer."""
-        source = CsvDataSource.from_config(config)
-        travel_time_model = TravelTimeModel(
-            source.load_road_network(),
-            source.load_traffic_history(),
-            config.max_congestion_duration,
-            horizon_start_minute=config.horizon_start_minute,
+        """Load the world from the config's DataSource and wire the Trainer.
+
+        ``cache_dir`` (ticket 03, simulation-performance) opts into the binary
+        world cache: ``None`` (the default) parses the CSVs fresh every call,
+        exactly as before; a directory reuses a matching prior snapshot instead
+        of re-parsing, and writes one on a miss. See ``stdvrp.traffic.world_cache``.
+
+        ``worker_count`` (ticket 08) is how many worker processes evaluate on: 1
+        (the default) keeps every episode in this process, more than 1 needs
+        ``cache_dir`` because every worker loads its own world through it. The
+        results are identical either way — see ``stdvrp.training.episode_pool``.
+        """
+        # Before the (expensive) world load, so a bad worker/cache combination
+        # fails immediately rather than after parsing the CSVs.
+        episode_pool = EpisodePool.for_worker_count(
+            config, cache_dir=cache_dir, worker_count=worker_count
         )
-        return cls(
-            config,
-            client_generator=ClientGenerator.from_config(config),
-            travel_time_model=travel_time_model,
-            shortest_path_cache=source.load_shortest_path_cache(),
-            congestion_generator=ArcProbabilityCongestionGenerator(
-                event_probability=travel_time_model.event_probability,
-                successors=travel_time_model.successors,
-                congestion_lower_bound=config.congestion_lower_bound,
-                congestion_upper_bound=config.congestion_upper_bound,
-                max_congestion_duration=config.max_congestion_duration,
-            ),
-            log=log,
-        )
+        world = EpisodeWorld.load(config, cache_dir=cache_dir)
+        return cls(world, episode_pool=episode_pool, log=log)
+
+    def close(self) -> None:
+        """Shut the evaluation worker pool down; a no-op when running serially."""
+        if self.episode_pool is not None:
+            self.episode_pool.close()
+
+    def __enter__(self) -> Trainer:
+        """``run()`` closes its own pool; this is for driving ``train``/``final_test``
+        directly, where nothing else would (benchmarks, tests, notebooks)."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
 
     def run(self, output_dir: Path) -> ExperimentResult:
         """Train, run the final test, and write results + plot into ``output_dir``."""
         config = self.config
-        training = self.train()
-        tested_w = training.best_w if training.best_w is not None else training.w_trajectory[-1]
-        test = self.final_test(tested_w)
+        try:
+            training = self.train()
+            tested_w = training.best_w if training.best_w is not None else training.w_trajectory[-1]
+            test = self.final_test(tested_w)
+        finally:
+            # Every episode this run needs has been dispatched by now.
+            self.close()
         result = ExperimentResult(training=training, test=test, tested_w=tested_w)
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -213,7 +247,7 @@ class Trainer:
                 seed=seed,
                 W=w,
                 learning_rate=learning_rate,
-                **self._episode_kwargs(),
+                **self.world.episode_kwargs(),
             )
             learning_rate = config.learning_rate
             w = result.w
@@ -223,12 +257,15 @@ class Trainer:
 
             if episodes_completed % config.test_frequency == 0:
                 newest_w = _copy_w(w)
+                # One greedy Episode per evaluation seed: generated fleet, default
+                # action pool. Batched so a worker pool can spread them (ticket 08);
+                # results come back in ``evaluation_seeds`` order either way.
+                episodes = self._run_evaluation_batch(
+                    newest_w, tuple(EpisodeRequest(seed) for seed in config.evaluation_seeds)
+                )
                 block = EvaluationBlock(
                     episodes_completed=episodes_completed,
-                    seed_costs=tuple(
-                        self._evaluation_cost(eval_seed, newest_w)
-                        for eval_seed in config.evaluation_seeds
-                    ),
+                    seed_costs=tuple(episode.total_cost for episode in episodes),
                 )
                 evaluations.append(block)
                 self._log(
@@ -247,58 +284,97 @@ class Trainer:
         )
 
     def final_test(self, w: W) -> tuple[ActionCountReport, ...]:
-        """The legacy ``test_model``: fixed seed/fleet tables at widening action pools."""
+        """The legacy ``test_model``: fixed seed/fleet tables at widening action pools.
+
+        Ticket 02 (simulation-performance): runs each (action count, seed) pair
+        **once**. With per-seed Generators (ticket 13), every one of the legacy
+        ``test_episodes`` repeats was bit-identical, so the mean equaled a single
+        episode's value — computed directly here rather than via a legacy
+        sum/``test_episodes`` division that could round differently in its last
+        bit. ``config.test_episodes`` is not read.
+
+        Ticket 08: the whole table — every action count times every seed — is one
+        batch, so a worker pool has the full 300-episode job to spread rather than
+        one action count at a time. The results are sliced back apart below in
+        exactly the nested order they were requested in.
+        """
         config = self.config
+        fleet = self._test_fleet()
+        requests = self.final_test_requests()
+        self._log(f"final test: {len(requests)} episodes")
+        # One batch can take hours on the full dataset, and it is dispatched in
+        # one go, so it reports every tenth of the way rather than going silent
+        # until the per-action-count means below.
+        step = max(1, len(requests) // 10)
+        episodes = self._run_evaluation_batch(
+            w,
+            requests,
+            on_progress=lambda done: (
+                self._log(f"final test: {done}/{len(requests)} episodes")
+                if done % step == 0
+                else None
+            ),
+        )
+
         reports = []
-        for action_count in config.test_action_counts:
-            per_seed = []
-            for seed, vehicle_count in zip(
-                config.test_seeds, config.test_vehicle_counts, strict=True
-            ):
-                totals = dict.fromkeys(EPISODE_METRICS, 0.0)
-                for _ in range(config.test_episodes):
-                    episode = run_evaluation_episode(
-                        seed=seed,
-                        W=w,
-                        vehicle_count=vehicle_count,
-                        number_actions_test=vehicle_count + action_count,
-                        **self._episode_kwargs(),
-                    )
-                    for name in EPISODE_METRICS:
-                        totals[name] += float(getattr(episode, name))
-                metrics = {name: value / config.test_episodes for name, value in totals.items()}
-                per_seed.append(SeedTestResult(seed, vehicle_count, metrics))
+        for index, action_count in enumerate(config.test_action_counts):
+            row = episodes[index * len(fleet) : (index + 1) * len(fleet)]
+            per_seed = tuple(
+                SeedTestResult(
+                    seed,
+                    vehicle_count,
+                    {name: float(getattr(episode, name)) for name in EPISODE_METRICS},
+                )
+                for (seed, vehicle_count), episode in zip(fleet, row, strict=True)
+            )
             summary = {
                 name: _mean_and_std([entry.metrics[name] for entry in per_seed])
                 for name in EPISODE_METRICS
             }
-            reports.append(ActionCountReport(action_count, tuple(per_seed), summary))
+            reports.append(ActionCountReport(action_count, per_seed, summary))
             self._log(
                 f"final test actions={action_count}: mean cost {summary['total_cost'][0]:.4f}"
             )
         return tuple(reports)
 
-    def _evaluation_cost(self, seed: int, w: W) -> float:
-        """One greedy evaluation Episode: generated fleet, default action pool."""
-        episode = run_evaluation_episode(
-            seed=seed, W=w, vehicle_count=None, number_actions_test=None, **self._episode_kwargs()
-        )
-        return episode.total_cost
+    def final_test_requests(self) -> tuple[EpisodeRequest, ...]:
+        """Every (action count, seed) cell of the final test, in submission order.
 
-    def _episode_kwargs(self) -> dict[str, Any]:
-        """The world and config arguments every episode runner shares."""
+        The order is the contract :meth:`final_test` slices the results back apart
+        with — action count outermost, the seed/fleet table inside — and the shape
+        a benchmark needs to time the phase the way the experiment runs it.
+        """
         config = self.config
-        return {
-            "client_generator": self.client_generator,
-            "travel_time_model": self.travel_time_model,
-            "shortest_path_cache": self.shortest_path_cache,
-            "congestion_generator": self.congestion_generator,
-            "epsilon": config.epsilon,
-            "max_congestion_duration": config.max_congestion_duration,
-            "horizon_start_minute": config.horizon_start_minute,
-            "horizon_end_minute": config.horizon_end_minute,
-            "n_observed_arcs": config.n_observed_arcs,
-        }
+        return tuple(
+            EpisodeRequest(
+                seed,
+                vehicle_count=vehicle_count,
+                number_actions_test=vehicle_count + action_count,
+            )
+            for action_count in config.test_action_counts
+            for seed, vehicle_count in self._test_fleet()
+        )
+
+    def _test_fleet(self) -> tuple[tuple[int, int], ...]:
+        """The final test's (seed, fleet size) table, paired once for both users."""
+        return tuple(zip(self.config.test_seeds, self.config.test_vehicle_counts, strict=True))
+
+    def _run_evaluation_batch(
+        self,
+        w: W,
+        requests: tuple[EpisodeRequest, ...],
+        *,
+        on_progress: Callable[[int], None] | None = None,
+    ) -> tuple[EpisodeResult, ...]:
+        """Run one batch of evaluation Episodes: on the worker pool, or right here.
+
+        Both paths run the same ``EpisodeWorld.run_episodes`` and both return the
+        results in *request* order, so callers reduce the serial loops' seed order
+        whatever order the workers happen to finish in (ticket 08's Tier 1 gate).
+        """
+        if self.episode_pool is not None:
+            return self.episode_pool.run(w, requests, on_progress=on_progress)
+        return self.world.run_episodes(w, requests, on_progress=on_progress)
 
 
 def _copy_w(w: W) -> W:

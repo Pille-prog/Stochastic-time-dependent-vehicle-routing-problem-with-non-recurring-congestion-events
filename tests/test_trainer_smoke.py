@@ -21,6 +21,7 @@ import pytest
 
 import characterization_world
 from stdvrp.config import ExperimentConfig
+from stdvrp.traffic import world_cache
 from stdvrp.training import (
     ActionCountReport,
     EvaluationBlock,
@@ -107,16 +108,23 @@ def test_output_files_are_written(smoke_run: tuple[ExperimentResult, Path]) -> N
     assert document["test"]["2"]["per_seed"][0]["seed"] == 100
 
 
-def test_entry_script_wires_config_to_trainer(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The documented command parses the config, runs the Trainer, prints the summary."""
+def _load_entry_script() -> Any:
+    """``experiments/chengdu/run.py`` as a module (it is a script, not a package)."""
     spec = importlib.util.spec_from_file_location(
         "chengdu_run", REPO_ROOT / "experiments" / "chengdu" / "run.py"
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def test_entry_script_wires_config_to_trainer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The documented command parses the config, runs the Trainer, prints the summary."""
+    monkeypatch.delenv("STDVRP_WORKERS", raising=False)
+    module = _load_entry_script()
 
     w = np.array([1.0])
     fake_result = ExperimentResult(
@@ -136,8 +144,16 @@ def test_entry_script_wires_config_to_trainer(
             self.config = config
 
         @classmethod
-        def from_config(cls, config: ExperimentConfig, log: Any = None) -> "TrainerStub":
+        def from_config(
+            cls,
+            config: ExperimentConfig,
+            cache_dir: Any = None,
+            worker_count: int = 1,
+            log: Any = None,
+        ) -> "TrainerStub":
             calls["config"] = config
+            calls["cache_dir"] = cache_dir
+            calls["worker_count"] = worker_count
             return cls(config)
 
         def run(self, output_dir: Path) -> ExperimentResult:
@@ -151,6 +167,122 @@ def test_entry_script_wires_config_to_trainer(
 
     assert calls["config"].instance_day == 601
     assert calls["output_dir"] == tmp_path / "out"
+    assert calls["cache_dir"] == world_cache.default_cache_dir()
+    # Ticket 08: parallel evaluation is opt-in, so an unset environment is serial.
+    assert calls["worker_count"] == 1
     output = capsys.readouterr().out
     assert "best evaluation mean cost: 15.0000" in output
     assert "final test actions=2: mean cost 15.0000 (std 5.0000)" in output
+
+
+def test_entry_script_no_cache_flag_disables_the_world_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--no-cache`` opts out of the binary world cache (ticket 03), serially (08)."""
+    module = _load_entry_script()
+
+    w = np.array([1.0])
+    fake_result = ExperimentResult(
+        training=TrainingResult(w_trajectory=(w,), evaluations=(), newest_w=None, best_w=None),
+        test=(),
+        tested_w=w,
+    )
+    calls: dict[str, Any] = {}
+
+    class TrainerStub:
+        def __init__(self, config: ExperimentConfig) -> None:
+            self.config = config
+
+        @classmethod
+        def from_config(
+            cls,
+            config: ExperimentConfig,
+            cache_dir: Any = None,
+            worker_count: int = 1,
+            log: Any = None,
+        ) -> "TrainerStub":
+            calls["cache_dir"] = cache_dir
+            calls["worker_count"] = worker_count
+            return cls(config)
+
+        def run(self, output_dir: Path) -> ExperimentResult:
+            return fake_result
+
+    monkeypatch.setattr(module, "Trainer", TrainerStub)
+    module.main(
+        [
+            "--config",
+            str(FIXTURE_DIR / "config.yaml"),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--no-cache",
+            "--workers",
+            "1",
+        ]
+    )
+
+    assert calls["cache_dir"] is None
+    assert calls["worker_count"] == 1
+
+
+def test_entry_script_takes_its_worker_count_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ticket 08: ``STDVRP_WORKERS`` is the machine-level switch, ``--workers`` the run's."""
+    monkeypatch.setenv("STDVRP_WORKERS", "3")
+    module = _load_entry_script()
+
+    w = np.array([1.0])
+    fake_result = ExperimentResult(
+        training=TrainingResult(w_trajectory=(w,), evaluations=(), newest_w=None, best_w=None),
+        test=(),
+        tested_w=w,
+    )
+    calls: dict[str, Any] = {}
+
+    class TrainerStub:
+        @classmethod
+        def from_config(
+            cls,
+            config: ExperimentConfig,
+            cache_dir: Any = None,
+            worker_count: int = 1,
+            log: Any = None,
+        ) -> "TrainerStub":
+            calls["worker_count"] = worker_count
+            return cls()
+
+        def run(self, output_dir: Path) -> ExperimentResult:
+            return fake_result
+
+    monkeypatch.setattr(module, "Trainer", TrainerStub)
+    arguments = ["--config", str(FIXTURE_DIR / "config.yaml"), "--output-dir", str(tmp_path / "a")]
+    module.main(arguments)
+    assert calls["worker_count"] == 3
+
+    # An explicit --workers still wins over the environment.
+    module.main([*arguments[:2], "--output-dir", str(tmp_path / "b"), "--workers", "2"])
+    assert calls["worker_count"] == 2
+
+
+def test_entry_script_rejects_no_cache_with_several_workers(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ticket 08: workers load the world through the cache, so the pair is refused."""
+    module = _load_entry_script()
+
+    with pytest.raises(SystemExit) as exit_info:
+        module.main(
+            [
+                "--config",
+                str(FIXTURE_DIR / "config.yaml"),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--no-cache",
+                "--workers",
+                "4",
+            ]
+        )
+
+    assert exit_info.value.code == 2
+    assert "--no-cache needs --workers 1" in capsys.readouterr().err

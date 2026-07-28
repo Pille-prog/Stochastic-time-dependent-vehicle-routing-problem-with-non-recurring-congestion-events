@@ -20,16 +20,41 @@ UNSEEDED ``random.Random`` instances plus the global ``random`` stream — Phase
 ADR-0001; consolidated here since exact draw-order equality with the legacy is
 no longer a goal). The weight update consumes no randomness.
 
+Ticket 04 (simulation-performance, ADR-0003): every ``ShortestPathCache.path_between``
+time/length read is replaced by an ``EpisodeGeometry`` array lookup — a pure
+representation change, bit-identical to the dict lookups it replaces. The caller
+builds one ``EpisodeGeometry`` per Episode (depot + that Episode's Clients as
+columns) and injects it here; this Policy no longer touches the ShortestPathCache
+directly. Path *node sequences* stay on the ShortestPathCache, read only by the
+Model for routing.
+
+Ticket 07 builds the first vectorized *reader* of those matrices:
+``_closest_allowed_clients`` picks a vehicle's candidate actions with one row
+slice and one ``np.lexsort`` instead of one lookup per remaining Client plus
+``heapq.nsmallest`` — same ordering to the last tie (see its docstring). The
+endgame classifier ``_classify_shortest_distance_clients`` deliberately stays
+scalar: with one or two Clients left its arrays are too short to pay numpy's
+per-call overhead (measured 2x slower vectorized, ticket 07 Comments).
+
+Ticket 05 moves the feature arithmetic itself out to
+:class:`~stdvrp.policies.feature_extraction.FeatureExtractor` (a concrete
+collaborator, not a new seam — ADR-0002) and vectorizes it. What is left here is
+the *decision* logic: which actions a vehicle may take, and which of them
+minimizes Q. Both feature routines now flow through arguments and return values —
+one :class:`~stdvrp.policies.feature_extraction.StateFeatures` per decision pass,
+handed to every method that needs it — instead of the ``X_general_state`` /
+``X_state_action`` / ``possible_actions`` / ``delayed_clients`` attributes the
+port inherited from the legacy. A vehicle's whole candidate set is priced in one
+``[candidates, 19]`` matrix and a single ``X @ W`` (:meth:`_best_q_action`).
+
 Feature normalization constants (150, 850, 1150, 13, 60, 100, 180, 2500, the
 earliness bins) are part of the feature definition and stay literal; only the values
 the legacy read from argv or hardcoded as *experiment* knobs (horizon end, action
 pool size, epsilon) are injected.
 
-Preserved legacy quirks (do not fix before Phase 2; ADR-0001):
+Preserved legacy quirks (do not fix before Phase 2; ADR-0001) — the feature-side
+ones now live in ``feature_extraction`` and are documented there:
 
-- ``_classify_delayed_clients`` appends a (time, client) pair on *every* vehicle
-  iteration after the first assignment, not once per client — closest-vehicle lists
-  contain duplicates with evolving travel times.
 - ``clients_left`` normalizes by a hardcoded 150 regardless of the episode's actual
   client count; ``late_count`` divides by 13.
 - The candidate action set is deduplicated via ``list(set(...))`` — CPython set
@@ -37,27 +62,44 @@ Preserved legacy quirks (do not fix before Phase 2; ADR-0001):
 - Depot-idle cutoffs are inconsistent literals that ignore the configured horizon:
   ``tau > 350`` in ``_select_vehicle_possible_actions`` vs ``tau > 310`` in the
   delayed/shortest-distance classifiers.
-- ``_extract_state_action_features`` emits a permanently-zero second feature; it
-  pads W to its legacy 19 components.
 """
 
 from __future__ import annotations
 
 import heapq
-import itertools
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
 
-from stdvrp.network.shortest_path_cache import ShortestPathCache
+from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.policies.base import Policy
+from stdvrp.policies.feature_extraction import (
+    FeatureExtractor,
+    StateFeatures,
+    TimeWindows,
+)
 
 if TYPE_CHECKING:
-    from stdvrp.simulation.state import State
+    from stdvrp.simulation.state import State, TrainingSnapshot
 
-TimeWindows = dict[int, tuple[int, int]]
+__all__ = ["MonteCarloPolicy", "TimeWindows"]
+
+
+class _RemainingClients(NamedTuple):
+    """``clients_not_visited`` as the arrays candidate selection sorts over.
+
+    All three are aligned index-for-index: ``clients`` is a *copy* of the State's
+    list (which the Model mutates in place, and whose Python ints the selected
+    actions are taken from, unchanged), ``client_ids`` is that list as an array
+    for the tie-break sort key, and ``column_positions`` locates each Client in
+    the EpisodeGeometry's columns.
+    """
+
+    clients: list[int]
+    client_ids: NDArray[np.integer]
+    column_positions: NDArray[np.intp]
 
 
 class MonteCarloPolicy(Policy):
@@ -66,7 +108,7 @@ class MonteCarloPolicy(Policy):
     def __init__(
         self,
         number_vehicles: int,
-        shortest_path_cache: ShortestPathCache,
+        geometry: EpisodeGeometry,
         time_windows: TimeWindows,
         state: State,
         number_clients: int,
@@ -81,7 +123,7 @@ class MonteCarloPolicy(Policy):
         learning_rate: float = 0.0,
     ) -> None:
         self.number_vehicles = number_vehicles
-        self.shortest_path_cache = shortest_path_cache
+        self.geometry = geometry
         self.time_windows = time_windows
         self.state = state
         self.number_clients = number_clients
@@ -104,16 +146,20 @@ class MonteCarloPolicy(Policy):
         self.service_time = 5
         self.end_of_horizon = horizon_end_minute
 
-        self.number_of_actions = number_actions_test
-        self.possible_actions: list[int] = []
-        self.X_general_state: list[float] = []
-        self.X_state_action: list[float] = []
-        self.delayed_clients: list[list[int]] = []
-        self.vehicle_to_clients: defaultdict[int, list[tuple[float, int]]] = defaultdict(list)
-        self.shortest_distance_clients: defaultdict[int, list[tuple[float, int]]] = defaultdict(
-            list
+        # Ticket 05: the feature arithmetic, vectorized over the same geometry.
+        self.feature_extractor = FeatureExtractor(
+            geometry,
+            time_windows,
+            number_vehicles=number_vehicles,
+            number_clients=number_clients,
+            depot=depot,
+            horizon_end_minute=horizon_end_minute,
+            service_time=self.service_time,
+            delay_cost_factor=self.delay_cost_factor,
+            earliness_cost_factor=self.earliness_cost_factor,
+            overtime_cost_factor=self.overtime_cost,
         )
-        self.mean_velocities: list[float] = []
+        self._remaining_clients_cache: _RemainingClients | None = None
 
         # Legacy constructor behavior: a random initial action (one
         # exploration_rng choice per vehicle), then one full greedy decision pass.
@@ -123,122 +169,121 @@ class MonteCarloPolicy(Policy):
         self.decide(state)
 
     def decide(self, state: State) -> list[int]:
-        """Ports ``monte_carlo_policy_test``: greedy per-vehicle argmin, no randomness."""
+        """Ports ``monte_carlo_policy_test`` → ``select_epsilon_greedy_action_test``.
+
+        Greedy per-vehicle argmin, no randomness. The State's contribution to the
+        features is computed once for the whole pass: it cannot change while the
+        vehicles are being decided, and the legacy recomputed it anyway (twice,
+        in fact — ``extract_general_state_features`` re-ran the delayed-Client
+        classification the caller had just run).
+        """
         self.state = state
-        self.number_of_actions = self.number_actions_test
-        self._select_greedy_actions()
+        features = self.feature_extractor.state_features(state)
+        for vehicle in range(self.number_vehicles):
+            candidates = self._select_vehicle_possible_actions(
+                self.number_actions_test, vehicle, features
+            )
+            self.action[vehicle] = self._best_q_action(features, vehicle, candidates)
         return self.action
 
-    def _select_greedy_actions(self) -> None:
-        """Ports ``select_epsilon_greedy_action_test``."""
-        self._classify_delayed_clients()
-        self._extract_general_state_features()
-        for vehicle in range(self.number_vehicles):
-            self.possible_actions = list(
-                self._select_vehicle_possible_actions(self.number_of_actions, vehicle)
-            )
-            self._select_best_q_action_for_vehicle(vehicle)
-
     def decide_train(self, state: State) -> list[int]:
-        """Ports ``monte_carlo_policy_train``: ε-greedy per-vehicle decision."""
+        """Ports ``monte_carlo_policy_train`` → ``select_epsilon_greedy_action_train``.
+
+        A repair pass over every carried-over action that is no longer feasible,
+        then the ε-greedy decision itself.
+        """
         if self.number_actions_train is None:
             raise ValueError("number_actions_train is required for training decisions")
         self.state = state
-        self.number_of_actions = self.number_actions_train
-        self._select_epsilon_greedy_actions_train()
+        number_of_actions = self.number_actions_train
+        features = self.feature_extractor.state_features(state)
+
+        for vehicle in range(self.number_vehicles):
+            candidates = self._select_vehicle_possible_actions(number_of_actions, vehicle, features)
+            if self.action[vehicle] not in candidates:
+                self.action[vehicle] = int(self.rng.choice(candidates))
+
+        for vehicle in range(self.number_vehicles):
+            candidates = self._select_vehicle_possible_actions(number_of_actions, vehicle, features)
+            if self.rng.random() < self.epsilon:
+                self.action[vehicle] = int(self.rng.choice(candidates))
+            else:
+                self.action[vehicle] = self._best_q_action(features, vehicle, candidates)
         return self.action
 
-    def _select_epsilon_greedy_actions_train(self) -> None:
-        """Ports ``select_epsilon_greedy_action_train``: repair pass, then ε-greedy."""
-        self._classify_delayed_clients()
-        self._extract_general_state_features()
-
-        # Repair pass: replace any carried-over action no longer feasible.
-        for vehicle in range(self.number_vehicles):
-            self.possible_actions = self._select_vehicle_possible_actions(
-                self.number_of_actions, vehicle
-            )
-            if self.action[vehicle] not in self.possible_actions:
-                self.action[vehicle] = int(self.rng.choice(self.possible_actions))
-
-        for vehicle in range(self.number_vehicles):
-            self.possible_actions = self._select_vehicle_possible_actions(
-                self.number_of_actions, vehicle
-            )
-            if self.rng.random() < self.epsilon:
-                self.action[vehicle] = int(self.rng.choice(self.possible_actions))
-            else:
-                self._select_best_q_action_for_vehicle(vehicle)
-
-    def update_W(self, states: list[State], actions: list[list[int]], rewards: list[float]) -> None:
+    def update_W(
+        self, states: list[TrainingSnapshot], actions: list[list[int]], rewards: list[float]
+    ) -> None:
         """Ports ``actualize_W``: backward Monte Carlo return, one SGD step per epoch.
 
         Replays each saved decision epoch newest-first, accumulating the observed
         return ``U_t`` and stepping W against the already-acquired cost baseline.
-        Consumes no randomness; rebinds ``self.state`` to each historical snapshot.
-        The legacy's dead diagnostics (``self.rewards``, ``self.Q_preds``,
-        ``self.error``) are not ported — nothing live reads them and they do not
-        touch W.
+        Consumes no randomness. Each epoch's ``TrainingSnapshot`` (ticket 06 — a
+        purpose-built immutable capture of only the State fields this replay path
+        reads) flows through as an argument; ticket 05 removed the rebinding of
+        ``self.state`` that used to smuggle it in. The legacy's dead diagnostics
+        (``self.rewards``, ``self.Q_preds``, ``self.error``) are not ported —
+        nothing live reads them and they do not touch W.
         """
         T = len(actions)
         U_t: float = 0
         lr = self.learning_rate
         for t in range(T - 1, -1, -1):
             U_t += rewards[t + 1]
-            self.state = states[t]
-            self._calculate_already_acquired_cost()
-            self._extract_general_state_features()
-            self._extract_state_action_features(actions[t])
-            X = np.array(list(itertools.chain(self.X_general_state, self.X_state_action)))
+            snapshot = states[t]
+            acquired_cost = self._already_acquired_cost(snapshot)
+            X = self.feature_extractor.action_features(
+                self.feature_extractor.state_features(snapshot), actions[t]
+            )
             assert self.W is not None
 
             Q_pred = np.dot(X, self.W)
-            gradient = lr * ((U_t - self.total_cost_acquired - Q_pred) * X)
+            gradient = lr * ((U_t - acquired_cost - Q_pred) * X)
             self.W = self.W + gradient
 
-    def _calculate_already_acquired_cost(self) -> None:
+    def _already_acquired_cost(self, state: State | TrainingSnapshot) -> float:
         """Ports ``calculate_already_acquired_cost``: sunk delay and overtime at tau."""
-        self.total_cost_acquired = 0.0
-        for client in self.state.clients_not_visited:
+        total_cost_acquired = 0.0
+        for client in state.clients_not_visited:
             delay_tw = self.time_windows[client][1]
-            if delay_tw < self.state.tau_episode:
-                self.total_cost_acquired += (
-                    self.state.tau_episode - delay_tw
-                ) * self.delay_cost_factor
+            if delay_tw < state.tau_episode:
+                total_cost_acquired += (state.tau_episode - delay_tw) * self.delay_cost_factor
         for vehicle in range(self.number_vehicles):
             if (
-                self.state.vehicle_position[vehicle] != self.depot
-                and self.state.tau_episode > self.end_of_horizon
+                state.vehicle_position[vehicle] != self.depot
+                and state.tau_episode > self.end_of_horizon
             ):
-                self.total_cost_acquired += (
-                    self.state.tau_episode - self.end_of_horizon
+                total_cost_acquired += (
+                    state.tau_episode - self.end_of_horizon
                 ) * self.overtime_cost
+        return total_cost_acquired
 
-    def _select_best_q_action_for_vehicle(self, vehicle: int) -> None:
-        """Ports ``generate_best_Q_pred_for_1_vehicle``: strict argmin, ties keep first."""
-        min_q_value = float("inf")
-        best_client = 0
-        for client in self.possible_actions:
-            current_action = self.action.copy()
-            current_action[vehicle] = client
-            self._extract_state_action_features(current_action)
-            X = list(itertools.chain(self.X_general_state, self.X_state_action))
-            if self.W is None:
-                self._create_W(len(X))
-            assert self.W is not None
+    def _best_q_action(self, features: StateFeatures, vehicle: int, candidates: list[int]) -> int:
+        """Ports ``generate_best_Q_pred_for_1_vehicle``: strict argmin, ties keep first.
 
-            q_value = np.dot(X, self.W)
-            if q_value < min_q_value:
-                min_q_value = float(q_value)
-                best_client = client
+        Ticket 05: the whole candidate set is priced in one shot — a
+        ``[candidates, 19]`` feature matrix and a single ``X @ W`` replace the
+        legacy's per-candidate feature pass and dot product. ``np.argmin``
+        returns the *first* minimum, which is exactly where the legacy's strict
+        ``<`` against a running best left the winner.
 
-        self.action[vehicle] = best_client
+        ``candidates`` is never empty: every branch of
+        :meth:`_select_vehicle_possible_actions` falls back to the depot.
+        """
+        X = self.feature_extractor.candidate_features(features, self.action, vehicle, candidates)
+        if self.W is None:
+            self._create_W(X.shape[1])
+        assert self.W is not None
+
+        return candidates[int(np.argmin(X @ self.W))]
 
     def _create_W(self, number_features: int) -> None:
         """Ports ``create_W``: the weight vector starts at zero."""
         self.W = np.zeros(number_features)
 
-    def _select_vehicle_possible_actions(self, number_of_actions: int, vehicle: int) -> list[int]:
+    def _select_vehicle_possible_actions(
+        self, number_of_actions: int, vehicle: int, features: StateFeatures
+    ) -> list[int]:
         """Ports the live ``select_vehicle_possible_actions`` (per-vehicle) definition."""
         possible_actions: list[int] = []
         forbidden_actions = []
@@ -255,46 +300,28 @@ class MonteCarloPolicy(Policy):
             possible_actions.append(self.depot)
 
         elif len(self.state.clients_not_visited) < 3:
-            self._classify_shortest_distance_clients()
-            if self.shortest_distance_clients[vehicle]:
-                for i in range(len(self.shortest_distance_clients[vehicle])):
-                    possible_actions.append(self.shortest_distance_clients[vehicle][i][1])
+            shortest_distance_clients = self._classify_shortest_distance_clients()
+            if shortest_distance_clients[vehicle]:
+                for i in range(len(shortest_distance_clients[vehicle])):
+                    possible_actions.append(shortest_distance_clients[vehicle][i][1])
             else:
                 possible_actions.append(self.depot)
 
         else:
-            clients = self.state.clients_not_visited
-            travel_times = [
-                (
-                    self.shortest_path_cache.path_between(
-                        self.state.vehicle_position[vehicle], client
-                    ).average_minutes,
-                    client,
-                )
-                for client in clients
-            ]
-            top_vehicle_actions = [
-                vehicle_action
-                for vehicle_action in travel_times
-                if vehicle_action[1] not in forbidden_actions
-            ]
-
-            possible_actions = [
-                client for _, client in heapq.nsmallest(number_of_actions, top_vehicle_actions)
-            ]
+            possible_actions = self._closest_allowed_clients(
+                self.state.vehicle_position[vehicle], number_of_actions, forbidden_actions
+            )
 
             possible_actions = list(set(possible_actions))
 
             if (
-                self.shortest_path_cache.path_between(
-                    self.state.vehicle_position[vehicle], self.depot
-                ).average_minutes
+                self.geometry.average_minutes(self.state.vehicle_position[vehicle], self.depot)
                 + self.state.tau_episode
                 > self.end_of_horizon
             ):
                 possible_actions.append(self.depot)
 
-            for delayed_client in self.delayed_clients[vehicle]:
+            for delayed_client in features.delayed_clients[vehicle]:
                 if (
                     delayed_client not in possible_actions
                     and delayed_client not in forbidden_actions
@@ -306,42 +333,71 @@ class MonteCarloPolicy(Policy):
 
         return possible_actions
 
-    def _classify_delayed_clients(self) -> None:
-        """Ports ``clasify_delayed_clients`` — duplicate-append quirk included."""
-        self.delayed_clients = [[] for _ in range(self.number_vehicles)]
-        self.vehicle_to_clients = defaultdict(list)
-        for client in self.state.clients_not_visited:
-            assigned_vehicle = None
-            min_travel_time = float("inf")
-            for vehicle_idx, vehicle_position in enumerate(self.state.vehicle_position):
-                if vehicle_position == self.depot and self.state.tau_episode > 310:
-                    continue
+    def _closest_allowed_clients(
+        self, position: float, number_of_actions: int, forbidden_actions: list[int]
+    ) -> list[int]:
+        """The unvisited Clients closest to ``position``, nearest first, at most k of them.
 
-                travel_time = self.shortest_path_cache.path_between(
-                    vehicle_position, client
-                ).average_minutes
-                if travel_time < min_travel_time:
-                    min_travel_time = travel_time
-                    assigned_vehicle = vehicle_idx
+        Ticket 07 (simulation-performance, ADR-0003): one geometry row slice plus
+        one ``np.lexsort`` replace the per-Client ``average_minutes`` lookups and
+        the ``heapq.nsmallest`` over ``(travel time, Client)`` tuples this ports.
+        The ordering is identical, not merely equivalent: lexsort's primary key
+        is the travel time and its secondary the Client id, exactly how tuple
+        comparison broke float ties, and ``nsmallest(k, xs) == sorted(xs)[:k]``.
 
-                # Legacy quirk: inside the vehicle loop, so the pair is appended
-                # once per remaining vehicle iteration, not once per client.
-                if assigned_vehicle is not None:
-                    self.vehicle_to_clients[assigned_vehicle].append((min_travel_time, client))
+        Forbidden Clients (the other vehicles' current actions) are dropped
+        *after* the sort: the ``k + len(forbidden)`` nearest contain at least
+        ``k`` allowed ones whenever the filtered set has that many, so the first
+        ``k`` survivors are the same list filtering first would give.
 
-        for vehicle_idx, client_list in self.vehicle_to_clients.items():
-            client_list.sort()
-            for travel_time, client in client_list:
-                if len(self.delayed_clients[vehicle_idx]) >= 2:
-                    break
+        The returned ids are the State's own Python ints, never numpy scalars:
+        they flow into ``self.action`` and from there into the Model.
+        """
+        remaining = self._remaining_clients()
+        travel_times = self.geometry.average_minutes_at(position, remaining.column_positions)
+        nearest = np.lexsort((remaining.client_ids, travel_times))[
+            : number_of_actions + len(forbidden_actions)
+        ]
 
-                delay_tw = self.time_windows[client][1]
-                if travel_time + self.state.tau_episode >= delay_tw:
-                    self.delayed_clients[vehicle_idx].append(client)
+        clients = remaining.clients
+        closest: list[int] = []
+        for index in nearest:
+            if len(closest) == number_of_actions:
+                break
+            client = clients[index]
+            if client not in forbidden_actions:
+                closest.append(client)
+        return closest
 
-    def _classify_shortest_distance_clients(self) -> None:
-        """Ports ``clasify_shortest_distance_clients`` (endgame with < 3 Clients left)."""
-        self.shortest_distance_clients = defaultdict(list)
+    def _remaining_clients(self) -> _RemainingClients:
+        """``clients_not_visited`` as sortable arrays, rebuilt only when it changes.
+
+        Every vehicle of a decision pass selects candidates out of the same
+        unvisited-Client list, which only the Model's transition function changes
+        (in place — hence the copy in :class:`_RemainingClients`, and the
+        content comparison here rather than an identity check).
+        """
+        clients = self.state.clients_not_visited
+        cached = self._remaining_clients_cache
+        if cached is not None and cached.clients == clients:
+            return cached
+
+        fresh = _RemainingClients(
+            clients=list(clients),
+            client_ids=np.asarray(clients),
+            column_positions=self.geometry.column_positions(clients),
+        )
+        self._remaining_clients_cache = fresh
+        return fresh
+
+    def _classify_shortest_distance_clients(self) -> defaultdict[int, list[tuple[float, int]]]:
+        """Ports ``clasify_shortest_distance_clients`` (endgame with < 3 Clients left).
+
+        Stays scalar on purpose (ticket 07 Comments): with one or two Clients left
+        its arrays are two elements wide, where numpy's per-call overhead measured
+        2x slower than these loops.
+        """
+        shortest_distance_clients: defaultdict[int, list[tuple[float, int]]] = defaultdict(list)
 
         clients_remaining = len(self.state.clients_not_visited)
 
@@ -352,7 +408,7 @@ class MonteCarloPolicy(Policy):
                     continue
 
                 total_distance = sum(
-                    self.shortest_path_cache.path_between(vehicle_position, client).average_minutes
+                    self.geometry.average_minutes(vehicle_position, client)
                     for client in self.state.clients_not_visited
                 )
                 vehicle_distances.append((total_distance, vehicle_idx))
@@ -361,10 +417,10 @@ class MonteCarloPolicy(Policy):
 
             for _, vehicle_idx in closest_two_vehicles:
                 for client in self.state.clients_not_visited:
-                    travel_time = self.shortest_path_cache.path_between(
+                    travel_time = self.geometry.average_minutes(
                         self.state.vehicle_position[vehicle_idx], client
-                    ).average_minutes
-                    self.shortest_distance_clients[vehicle_idx].append((travel_time, client))
+                    )
+                    shortest_distance_clients[vehicle_idx].append((travel_time, client))
 
         elif clients_remaining == 1:
             client = next(iter(self.state.clients_not_visited))
@@ -373,159 +429,11 @@ class MonteCarloPolicy(Policy):
                 if vehicle_position == self.depot and self.state.tau_episode > 310:
                     continue
 
-                travel_time = self.shortest_path_cache.path_between(
-                    vehicle_position, client
-                ).average_minutes
+                travel_time = self.geometry.average_minutes(vehicle_position, client)
                 distances.append((travel_time, vehicle_idx))
 
             closest_vehicle = min(distances)
             assigned_vehicle_idx = closest_vehicle[1]
-            self.shortest_distance_clients[assigned_vehicle_idx].append(
-                (closest_vehicle[0], client)
-            )
+            shortest_distance_clients[assigned_vehicle_idx].append((closest_vehicle[0], client))
 
-    def _extract_general_state_features(self) -> None:
-        """Ports the live ``extract_general_state_features`` (12 features)."""
-        self.X_general_state = []
-
-        clients_left = len(self.state.clients_not_visited) / 150
-
-        if clients_left != 0:
-            time_left = (1150 - self.state.tau_episode) / (850)
-            time = (self.state.tau_episode - 300) / 850
-        else:
-            time_left = 0
-            time = 0
-
-        self.X_general_state.append(np.sqrt(clients_left))
-        self.X_general_state.append(time_left)
-        self.X_general_state.append(time_left**2)
-        self.X_general_state.append(clients_left**2)
-        self.X_general_state.append((clients_left**2) * time)
-        self.X_general_state.append((time**2) * clients_left)
-        self.X_general_state.append((time**2) * (clients_left**2))
-
-        client_earliness_value = []
-        client_delay_value = []
-        for client in self.state.clients_not_visited:
-            client_earliness, client_due_time = self.time_windows[client]
-            client_earliness_value.append(client_earliness)
-            client_delay_value.append(client_due_time)
-
-        client_counts_earliness = [0 for _ in range(4)]
-
-        for i in client_earliness_value:
-            if i < 400 and self.state.tau_episode < 400:
-                client_counts_earliness[0] += 1
-            elif 400 <= i < 500 and self.state.tau_episode < 500:
-                client_counts_earliness[1] += 1
-            elif 500 <= i < 600 and self.state.tau_episode < 600:
-                client_counts_earliness[2] += 1
-
-        for count in client_counts_earliness:
-            self.X_general_state.append(count / self.number_clients)
-
-        time_left_for_earliness = (580 - self.state.tau_episode) / (280)
-        mean_earliness_diff: float = 0
-        if time_left_for_earliness > 0:
-            mean_earliness: float = 0
-            for i in client_earliness_value:
-                mean_earliness += i
-
-            if len(self.state.clients_not_visited) != 0:
-                mean_earliness = mean_earliness / len(self.state.clients_not_visited)
-                if mean_earliness > self.state.tau_episode:
-                    mean_earliness_diff = (mean_earliness - self.state.tau_episode) / 120
-
-        self.X_general_state.append(mean_earliness_diff)
-
-        # Computed and stored but never appended as a feature — kept as in the legacy.
-        self.mean_velocities = []
-        for vehicle_velocities in self.state.observed_velocity:
-            mean_velocity: float = 0
-            for velocity in vehicle_velocities:
-                mean_velocity += velocity
-            mean_velocity = mean_velocity / len(vehicle_velocities)
-            self.mean_velocities.append(mean_velocity)
-
-        self._classify_delayed_clients()
-
-    def _extract_state_action_features(self, action: list[int]) -> None:
-        """Ports the live ``extract_state_action_features`` (7 features)."""
-        cg_clients = self.time_windows
-        paths = self.shortest_path_cache
-        state = self.state
-        tau = state.tau_episode
-        clients_all = state.clients_not_visited
-
-        depot = self.depot
-        n_veh = self.number_vehicles
-        service_time = self.service_time
-        end_horizon = self.end_of_horizon
-        earl_fact = self.earliness_cost_factor
-        delay_fact = self.delay_cost_factor
-        overtime_fact = self.overtime_cost
-
-        selected = {a for a in action if a != depot}
-        clients_left = [c for c in clients_all if c not in selected]
-
-        features = []
-
-        late_count = sum(1 for c in clients_left if tau > cg_clients[c][1])
-        features.append(late_count / 13)
-        # Preserved quirk: a permanently-zero feature. Removing it would shrink W
-        # from 19 components and invalidate every stored weight vector.
-        features.append(0)
-
-        total_dist = sum(
-            paths.path_between(state.vehicle_position[i], action[i]).length for i in range(n_veh)
-        )
-        features.append(total_dist / 100.0)
-
-        earliness_cost = 0.0
-        delay_cost = 0.0
-        for i, a in enumerate(action):
-            if a in clients_all and a != depot:
-                travel_time = paths.path_between(state.vehicle_position[i], a).average_minutes
-                est_arrival = tau + travel_time
-                earl_tw, due_tw = cg_clients[a]
-
-                if est_arrival < earl_tw:
-                    earliness_cost += (earl_tw - est_arrival) * earl_fact
-                elif est_arrival > due_tw:
-                    delay_cost += (est_arrival - max(due_tw, tau)) * delay_fact
-
-        features.append(earliness_cost / 60.0)
-        features.append(delay_cost / 60.0)
-
-        future_delay = 0.0
-        for veh in range(n_veh):
-            for _, client in self.vehicle_to_clients[veh]:
-                if client not in action:
-                    t1 = paths.path_between(
-                        state.vehicle_position[veh], action[veh]
-                    ).average_minutes
-                    t2 = paths.path_between(action[veh], client).average_minutes
-                    est = tau + t1 + t2 + service_time
-                    _, due_tw = cg_clients[client]
-                    if est > due_tw:
-                        future_delay += (est - max(due_tw, tau)) * delay_fact
-
-        features.append(future_delay / 2500.0)
-
-        overtime_cost = 0.0
-        for i, a in enumerate(action):
-            if a != depot:
-                t1 = paths.path_between(state.vehicle_position[i], a).average_minutes
-                t2 = paths.path_between(a, depot).average_minutes
-                est_ret = tau + t1 + t2 + service_time
-            else:
-                est_ret = tau + paths.path_between(state.vehicle_position[i], depot).average_minutes
-
-            if est_ret > end_horizon:
-                base = end_horizon if tau < end_horizon else tau
-                overtime_cost += (est_ret - base) * overtime_fact
-
-        features.append(overtime_cost / 180.0)
-
-        self.X_state_action = features
+        return shortest_distance_clients

@@ -63,6 +63,12 @@ class ExperimentConfig:
     first_train_seed: int
     evaluation_seed_start: int
     evaluation_seed_count: int
+    # Inert (ticket 02, simulation-performance): the legacy test_model repeated
+    # every (action count, seed) episode this many times and averaged, but
+    # per-seed Generators (ticket 13) made every repeat bit-identical, so
+    # Trainer.final_test now runs each pair once and never reads this field.
+    # Kept for YAML config-file compatibility (still required, still validated
+    # positive) rather than removed.
     test_episodes: int
 
     # Final test (former test_model hardcodes: the action-count list [2,10,20,30,40,50]

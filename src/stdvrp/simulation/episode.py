@@ -41,6 +41,7 @@ from numpy.typing import NDArray
 
 from stdvrp.congestion import CongestionGenerator
 from stdvrp.demand.client_generator import ClientGenerator
+from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPathCache
 from stdvrp.policies.monte_carlo import MonteCarloPolicy
 from stdvrp.simulation.model import Model
@@ -116,9 +117,10 @@ def run_evaluation_episode(
     }
 
     state = State(number_vehicles, clients, n_observed_arcs, horizon_start_minute, depot)
+    geometry = EpisodeGeometry.build(shortest_path_cache, clients, depot)
     policy = MonteCarloPolicy(
         number_vehicles,
-        shortest_path_cache,
+        geometry,
         time_windows,
         state,
         len(clients),
@@ -151,16 +153,17 @@ def run_evaluation_episode(
 
 def _episode_result(model: Model) -> EpisodeResult:
     """Read the Episode outcome off a finished Model."""
+    costs = model.costs
     return EpisodeResult(
-        total_cost=model.total_cost,
-        distance_cost=model.total_distance_cost,
-        delay_cost=model.total_delay_cost,
-        earliness_cost=model.total_earliness_cost,
-        overtime_cost=model.total_overtime_cost,
+        total_cost=costs.total_cost,
+        distance_cost=costs.distance_cost,
+        delay_cost=costs.delay_cost,
+        earliness_cost=costs.earliness_cost,
+        overtime_cost=costs.overtime_cost,
         tau=model.state.tau_episode,
         state_count=model.total_state_counter,
-        delay_clients=model.total_delay_clients,
-        earliness_clients=model.total_earliness_clients,
+        delay_clients=costs.late_clients,
+        earliness_clients=costs.early_clients,
     )
 
 
@@ -213,9 +216,10 @@ def run_training_episode(
     }
 
     state = State(number_vehicles, clients, n_observed_arcs, horizon_start_minute, depot)
+    geometry = EpisodeGeometry.build(shortest_path_cache, clients, depot)
     policy = MonteCarloPolicy(
         number_vehicles,
-        shortest_path_cache,
+        geometry,
         time_windows,
         state,
         len(clients),

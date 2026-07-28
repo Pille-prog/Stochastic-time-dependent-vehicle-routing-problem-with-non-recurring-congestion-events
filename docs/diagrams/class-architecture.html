@@ -1,0 +1,886 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>STDVRP — Class Architecture &amp; Training/Testing Flow</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --bg-elevated: #ffffff;
+    --text: #1b1f26;
+    --text-dim: #565f6b;
+    --border: #e2e5ea;
+    --code-bg: #eef0f3;
+    --accent: #364fc7;
+    --entry: #4C6EF5;
+    --config: #868E96;
+    --data: #0ca678;
+    --orch: #e8890c;
+    --episode: #d6336c;
+    --modelint: #6741d9;
+    --shadow: 0 1px 2px rgba(20,20,30,0.06), 0 4px 16px rgba(20,20,30,0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --bg-elevated: #1b1e24;
+      --text: #e7e9ee;
+      --text-dim: #a2a9b4;
+      --border: #2b2f37;
+      --code-bg: #23262d;
+      --accent: #7d95ff;
+      --entry: #7d95ff;
+      --config: #9ba1a8;
+      --data: #35d6a8;
+      --orch: #ffb454;
+      --episode: #ff7aa8;
+      --modelint: #a48cf2;
+      --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 4px 20px rgba(0,0,0,0.35);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
+  code, .mono {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 0.88em;
+  }
+  code {
+    background: var(--code-bg);
+    padding: 0.1em 0.4em;
+    border-radius: 4px;
+  }
+  a { color: var(--accent); }
+
+  header.top {
+    padding: 2.5rem 1.5rem 1.5rem;
+    max-width: 980px;
+    margin: 0 auto;
+  }
+  header.top h1 {
+    font-size: 1.85rem;
+    margin: 0 0 0.4rem;
+    letter-spacing: -0.01em;
+  }
+  header.top p.lede {
+    color: var(--text-dim);
+    font-size: 1.05rem;
+    max-width: 760px;
+    margin: 0.3rem 0 0;
+  }
+  header.top p.scope {
+    color: var(--text-dim);
+    font-size: 0.88rem;
+    margin-top: 0.9rem;
+    border-left: 3px solid var(--border);
+    padding-left: 0.8rem;
+  }
+
+  nav.toc {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    padding: 0.6rem 1.5rem;
+  }
+  nav.toc ul {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 1rem;
+  }
+  nav.toc a {
+    text-decoration: none;
+    color: var(--text-dim);
+    font-size: 0.86rem;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  nav.toc a:hover { color: var(--accent); }
+
+  main {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 0 1.5rem 4rem;
+  }
+
+  section { margin-top: 3rem; scroll-margin-top: 3.2rem; }
+  section h2 {
+    font-size: 1.35rem;
+    margin-bottom: 0.3rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  section > p.section-lede {
+    color: var(--text-dim);
+    margin-top: 0.2rem;
+    max-width: 760px;
+  }
+
+  .badge {
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    color: #fff;
+  }
+  .badge.entry { background: var(--entry); }
+  .badge.config { background: var(--config); }
+  .badge.data { background: var(--data); }
+  .badge.orch { background: var(--orch); color:#241a00;}
+  .badge.episode { background: var(--episode); }
+  .badge.modelint { background: var(--modelint); }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.1rem;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    margin: 0.9rem 0 1.4rem;
+    align-items: center;
+  }
+  .legend .swatch {
+    display: inline-block;
+    width: 0.7rem;
+    height: 0.7rem;
+    border-radius: 3px;
+    margin-right: 0.35rem;
+    vertical-align: -1px;
+  }
+  .legend .shape-note { display:flex; align-items:center; gap:0.4rem; }
+
+  .diagram-card {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    padding: 1.2rem 1.2rem 0.6rem;
+    margin: 1rem 0 1.6rem;
+    overflow-x: auto;
+  }
+  .diagram-card .mermaid { display:flex; justify-content:center; }
+  .diagram-card figcaption {
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    border-top: 1px solid var(--border);
+    margin-top: 0.8rem;
+    padding: 0.7rem 0.1rem 0.9rem;
+  }
+
+  table.vocab {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.92rem;
+    margin: 1rem 0;
+  }
+  table.vocab th, table.vocab td {
+    text-align: left;
+    padding: 0.55rem 0.7rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  table.vocab th { color: var(--text-dim); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  table.vocab td.term { font-weight: 600; white-space: nowrap; }
+
+  .seams {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 0.8rem;
+    margin: 1rem 0 0.5rem;
+  }
+  .seam {
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    background: var(--bg-elevated);
+    font-size: 0.88rem;
+  }
+  .seam h4 { margin: 0 0 0.25rem; font-size: 0.92rem; }
+  .seam p { margin: 0; color: var(--text-dim); }
+
+  details.module {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    margin-bottom: 0.8rem;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  details.module > summary {
+    cursor: pointer;
+    padding: 0.85rem 1.1rem;
+    font-weight: 600;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 1rem;
+  }
+  details.module > summary::-webkit-details-marker { display:none; }
+  details.module > summary::before {
+    content: "▸";
+    display: inline-block;
+    transition: transform 0.15s ease;
+    color: var(--text-dim);
+    font-size: 0.8rem;
+  }
+  details.module[open] > summary::before { transform: rotate(90deg); }
+  details.module .module-body {
+    padding: 0 1.1rem 1rem;
+    border-top: 1px solid var(--border);
+  }
+  details.module .module-path {
+    font-weight: 400;
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    margin-left: auto;
+  }
+
+  .card {
+    border-top: 1px solid var(--border);
+    padding: 0.9rem 0 0.9rem;
+  }
+  .card:first-child { border-top: none; }
+  .card h4 {
+    margin: 0.6rem 0 0.15rem;
+    font-size: 0.98rem;
+    display:flex;
+    align-items:baseline;
+    gap:0.5rem;
+    flex-wrap: wrap;
+  }
+  .card .filepath {
+    font-size: 0.74rem;
+    color: var(--text-dim);
+    font-weight: 400;
+  }
+  .card p.role { margin: 0.2rem 0 0.5rem; color: var(--text-dim); }
+  .card ul.methods {
+    margin: 0.3rem 0 0.2rem;
+    padding-left: 1.1rem;
+    font-size: 0.88rem;
+  }
+  .card ul.methods li { margin-bottom: 0.28rem; }
+  .card .collab {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-top: 0.4rem;
+  }
+  .card .collab b { color: var(--text); font-weight: 600; }
+
+  footer {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 1.5rem 1.5rem 3rem;
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    border-top: 1px solid var(--border);
+  }
+
+  .quirk-note {
+    background: color-mix(in srgb, var(--orch) 12%, var(--bg-elevated));
+    border: 1px solid color-mix(in srgb, var(--orch) 35%, var(--border));
+    border-radius: 10px;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.85rem;
+    margin: 0.8rem 0;
+  }
+  .quirk-note b { color: var(--orch); }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <h1>STDVRP — Class Architecture &amp; the Training/Testing Runtime</h1>
+  <p class="lede">
+    How <code>stdvrp</code>'s classes compose, and exactly which methods call which
+    during one <b>training</b> episode and one <b>evaluation/testing</b> episode.
+  </p>
+  <p class="scope">
+    Scope: the runtime path from <code>experiments/chengdu/run.py</code> down through
+    <code>Trainer</code>, the per-Episode object graph, and <code>Model.transition_function</code>.
+    Benchmark scripts and the test suite are out of scope; see <code>CONTEXT.md</code> and
+    <code>docs/adr/</code> for the vocabulary and design decisions this diagram assumes.
+  </p>
+</header>
+
+<nav class="toc">
+  <ul>
+    <li><a href="#vocab">Vocabulary</a></li>
+    <li><a href="#seams">Variation seams</a></li>
+    <li><a href="#map">Class map</a></li>
+    <li><a href="#orchestration">Trainer orchestration</a></li>
+    <li><a href="#training-flow">Training episode</a></li>
+    <li><a href="#eval-flow">Evaluation / testing episode</a></li>
+    <li><a href="#reference">Class reference</a></li>
+  </ul>
+</nav>
+
+<main>
+
+  <section id="vocab">
+    <h2>Powell vocabulary cheat-sheet</h2>
+    <p class="section-lede">The four core terms (<code>CONTEXT.md</code>) every diagram below reuses verbatim.</p>
+    <table class="vocab">
+      <thead><tr><th>Term</th><th>Meaning here</th></tr></thead>
+      <tbody>
+        <tr><td class="term">State</td><td>The information available to make a decision at a point in simulated time: vehicle positions, pending clients, observed velocities, elapsed time (<code>tau_episode</code>).</td></tr>
+        <tr><td class="term">Policy</td><td>A rule mapping a State to a decision — which node each vehicle serves next. <code>MonteCarloPolicy</code> is the one live implementation.</td></tr>
+        <tr><td class="term">Model</td><td>Owns the transition function: advances the State given a decision plus exogenous information (velocities, congestion). The simulator the Policy interacts with.</td></tr>
+        <tr><td class="term">Trainer</td><td>Runs training and evaluation Episodes over the Model to fit and compare Policies (a <code>W</code> weight vector, here).</td></tr>
+        <tr><td class="term">Episode</td><td>One complete simulated run over the horizon: clients generated, congestion occurs, vehicles execute a Policy, costs accumulate.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="seams">
+    <h2>The three variation seams <span class="badge episode">ADR-0002</span></h2>
+    <p class="section-lede">Everything else in the diagram below is deliberately concrete (no interface) — these three axes are the only ones designed to vary.</p>
+    <div class="seams">
+      <div class="seam">
+        <h4>Policy</h4>
+        <p><code>MonteCarloPolicy</code> is the one live subclass of the <code>Policy</code> ABC. Swap in a static or Q-learning policy without touching <code>Model</code>.</p>
+      </div>
+      <div class="seam">
+        <h4>CongestionGenerator</h4>
+        <p><code>ArcProbabilityCongestionGenerator</code> is the one live subclass. <code>Model</code> calls <code>generate()</code> without knowing which congestion model it got.</p>
+      </div>
+      <div class="seam">
+        <h4>DataSource</h4>
+        <p><code>CsvDataSource</code> reads the Chengdu CSV archive today; a database-backed source could replace it without the domain model noticing.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="map">
+    <h2>Class map <span class="badge episode">who composes whom</span></h2>
+    <p class="section-lede">
+      A dependency/composition view across every layer, from the CLI entry point down to the objects one Episode
+      is built from. Rectangles are classes, the pill is a module-level function.
+    </p>
+    <div class="legend">
+      <span><span class="swatch" style="background:var(--entry)"></span>Entry point</span>
+      <span><span class="swatch" style="background:var(--config)"></span>Config</span>
+      <span><span class="swatch" style="background:var(--data)"></span>Data / network / traffic</span>
+      <span><span class="swatch" style="background:var(--orch)"></span>Training orchestration</span>
+      <span><span class="swatch" style="background:var(--episode)"></span>Per-Episode construction</span>
+      <span><span class="swatch" style="background:var(--modelint)"></span>Model's internal collaborators</span>
+    </div>
+    <figure class="diagram-card">
+      <pre class="mermaid">
+flowchart TB
+  classDef entry fill:#4C6EF5,color:#fff,stroke:#364FC7,stroke-width:1px
+  classDef config fill:#868E96,color:#fff,stroke:#495057,stroke-width:1px
+  classDef data fill:#0ca678,color:#fff,stroke:#087F5B,stroke-width:1px
+  classDef orch fill:#e8890c,color:#241a00,stroke:#a15c00,stroke-width:1px
+  classDef ep fill:#d6336c,color:#fff,stroke:#A61E4D,stroke-width:1px
+  classDef mi fill:#6741d9,color:#fff,stroke:#5F3DC4,stroke-width:1px
+
+  run["run.py<br/>main()"]:::entry
+  Config["ExperimentConfig"]:::config
+
+  subgraph DL["Data loading — stdvrp.traffic / stdvrp.network"]
+    DataSource["CsvDataSource"]:::data
+    RoadNetwork["RoadNetwork"]:::data
+    TrafficHistory["TrafficHistory"]:::data
+    WorldCache(("world_cache.load_world()")):::data
+    TravelTimeModel["TravelTimeModel"]:::data
+    ShortestPathCache["ShortestPathCache"]:::data
+  end
+
+  subgraph OR["Training orchestration — stdvrp.training"]
+    Trainer["Trainer"]:::orch
+    EpisodePool["EpisodePool<br/>(worker processes)"]:::orch
+    EpisodeWorld["EpisodeWorld"]:::orch
+  end
+
+  subgraph EC["Per-Episode construction — stdvrp.simulation / demand / policies / congestion"]
+    ClientGenerator["ClientGenerator"]:::ep
+    EpisodeGeometry["EpisodeGeometry"]:::ep
+    State["State"]:::ep
+    MonteCarloPolicy["MonteCarloPolicy"]:::ep
+    FeatureExtractor["FeatureExtractor"]:::ep
+    CongestionGenerator["CongestionGenerator"]:::ep
+    Model["Model"]:::ep
+  end
+
+  subgraph MI["Model's collaborators"]
+    CostLedger["CostLedger"]:::mi
+    EpisodeVelocities["EpisodeVelocities"]:::mi
+    FleetRoutes["FleetRoutes"]:::mi
+  end
+
+  run --> Config
+  run --> Trainer
+  Config --> Trainer
+  Trainer --> EpisodePool
+  Trainer --> EpisodeWorld
+  EpisodePool --> EpisodeWorld
+  EpisodeWorld --> WorldCache
+  WorldCache --> DataSource
+  DataSource --> RoadNetwork
+  DataSource --> TrafficHistory
+  WorldCache --> TravelTimeModel
+  WorldCache --> ShortestPathCache
+  TravelTimeModel --> RoadNetwork
+  TravelTimeModel --> TrafficHistory
+  EpisodeWorld --> ClientGenerator
+  EpisodeWorld --> CongestionGenerator
+  EpisodeWorld --> TravelTimeModel
+  EpisodeWorld --> ShortestPathCache
+
+  Trainer -->|"train(): run_training_episode() -- sequential, W is a serial dependency"| Model
+  Trainer -->|"_run_evaluation_batch(): via EpisodeWorld / EpisodePool -&gt; run_evaluation_episode()"| Model
+
+  ClientGenerator --> State
+  EpisodeGeometry --> ShortestPathCache
+  MonteCarloPolicy --> EpisodeGeometry
+  MonteCarloPolicy --> FeatureExtractor
+  MonteCarloPolicy --> State
+  Model --> State
+  Model --> MonteCarloPolicy
+  Model --> CostLedger
+  Model --> EpisodeVelocities
+  Model --> FleetRoutes
+  Model --> ShortestPathCache
+  Model --> TravelTimeModel
+  Model --> CongestionGenerator
+  EpisodeVelocities --> TravelTimeModel
+      </pre>
+      <figcaption>
+        <code>EpisodeWorld</code> (ticket 08) bundles everything both Episode runners need as keyword arguments:
+        a <code>ClientGenerator</code>, the loaded <code>TravelTimeModel</code>/<code>ShortestPathCache</code>, and a
+        <code>CongestionGenerator</code> built around the travel-time model's event probabilities. <code>EpisodePool</code>
+        is a persistent pool of spawned workers, each holding its own <code>EpisodeWorld</code> loaded from the ticket-03
+        binary world cache; <code>worker_count=1</code> (the default) skips the pool and everything runs through one
+        in-process <code>EpisodeWorld</code>.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section id="orchestration">
+    <h2>Trainer orchestration <span class="badge orch">the one full run</span></h2>
+    <p class="section-lede">What <code>Trainer.run(output_dir)</code> actually does, end to end (<code>training/trainer.py</code>).</p>
+    <div class="diagram-card">
+      <pre class="mermaid">
+flowchart TB
+  A["Trainer.run(output_dir)"] --> B["train()"]
+
+  subgraph LOOP["for index in range(config.total_train_iterations)"]
+    direction TB
+    B1["run_training_episode(seed, W, learning_rate)"] --> B2["w = result.w<br/>w_trajectory.append(copy of w)"]
+    B2 --> B3{"episodes_completed % test_frequency == 0 ?"}
+    B3 -->|no| B1
+    B3 -->|yes| B4["_run_evaluation_batch(newest_w = copy of w, evaluation_seeds)"]
+    B4 --> B5["EvaluationBlock(seed_costs) -&gt; mean_cost"]
+    B5 --> B6{"mean_cost &lt; best_mean_cost so far ?"}
+    B6 -->|yes| B7["best_w = newest_w"]
+    B6 -->|no| B1
+    B7 --> B1
+  end
+
+  B --> LOOP
+  LOOP --> H["TrainingResult(w_trajectory, evaluations, newest_w, best_w)"]
+  H --> I["tested_w = best_w, or w_trajectory[-1] if no evaluation ever ran"]
+  I --> J["final_test(tested_w)"]
+  J --> K["_run_evaluation_batch(tested_w, final_test_requests())<br/>every (action_count x seed) pair, ONE batch"]
+  K --> L["ActionCountReport per test_action_counts<br/>(mean, population std per metric across seeds)"]
+  L --> M["write_results() -&gt; results.json"]
+  L --> N["write_training_plot() -&gt; training_plot.png"]
+      </pre>
+    </div>
+    <div class="quirk-note">
+      <b>Preserved / deliberate behaviors worth knowing:</b> the warm-up learning rate (when configured) only applies to
+      the very first training Episode, then <code>learning_rate</code> takes over from Episode 2 on. Training is always
+      sequential — <code>W</code> is a serial dependency — only the evaluation blocks and the final test can spread
+      across <code>EpisodePool</code> workers. The final test runs each (action count, seed) pair exactly <b>once</b>
+      (ticket 02): per-Episode Generators make repeats bit-identical, so a mean over repeats would equal the single
+      value anyway.
+    </div>
+  </section>
+
+  <section id="training-flow">
+    <h2>Training episode, step by step <span class="badge episode">run_training_episode()</span></h2>
+    <p class="section-lede">
+      What happens on one call from <code>Trainer.train()</code> down to a returned <code>TrainingEpisodeResult</code>
+      (<code>simulation/episode.py</code>, <code>simulation/model.py</code>, <code>policies/monte_carlo.py</code>).
+    </p>
+    <div class="diagram-card">
+      <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant TR as Trainer
+  participant RTE as run_training_episode()
+  participant CG as ClientGenerator
+  participant ST as State
+  participant EG as EpisodeGeometry
+  participant POL as MonteCarloPolicy
+  participant FE as FeatureExtractor
+  participant MDL as Model
+  participant FR as FleetRoutes
+  participant EV as EpisodeVelocities
+  participant CNG as CongestionGenerator
+  participant CL as CostLedger
+
+  TR->>RTE: seed, W, learning_rate, world.episode_kwargs()
+  RTE->>CG: generate(seed)
+  CG-->>RTE: EpisodeDemand(clients, vehicle_count)
+  RTE->>ST: new State(vehicle_count, clients, n_observed_arcs, depot)
+  RTE->>EG: EpisodeGeometry.build(shortest_path_cache, clients, depot)
+  RTE->>POL: new MonteCarloPolicy(state, geometry, W, exploration_rng, learning_rate, number_actions_train)
+  activate POL
+  POL->>FE: new FeatureExtractor(geometry, time_windows, ...)
+  POL->>POL: decide(state) -- one random initial action per vehicle, then one full greedy pass
+  deactivate POL
+  RTE->>MDL: new Model(state, policy, travel_time_model, shortest_path_cache, congestion_generator, velocity_rng, congestion_rng)
+  RTE->>MDL: run_training_episode()
+  activate MDL
+  loop until state.terminal
+    MDL->>POL: decide_train(state)
+    activate POL
+    POL->>FE: state_features(state)
+    FE-->>POL: StateFeatures (12 general + per-vehicle candidate data)
+    POL->>POL: repair carried-over action if infeasible, then epsilon-greedy pick per vehicle
+    POL-->>MDL: action[vehicle], one node per vehicle
+    deactivate POL
+    MDL->>MDL: episode_states.append(TrainingSnapshot.capture(state))
+    MDL->>MDL: episode_actions.append(list(action))
+    MDL->>MDL: transition_function(action)
+    Note right of MDL: Event-dispatch loop: advances the clock to whichever is soonest --<br/>a congestion expiry, a vehicle arrival, or the next decision epoch.<br/>Delegates to FleetRoutes (routing/progress), EpisodeVelocities (arc<br/>sampling), CongestionGenerator (new events, decision epochs only)<br/>and CostLedger (every charge -- distance/earliness/lateness/overtime).
+    MDL-->>FR: _reroute_for / begin_arc / advance / park
+    MDL-->>EV: sample(node_start, node_end, tau_episode)
+    MDL-->>CNG: generate(tau_episode, congested_arcs, congestion_rng)
+    MDL-->>CL: charge_distance / charge_earliness / charge_lateness / charge_vehicle_overtime
+    MDL->>MDL: episode_rewards.append(costs.transition_cost)
+  end
+  MDL->>POL: update_W(episode_states, episode_actions, episode_rewards)
+  activate POL
+  Note right of POL: Backward Monte Carlo replay: walks epochs newest-first,<br/>accumulating the observed return U_t, and steps<br/>W += learning_rate * (U_t - acquired_cost - Q_pred) * X
+  POL->>FE: state_features(snapshot) then action_features(features, action)
+  deactivate POL
+  MDL->>EV: release() -- drop this Episode's velocity memo and event book
+  deactivate MDL
+  MDL-->>RTE: costs, state.tau_episode, total_state_counter (via model)
+  RTE-->>TR: TrainingEpisodeResult(w = policy.W, episode = EpisodeResult)
+      </pre>
+    </div>
+    <div class="quirk-note">
+      <b>Note:</b> <code>MonteCarloPolicy.__init__</code> always ends by calling <code>decide()</code> (the greedy path),
+      never <code>decide_train()</code> — that first full pass is the legacy constructor quirk. Every subsequent decision
+      in a training Episode goes through <code>decide_train()</code> instead.
+    </div>
+  </section>
+
+  <section id="eval-flow">
+    <h2>Evaluation &amp; testing episode, step by step <span class="badge episode">run_evaluation_episode()</span></h2>
+    <p class="section-lede">
+      Both the periodic evaluation blocks (during training) and the final test after training use the exact same path;
+      only the seed/fleet-size/action-pool numbers differ. Batches run either in-process (<code>EpisodeWorld</code>) or
+      spread across worker processes (<code>EpisodePool</code>) — <code>Trainer</code> cannot tell the difference in
+      the results it gets back.
+    </p>
+    <div class="diagram-card">
+      <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant TR as Trainer
+  participant POOL as EpisodeWorld / EpisodePool
+  participant REE as run_evaluation_episode()
+  participant CG as ClientGenerator
+  participant ST as State
+  participant EG as EpisodeGeometry
+  participant POL as MonteCarloPolicy
+  participant MDL as Model
+  participant EV as EpisodeVelocities
+
+  TR->>POOL: run(w, requests) -- one evaluation block, or the whole final-test table
+  Note over POOL: EpisodeWorld.run_episodes() is the serial in-process path (worker_count=1, the default).<br/>EpisodePool.run() dispatches the same requests to spawned workers via Executor.map,<br/>which yields results in SUBMISSION order -- never completion order (the Tier-1 gate:<br/>every mean/std the Trainer reduces is bit-identical to the serial loop's).
+  loop for each EpisodeRequest(seed, vehicle_count?, number_actions_test?) in requests
+    POOL->>REE: run_episode(w, request)
+    REE->>CG: generate(request.seed)
+    CG-->>REE: EpisodeDemand(clients, vehicle_count)
+    REE->>ST: new State(vehicle_count or generated fleet size, clients, ...)
+    REE->>EG: EpisodeGeometry.build(shortest_path_cache, clients, depot)
+    REE->>POL: new MonteCarloPolicy(state, geometry, W = w, exploration_rng)
+    activate POL
+    POL->>POL: decide(state) -- initial random action per vehicle, then one greedy pass
+    deactivate POL
+    REE->>MDL: new Model(state, policy, travel_time_model, shortest_path_cache, congestion_generator, ...)
+    REE->>MDL: run_evaluation_episode()
+    activate MDL
+    loop until state.terminal
+      MDL->>POL: decide(state) -- greedy argmin over Q = X @ W, no randomness
+      POL-->>MDL: action[vehicle], one node per vehicle
+      MDL->>MDL: transition_function(action)
+    end
+    MDL->>EV: release()
+    deactivate MDL
+    MDL-->>REE: model.costs, state.tau_episode, total_state_counter
+    REE-->>POOL: EpisodeResult(total_cost, distance_cost, delay_cost, earliness_cost, overtime_cost, tau, ...)
+  end
+  POOL-->>TR: tuple[EpisodeResult] in REQUEST order (never completion order)
+      </pre>
+    </div>
+    <div class="quirk-note">
+      <b>Evaluation blocks vs. final test:</b> an evaluation block uses the <b>generated</b> fleet size and a
+      <code>vehicles + 2</code> action pool (<code>EpisodeRequest(seed)</code>, both overrides <code>None</code>).
+      The final test fixes both from <code>config.test_vehicle_counts</code> /
+      <code>config.test_action_counts</code> — every (action count, seed) cell submitted as one 300-episode batch, so a
+      worker pool has the whole job to spread rather than one action count at a time.
+    </div>
+  </section>
+
+  <section id="reference">
+    <h2>Class reference</h2>
+    <p class="section-lede">Every class in the diagrams above, grouped by module, with its responsibility, key methods, and collaborators.</p>
+
+    <details class="module">
+      <summary><span class="badge config">config</span> Configuration <span class="module-path">stdvrp/config.py</span></summary>
+      <div class="module-body">
+        <div class="card">
+          <h4>ExperimentConfig <span class="filepath">frozen dataclass</span></h4>
+          <p class="role">Every knob of one experiment, immutable once loaded. Replaces the legacy's comma-separated <code>sys.argv</code> string plus values hardcoded across <code>main()</code>/<code>training_and_testing</code>/<code>model</code>.</p>
+          <ul class="methods">
+            <li><code>__post_init__()</code> — validates horizon ordering, demand/congestion ranges, positive counts, epsilon in [0,1], etc.</li>
+            <li><code>from_yaml(path)</code> — loads + type-coerces one YAML file; rejects unknown/missing keys.</li>
+            <li><code>evaluation_seeds</code> (property) — the fixed seed range used by every evaluation block.</li>
+          </ul>
+          <p class="collab"><b>Read by:</b> ClientGenerator.from_config, CsvDataSource.from_config, Trainer.from_config, world_cache (cache-key world params).</p>
+        </div>
+      </div>
+    </details>
+
+    <details class="module">
+      <summary><span class="badge data">data</span> Network &amp; traffic <span class="module-path">stdvrp/network/, stdvrp/traffic/</span></summary>
+      <div class="module-body">
+        <div class="card">
+          <h4>RoadNetwork <span class="filepath">network/road_network.py</span></h4>
+          <p class="role">The static directed graph: arc endpoints, coordinates, length in meters. Wraps the raw links table untransformed.</p>
+          <ul class="methods"><li><code>node_ids</code> — unique arc-start nodes in file order.</li></ul>
+        </div>
+        <div class="card">
+          <h4>TrafficHistory <span class="filepath">traffic/history.py</span></h4>
+          <p class="role">Raw per-day speed observations keyed by day.</p>
+          <ul class="methods"><li><code>instance_day_observations</code> — the single day the simulation runs on.</li></ul>
+        </div>
+        <div class="card">
+          <h4>DataSource / CsvDataSource <span class="filepath">traffic/datasource.py</span></h4>
+          <p class="role">ADR-0002 seam #3: the boundary through which RoadNetwork/TrafficHistory/ShortestPathCache are loaded. <code>CsvDataSource</code> reads the Chengdu archive's CSV naming convention.</p>
+          <ul class="methods">
+            <li><code>load_road_network()</code>, <code>load_traffic_history()</code>, <code>load_shortest_path_cache()</code></li>
+            <li><code>consumed_files()</code> — every file read, feeding the world cache's invalidation signature.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>TravelTimeModel <span class="filepath">traffic/travel_time_model.py</span></h4>
+          <p class="role">The deterministic data spine: aggregates multi-day speed stats, fills minute gaps, interpolates three blend windows, then derives everything a Model or Policy reads.</p>
+          <ul class="methods">
+            <li>Public attributes: <code>travel_data</code>, <code>speed_std</code>, <code>successors</code>, <code>node_coordinates</code>, <code>event_probability</code>, <code>mean_arc_data</code>.</li>
+            <li><code>_cached_state()</code> / <code>_from_cached_state()</code> — round-trips those six attributes through the binary world cache.</li>
+          </ul>
+          <p class="collab"><b>Built from:</b> RoadNetwork + TrafficHistory. <b>Read by:</b> EpisodeVelocities (sampling), Model, ArcProbabilityCongestionGenerator (successors/event_probability).</p>
+        </div>
+        <div class="card">
+          <h4>ShortestPathCache <span class="filepath">network/shortest_path_cache.py</span></h4>
+          <p class="role">Precomputed node&rarr;client shortest paths, loaded verbatim from a 907&nbsp;MB CSV — never recomputed at runtime.</p>
+          <ul class="methods"><li><code>path_between(node, client)</code> — node sequence, mean minutes, length.</li><li><code>items()</code> — live view used by EpisodeGeometry to build its matrices without a full-dict copy.</li></ul>
+        </div>
+        <div class="card">
+          <h4>world_cache.load_world() <span class="filepath">traffic/world_cache.py — module function</span></h4>
+          <p class="role">The CsvDataSource/Trainer boundary (ticket 03): builds — or reads a pickled snapshot of — the <code>LoadedWorld(travel_time_model, shortest_path_cache)</code> pair. Cache key hashes per-file size+mtime, the world-shaping config fields, and library versions.</p>
+        </div>
+        <div class="card">
+          <h4>EpisodeGeometry <span class="filepath">network/episode_geometry.py</span></h4>
+          <p class="role">ADR-0003: dense <code>[node, client-or-depot]</code> numpy matrices of travel minutes/length. Replaces <code>ShortestPathCache.path_between</code> dict lookups on the Policy's hot path. The whole-cache scan is memoized per <code>ShortestPathCache</code> instance; each Episode does a cheap column-select out of that shared index.</p>
+          <ul class="methods">
+            <li><code>build(shortest_path_cache, clients, depot)</code> — one Episode's matrices (columns: depot then that Episode's clients).</li>
+            <li><code>average_minutes</code> / <code>length</code> — scalar reads (KeyError-compatible with the cache).</li>
+            <li><code>average_minutes_rows</code> / <code>length_rows</code> / <code>average_minutes_at</code> — vectorized reads FeatureExtractor and the Policy's candidate selection build on.</li>
+          </ul>
+        </div>
+      </div>
+    </details>
+
+    <details class="module">
+      <summary><span class="badge episode">demand</span> Demand <span class="module-path">stdvrp/demand/client_generator.py</span></summary>
+      <div class="module-body">
+        <div class="card">
+          <h4>ClientGenerator</h4>
+          <p class="role">Draws one Episode's demand from its seed via a private <code>np.random.Generator</code> — no global random state touched.</p>
+          <ul class="methods"><li><code>generate(seed)</code> &rarr; <code>EpisodeDemand(clients, vehicle_count)</code>: client count (gauss, floored), node sample without replacement, per-vehicle fleet-size rounding, per-client time windows.</li></ul>
+        </div>
+        <div class="card">
+          <h4>Client / EpisodeDemand <span class="filepath">frozen dataclasses</span></h4>
+          <p class="role"><code>Client</code>: a demand point (node + time window). <code>EpisodeDemand</code>: the draw's output — clients in draw order, plus the fleet size.</p>
+        </div>
+      </div>
+    </details>
+
+    <details class="module">
+      <summary><span class="badge episode">congestion</span> Congestion <span class="module-path">stdvrp/congestion/generator.py</span></summary>
+      <div class="module-body">
+        <div class="card">
+          <h4>CongestionGenerator (ABC) / ArcProbabilityCongestionGenerator <span class="filepath">ADR-0002 seam #2</span></h4>
+          <p class="role">Non-recurring congestion events during an Episode: one uniform draw per arc of <code>event_probability</code> (dict insertion order matters), then per triggered event a velocity-penalty and duration draw, spread to BFS-reachable neighbors with depth-damped intensity (saturating at <code>congestion_upper_bound</code>).</p>
+          <ul class="methods"><li><code>generate(minute_start, congested_arcs, rng)</code> — mutates <code>congested_arcs</code> in place; called only on decision epochs where congestion is "due".</li></ul>
+          <p class="collab"><b>Reads:</b> TravelTimeModel's <code>event_probability</code>/<code>successors</code>. <b>Called by:</b> Model, once per Episode's own <code>congestion_rng</code> stream.</p>
+        </div>
+      </div>
+    </details>
+
+    <details class="module">
+      <summary><span class="badge episode">policies</span> Policies <span class="module-path">stdvrp/policies/</span></summary>
+      <div class="module-body">
+        <div class="card">
+          <h4>Policy (ABC) <span class="filepath">base.py — ADR-0002 seam #1</span></h4>
+          <p class="role">Maps a State to a decision: the node each vehicle serves next.</p>
+          <ul class="methods"><li><code>decide(state)</code> — abstract.</li></ul>
+        </div>
+        <div class="card">
+          <h4>MonteCarloPolicy <span class="filepath">monte_carlo.py</span></h4>
+          <p class="role">Linear function approximation over a weight vector <code>W</code>: greedy argmin over predicted Q for evaluation, epsilon-greedy for training, and a Monte Carlo weight update.</p>
+          <ul class="methods">
+            <li><code>decide(state)</code> — greedy per-vehicle argmin, no randomness (evaluation).</li>
+            <li><code>decide_train(state)</code> — repairs any carried-over action that's no longer feasible, then epsilon-greedy per vehicle (training).</li>
+            <li><code>update_W(states, actions, rewards)</code> — backward Monte Carlo replay; one SGD step per decision epoch.</li>
+            <li><code>_select_vehicle_possible_actions</code> / <code>_closest_allowed_clients</code> / <code>_classify_shortest_distance_clients</code> — candidate-action selection (normal, &lt;3-clients-left endgame).</li>
+            <li><code>_best_q_action</code> — prices a whole candidate set in one <code>[candidates, 19] @ W</code>.</li>
+          </ul>
+          <p class="collab"><b>Delegates to:</b> <b>FeatureExtractor</b> (feature arithmetic), <b>EpisodeGeometry</b> (candidate-distance reads). <b>Owns:</b> the single <code>exploration_rng</code> stream.</p>
+        </div>
+        <div class="card">
+          <h4>FeatureExtractor / StateFeatures <span class="filepath">feature_extraction.py — ADR-0003</span></h4>
+          <p class="role">The Policy's 19-component feature vector (12 general-state + 7 state-action) as vectorized numpy arithmetic over one Episode's <code>EpisodeGeometry</code>. Moved out of the Policy in ticket 05 — a concrete collaborator, not a new seam.</p>
+          <ul class="methods">
+            <li><code>state_features(state)</code> &rarr; <code>StateFeatures</code> — everything the State contributes to a decision (once per decision pass, not per candidate).</li>
+            <li><code>candidate_features(features, action, vehicle, candidates)</code> — one feature row per candidate action, vectorized.</li>
+            <li><code>action_features(features, action)</code> — one concrete action's row (used by <code>update_W</code>'s replay).</li>
+          </ul>
+        </div>
+      </div>
+    </details>
+
+    <details class="module">
+      <summary><span class="badge episode">simulation</span> Simulation core <span class="module-path">stdvrp/simulation/</span></summary>
+      <div class="module-body">
+        <div class="card">
+          <h4>State <span class="filepath">state.py</span></h4>
+          <p class="role">Mutable per-Episode information the Policy sees: vehicle positions, unvisited clients, observed velocities (per vehicle, last <code>n_arcs</code> arcs), terminal flag. Mutated in place by Model across the whole Episode.</p>
+        </div>
+        <div class="card">
+          <h4>TrainingSnapshot <span class="filepath">state.py — frozen dataclass</span></h4>
+          <p class="role">Immutable capture of the four State fields <code>update_W</code>'s replay reads (cheaper than <code>copy.deepcopy(state)</code>). One snapshot taken before every training transition.</p>
+          <ul class="methods"><li><code>capture(state)</code> — copies <code>tau_episode</code>, <code>clients_not_visited</code>, <code>vehicle_position</code>, <code>observed_velocity</code>.</li></ul>
+        </div>
+        <div class="card">
+          <h4>Model <span class="filepath">model.py</span></h4>
+          <p class="role">Owns <code>transition_function</code>: the event-dispatch loop that advances simulated time until the Policy is owed another decision. Delegates bookkeeping to three collaborators so the transition function itself reads as pure event dispatch.</p>
+          <ul class="methods">
+            <li><code>run_evaluation_episode()</code> — greedy decisions until terminal.</li>
+            <li><code>run_training_episode()</code> — epsilon-greedy Episode with per-epoch snapshots, then one <code>policy.update_W(...)</code> call.</li>
+            <li><code>transition_function(action)</code> — dispatches to whichever is soonest: congestion expiry, vehicle arrival, or the next decision epoch.</li>
+            <li><code>_reroute_for</code> / <code>begin_arc</code> / <code>resample_arc</code> / <code>advance_clock_to</code> — routing and clock mechanics.</li>
+          </ul>
+          <p class="collab"><b>Owns:</b> <b>CostLedger</b> (<code>self.costs</code>), <b>EpisodeVelocities</b> (<code>self.velocities</code>), <b>FleetRoutes</b> (<code>self.fleet</code>). <b>Reads:</b> ShortestPathCache (routing node sequences), TravelTimeModel (via EpisodeVelocities). <b>Calls:</b> CongestionGenerator, Policy.</p>
+        </div>
+        <div class="card">
+          <h4>CostLedger <span class="filepath">cost_ledger.py <span class="badge modelint">Model's collaborator</span></span></h4>
+          <p class="role">Every charge the Model makes, and the running totals. A transition accumulates into <code>transition_cost</code>; <code>commit_transition()</code> folds it into <code>total_cost</code> — except the one legacy-preserved transition end that never commits.</p>
+          <ul class="methods"><li><code>charge_distance</code> / <code>charge_earliness</code> / <code>charge_lateness</code> / <code>charge_vehicle_overtime</code> / <code>charge_unserved_delays</code> / <code>charge_fleet_overtime</code> / <code>charge_abort_penalty</code>.</li></ul>
+        </div>
+        <div class="card">
+          <h4>EpisodeVelocities <span class="filepath">episode_velocities.py <span class="badge modelint">Model's collaborator</span></span></h4>
+          <p class="role">Samples (and memoizes per arc-even-minute) the velocity the fleet actually experiences; holds the live <code>congested_arcs</code> event book that CongestionGenerator writes into.</p>
+          <ul class="methods"><li><code>sample(node_start, node_end, tau_episode)</code>.</li><li><code>release()</code> — drops the memo and event book at Episode end.</li></ul>
+          <p class="collab"><b>Draws from:</b> TravelTimeModel's <code>travel_data</code>/<code>speed_std</code>, via its own <code>velocity_rng</code> stream.</p>
+        </div>
+        <div class="card">
+          <h4>FleetRoutes <span class="filepath">fleet_routes.py <span class="badge modelint">Model's collaborator</span></span></h4>
+          <p class="role">Per-vehicle struct-of-arrays: route being executed, arrival/departure clocks, distance travelled on the current arc. The Model's half of per-vehicle state; positions/directions the Policy sees stay on State.</p>
+          <ul class="methods"><li><code>earliest_arrival()</code>, <code>all_parked()</code>, <code>current_arc</code>, <code>next_node</code>, <code>advance</code>, <code>park</code>.</li></ul>
+        </div>
+        <div class="card">
+          <h4>run_evaluation_episode() / run_training_episode() <span class="filepath">episode.py — module functions</span></h4>
+          <p class="role">Assemble one Episode's <code>State</code> + <code>EpisodeGeometry</code> + <code>MonteCarloPolicy</code> + <code>Model</code> from a seed and the world's collaborators, run it to termination, and return an <code>EpisodeResult</code> (evaluation) or <code>TrainingEpisodeResult</code> carrying the updated <code>W</code> (training).</p>
+        </div>
+      </div>
+    </details>
+
+    <details class="module">
+      <summary><span class="badge orch">training</span> Training orchestration <span class="module-path">stdvrp/training/</span></summary>
+      <div class="module-body">
+        <div class="card">
+          <h4>Trainer <span class="filepath">trainer.py</span></h4>
+          <p class="role">Runs the complete experiment one <code>ExperimentConfig</code> describes, over one loaded world.</p>
+          <ul class="methods">
+            <li><code>from_config(config, cache_dir, worker_count)</code> — loads the world, wires the EpisodePool.</li>
+            <li><code>train()</code> — the sequential training loop with periodic evaluation blocks and best-W tracking.</li>
+            <li><code>final_test(w)</code> — the fixed seed/fleet table at widening action pools, one batch.</li>
+            <li><code>run(output_dir)</code> — <code>train()</code> + <code>final_test()</code> + writes <code>results.json</code> and the training plot.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>EpisodeWorld <span class="filepath">episode_pool.py</span></h4>
+          <p class="role">The loaded world plus the two generators an Episode runner needs, as one value plus its keyword-argument view.</p>
+          <ul class="methods"><li><code>load(config, cache_dir)</code>, <code>episode_kwargs()</code>, <code>run_episode(w, request)</code>, <code>run_episodes(w, requests)</code> — the serial path.</li></ul>
+        </div>
+        <div class="card">
+          <h4>EpisodePool <span class="filepath">episode_pool.py</span></h4>
+          <p class="role">A persistent <code>ProcessPoolExecutor</code> of spawned workers, each loading its own <code>EpisodeWorld</code> once (from the binary cache) via the pool initializer. Memory, not cores, is the ceiling — each worker holds a full copy of the world.</p>
+          <ul class="methods"><li><code>for_worker_count(...)</code> — <code>None</code> for the serial fallback (<code>worker_count=1</code>).</li><li><code>run(w, requests)</code> — dispatches via <code>Executor.map</code>, preserving request order.</li></ul>
+        </div>
+        <div class="card">
+          <h4>EpisodeRequest <span class="filepath">episode_pool.py — frozen dataclass</span></h4>
+          <p class="role">One Episode to run: its seed plus the two optional overrides (<code>vehicle_count</code>, <code>number_actions_test</code>) that distinguish an evaluation block from a final-test cell.</p>
+        </div>
+        <div class="card">
+          <h4>Result value objects <span class="filepath">trainer.py — frozen dataclasses</span></h4>
+          <p class="role"><b>EvaluationBlock</b> (one periodic evaluation's seed costs), <b>TrainingResult</b> (the whole training run's W trajectory + evaluations), <b>SeedTestResult</b> / <b>ActionCountReport</b> (final-test metrics per seed / per action count), <b>ExperimentResult</b> (everything <code>run()</code> produced).</p>
+        </div>
+      </div>
+    </details>
+
+  </section>
+
+</main>
+
+<footer>
+  Generated from a read of the source under <code>src/stdvrp/</code>, <code>experiments/chengdu/run.py</code>,
+  <code>CONTEXT.md</code> and <code>docs/adr/</code> on the <code>FEATURE_DEV_total_code_refactorization</code> branch.
+  Diagrams render via <a href="https://mermaid.js.org" target="_blank" rel="noopener">Mermaid</a> (loaded from a CDN —
+  first render needs network access once per browser session).
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  mermaid.initialize({
+    startOnLoad: true,
+    securityLevel: 'loose',
+    theme: prefersDark ? 'dark' : 'default',
+    flowchart: { htmlLabels: true, curve: 'basis' },
+    sequence: { useMaxWidth: true, wrap: true, boxMargin: 8 }
+  });
+</script>
+
+</body>
+</html>

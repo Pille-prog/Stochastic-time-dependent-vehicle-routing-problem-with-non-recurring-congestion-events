@@ -11,6 +11,7 @@ carry whatever units the capture wrote (minutes and kilometres for Chengdu).
 from __future__ import annotations
 
 import csv
+from collections.abc import ItemsView
 from pathlib import Path
 from typing import NamedTuple
 
@@ -57,3 +58,11 @@ class ShortestPathCache:
     def as_dict(self) -> dict[tuple[float, float], ShortestPath]:
         """A copy of the full mapping — characterization tests only; it is large."""
         return dict(self._paths)
+
+    def items(self) -> ItemsView[tuple[float, float], ShortestPath]:
+        """Every cached (node, client) pair with its path — a live view, no copy.
+
+        Used by :class:`~stdvrp.network.episode_geometry.EpisodeGeometry` to build
+        its per-Episode matrices without ``as_dict``'s full-dict copy.
+        """
+        return self._paths.items()
