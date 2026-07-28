@@ -92,3 +92,19 @@ Published to `issues/01`–`issues/10` (2026-07-23). Critical path:
   own Tier-3 triage in a future effort.
 - New abstraction seams (ADR-0002) and the database `DataSource`.
 - GPU acceleration.
+
+## Closing status (ticket 10, 2026-07-28)
+
+Effort closed. Apples-to-apples projected full run (ticket-01's baseline
+per-episode times against the closing measurement, both through ticket 02's
+dedup'd shape): **9.97x** (2h24m29s → 14m29s). Per-phase: world load 35.03x
+(ticket 03), evaluation 6.57x, final test 16.55x, training 3.91x. Full numbers
+in ticket 10's `## Comments`.
+
+**Stopping rule: not strictly met, documented as future work.** The closing
+cProfile (5 training episodes, mini fixture) shows one site over the 10%
+threshold: `FeatureExtractor.candidate_features` at 21.2% tottime (0.194s /
+0.914s) — the per-candidate feature-matrix builder ticket 05 already
+vectorized once; a further reduction would mean restructuring that hot loop
+again, out of scope for ticket 10. Left as future-work per the stopping rule's
+alternative clause. Every other profiled site is under 10%.

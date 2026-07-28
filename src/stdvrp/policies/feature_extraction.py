@@ -17,11 +17,17 @@ Episode's Clients are drawn without replacement (``ClientGenerator.generate``), 
 its Client node ids are distinct and ``clients_not_visited`` is exactly the set of
 columns flagged in :attr:`StateFeatures.active`.
 
-**Preserved legacy quirks** (ADR-0001 — do not fix here; ticket 10 owns the
-duplicate-append triage):
+**Preserved legacy quirks** (ADR-0001 — do not fix):
 
 - the duplicate-append quirk of ``clasify_delayed_clients``, reproduced exactly by
-  :meth:`FeatureExtractor._classify_closest_clients` — see its docstring;
+  :meth:`FeatureExtractor._classify_closest_clients` — see its docstring.
+  Simulation-performance ticket 10 measured the one-append-per-Client fix on the
+  full real Chengdu dataset (100 training + 500 evaluation + 300 final-test
+  episodes, both variants) and found it makes the learned policy consistently
+  *worse* — evaluation mean cost +13-18% across every block, final-test mean
+  cost +15-25% across every action count — for a ~4% throughput gain. The user
+  rejected adoption on that evidence; the quirk stays as the sole, deliberate
+  implementation (see the ticket's ``## Comments`` for the full numbers);
 - the permanently-zero state-action feature, which is what pads ``W`` to its
   legacy 19 components and keeps stored weight vectors valid;
 - every normalization literal (150, 850, 1150, 13, 60, 100, 180, 2500, the
