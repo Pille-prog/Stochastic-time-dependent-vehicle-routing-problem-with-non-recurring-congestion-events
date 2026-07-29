@@ -366,5 +366,147 @@
     "earliness_clients": 12
    }
   }
+ ],
+ "frozen_w_eval": [
+  {
+   "seed": 100000,
+   "metrics": {
+    "total_cost": 519.7063871844521,
+    "distance_cost": 200.69848541270463,
+    "delay_cost": 0,
+    "earliness_cost": 319.0079017717472,
+    "overtime_cost": 0,
+    "tau": 439.84796571607217,
+    "state_count": 68,
+    "delay_clients": 0,
+    "earliness_clients": 19
+   }
+  },
+  {
+   "seed": 100001,
+   "metrics": {
+    "total_cost": 331.1216140080449,
+    "distance_cost": 103.03416755376621,
+    "delay_cost": 0,
+    "earliness_cost": 228.08744645427865,
+    "overtime_cost": 0,
+    "tau": 433.6557358902141,
+    "state_count": 52,
+    "delay_clients": 0,
+    "earliness_clients": 13
+   }
+  },
+  {
+   "seed": 100002,
+   "metrics": {
+    "total_cost": 399.68727050282195,
+    "distance_cost": 149.19943647820187,
+    "delay_cost": 0,
+    "earliness_cost": 250.48783402461999,
+    "overtime_cost": 0,
+    "tau": 467.2592787869798,
+    "state_count": 62,
+    "delay_clients": 0,
+    "earliness_clients": 15
+   }
+  },
+  {
+   "seed": 100003,
+   "metrics": {
+    "total_cost": 475.0586658148048,
+    "distance_cost": 219.4210666344003,
+    "delay_cost": 0,
+    "earliness_cost": 255.6375991804047,
+    "overtime_cost": 0,
+    "tau": 447.5097321195242,
+    "state_count": 74,
+    "delay_clients": 0,
+    "earliness_clients": 20
+   }
+  },
+  {
+   "seed": 100004,
+   "metrics": {
+    "total_cost": 437.29710657237075,
+    "distance_cost": 153.42402366725003,
+    "delay_cost": 12.624735064640333,
+    "earliness_cost": 271.2483478404803,
+    "overtime_cost": 0,
+    "tau": 439.6924268621692,
+    "state_count": 68,
+    "delay_clients": 1,
+    "earliness_clients": 19
+   }
+  },
+  {
+   "seed": 100005,
+   "metrics": {
+    "total_cost": 403.9488825283619,
+    "distance_cost": 132.60523719319986,
+    "delay_cost": 0,
+    "earliness_cost": 271.3436453351621,
+    "overtime_cost": 0,
+    "tau": 423.332645770543,
+    "state_count": 65,
+    "delay_clients": 0,
+    "earliness_clients": 19
+   }
+  },
+  {
+   "seed": 100006,
+   "metrics": {
+    "total_cost": 487.46803786209824,
+    "distance_cost": 159.54655241109995,
+    "delay_cost": 0,
+    "earliness_cost": 327.92148545099826,
+    "overtime_cost": 0,
+    "tau": 408.66639284532914,
+    "state_count": 64,
+    "delay_clients": 0,
+    "earliness_clients": 18
+   }
+  },
+  {
+   "seed": 100007,
+   "metrics": {
+    "total_cost": 370.9148841730941,
+    "distance_cost": 115.6016100843,
+    "delay_cost": 0,
+    "earliness_cost": 255.31327408879415,
+    "overtime_cost": 0,
+    "tau": 501.7245238015249,
+    "state_count": 62,
+    "delay_clients": 0,
+    "earliness_clients": 12
+   }
+  },
+  {
+   "seed": 100008,
+   "metrics": {
+    "total_cost": 365.52670846044026,
+    "distance_cost": 128.60726907120005,
+    "delay_cost": 0,
+    "earliness_cost": 236.9194393892403,
+    "overtime_cost": 0,
+    "tau": 396.54006286179447,
+    "state_count": 44,
+    "delay_clients": 0,
+    "earliness_clients": 12
+   }
+  },
+  {
+   "seed": 100009,
+   "metrics": {
+    "total_cost": 307.39217415168525,
+    "distance_cost": 104.20805447532042,
+    "delay_cost": 0,
+    "earliness_cost": 203.18411967636484,
+    "overtime_cost": 0,
+    "tau": 435.2644388101829,
+    "state_count": 53,
+    "delay_clients": 0,
+    "earliness_clients": 12
+   }
+  }
  ]
 }
