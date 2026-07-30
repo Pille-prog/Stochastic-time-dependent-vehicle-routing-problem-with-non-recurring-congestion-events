@@ -40,7 +40,12 @@ columns flagged in :attr:`StateFeatures.active`.
 - ``mean_velocities``, computed by the general-state routine and never appended as
   a feature. Nothing reads it; it is carried on :class:`StateFeatures` rather than
   dropped because deleting legacy computation is a Tier-3 decision, not this
-  ticket's.
+  ticket's. **If a future modeling effort connects it (B4):** it averages
+  ``State.observed_velocity``, a recency window over the last
+  ``n_observed_velocities`` decision epochs, not the last N *distinct* arcs
+  (simulator-correctness ticket 09, B18) — arguably the better congestion proxy
+  of the two, since a congestion event lasts tens of minutes and a time window
+  captures that where a distinct-arc window would not.
 
 **Float reassociation (Tier 2).** The four state-action cost sums are re-associated
 as "the other vehicles' terms, then the decided vehicle's", and the future-delay
