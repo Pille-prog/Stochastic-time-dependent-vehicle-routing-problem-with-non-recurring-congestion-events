@@ -234,6 +234,16 @@ def instrumented_episode() -> Any:
 @st.composite
 def episode_configs(draw: st.DrawFn) -> dict[str, Any]:
     lower = draw(st.floats(0.05, 0.9, allow_nan=False))
+    # Ticket 02 (simulator-correctness, B15): swept as genuine (shift_end_minute,
+    # episode_end_minute) pairs rather than fixed at the shipped (780, 1150) —
+    # the existing suite only ever asserted the non-negative-cost invariant at
+    # that one pair, which is exactly why a shift_end_minute this high went
+    # unseen. episode_end_minute is drawn no lower than shift_end_minute
+    # (ExperimentConfig's own validity constraint) and capped at
+    # EMERGENCY_HORIZON to keep episode length — and therefore example
+    # runtime — bounded.
+    shift_end_minute = draw(st.integers(HORIZON_START + 1, EMERGENCY_HORIZON))
+    episode_end_minute = draw(st.integers(shift_end_minute, EMERGENCY_HORIZON))
     return {
         "seed": draw(st.integers(0, 2**32 - 1)),
         "congestion_lower_bound": lower,
@@ -249,11 +259,8 @@ def episode_configs(draw: st.DrawFn) -> dict[str, Any]:
             ).map(np.array)
         ),
         "vehicle_count": draw(st.none() | st.integers(1, 8)),
-        # Ticket 02 (simulator-correctness, B15): swept rather than fixed at the
-        # shipped 780, up to the episode's hard stop — the existing suite only
-        # ever asserted the non-negative-cost invariant at 780, which is exactly
-        # why a shift_end_minute this high went unseen.
-        "shift_end_minute": draw(st.integers(HORIZON_START + 1, EMERGENCY_HORIZON)),
+        "shift_end_minute": shift_end_minute,
+        "episode_end_minute": episode_end_minute,
     }
 
 
@@ -292,7 +299,7 @@ def test_episode_invariants(
         max_congestion_duration=duration,
         horizon_start_minute=HORIZON_START,
         shift_end_minute=config["shift_end_minute"],
-        episode_end_minute=EMERGENCY_HORIZON,
+        episode_end_minute=config["episode_end_minute"],
         n_observed_velocities=3,
         vehicle_count=config["vehicle_count"],
     )

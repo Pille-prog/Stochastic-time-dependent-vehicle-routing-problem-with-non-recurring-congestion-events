@@ -14,6 +14,15 @@ incremented by the int ``DECISION_EPOCH_MINUTES`` — established in ticket 01's
 ``measurement_bench.py``), so an integer-arithmetic reference formula
 (``(tau + 178) % max_congestion_duration == 0``) is a meaningful, independent
 oracle here, not merely a plausible one.
+
+**Not the spec's closed form.** ``spec.md``'s invariant catalogue states the
+expected count as ``floor((episode_end - horizon_start) / max_congestion_duration)``
+- a useful intuition ("about one roll every ``max_congestion_duration``
+minutes over the episode"), but not exact: at ``duration=120`` the model fires
+8 times while that floor gives 7, because the swept tau range's boundaries
+don't align with every duration's period. The modulo oracle above is the
+literal fixed formula, not an approximation, and is what every assertion below
+actually checks.
 """
 
 from types import SimpleNamespace

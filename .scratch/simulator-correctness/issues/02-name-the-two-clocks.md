@@ -157,3 +157,29 @@ the suite at all: `tests/unit/test_monte_carlo_policy.py` had four leftover
 Fixed as the same mechanical rename, verified via `git diff` against ticket
 09's commit that this was pre-existing and not something this ticket's edits
 caused.
+
+### `/code-review` follow-up (2026-07-30)
+
+Standards axis: no hard violations. Judgement calls noted, not acted on —
+`CLOCK_CEILING` (1198) stays an absolute hardcoded value rather than derived
+from `episode_end_minute`, which is out of this ticket's stated scope
+(preserved legacy quirk per ADR-0001) but means a config with
+`episode_end_minute` pushed close to 1198 would hit that belt-and-braces abort
+path instead of the documented hard stop — worth a future ticket's attention,
+not this one's. The `n_arcs` fix landing in the same commit as the clock
+rename was flagged as a minor process nit (cleaner as two commits); left as
+one, since it's already called out explicitly in the commit message rather
+than hidden.
+
+Spec axis found one real gap, fixed: `test_invariants.py`'s
+`episode_configs()` swept only `shift_end_minute`, holding `episode_end_minute`
+fixed at 1150 — the ticket asks for "several `shift_end_minute` /
+`episode_end_minute` **pairs**". Now draws `episode_end_minute` from
+`[shift_end_minute, EMERGENCY_HORIZON]` too, so every Hypothesis example is a
+genuine pair. Also added a docstring note to `test_congestion_epoch_cadence.py`
+clarifying that the test's oracle is the literal `(tau + 178) % duration == 0`
+formula, not spec.md's `floor((episode_end - horizon_start) /
+max_congestion_duration)` — the latter is an intuition, not exact (measured:
+`duration=120` fires 8 times against a floor of 7), so pinning against it
+would have been the wrong, weaker assertion. Re-ran the full non-golden suite
+after both fixes: still 3042 passed; `ruff`/`mypy` clean.
