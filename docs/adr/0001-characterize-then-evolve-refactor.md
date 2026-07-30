@@ -78,3 +78,30 @@ that nobody reads fix 7 and believes damping is live: it is dead again, this
 time by saturation instead of by the truncated BFS. No code change accompanies
 this addendum — whether to saturate differently, rescale, or move the bounds is
 a modeling decision for whichever effort next reopens the congestion generator.
+
+## Addendum (2026-07-30, ticket 08): `_reachable_nodes` is now real BFS
+
+Fix 7 (phase-2 change log, above) called the routine a "BFS" without changing
+its shape — it fixed how much of the tree got walked (`max_depth`, not
+`max_depth - 1`), not the walk itself, which was depth-first recursion with a
+single shared `visited` set. A node first discovered down a deep branch kept
+that (non-minimal) depth, and if that depth already reached `max_depth`, the
+routine never expanded from it — including via a shorter path arriving later
+through a different branch. `docs/simulator-review.md` (B9) measured both
+symptoms: ~15% of nodes genuinely within `max_depth` never congested at all,
+and which arcs got congested depended partly on `successors`' arc-table row
+order rather than network topology.
+
+`_reachable_nodes` is now a plain FIFO-queue BFS: a node's depth is assigned
+the moment it is first dequeued, and FIFO order guarantees that first
+assignment is always the minimum. Reached set and depths are therefore a pure
+function of the graph and `max_depth`, independent of `successors`' row
+order — verified by a Hypothesis property that shuffles every node's
+neighbor-list order and reasserts identical results. RNG consumption is
+unchanged (the traversal draws no randomness), but more arcs get congested
+than before (every genuinely-in-range node now receives its outgoing arcs'
+congestion, not just the ~85% the old traversal happened to reach) → golden
+re-baseline. The multiplier-*value* distribution is unchanged within noise
+(still saturating at `congestion_upper_bound` for the same ~72% of writes,
+per the addendum above) — this fix changes **which** arcs are congested, not
+**by how much**, so it does not touch fix 7's saturation or B8's inertness.
