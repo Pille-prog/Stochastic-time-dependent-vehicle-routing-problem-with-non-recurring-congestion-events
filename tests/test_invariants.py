@@ -38,12 +38,9 @@ from __future__ import annotations
 
 import itertools
 import math
-import shutil
-from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
@@ -55,22 +52,16 @@ from stdvrp.congestion import (
     CongestionGenerator,
 )
 from stdvrp.demand import ClientGenerator
-from stdvrp.network import ShortestPathCache
 from stdvrp.simulation import run_evaluation_episode
 from stdvrp.simulation.episode_velocities import ArcVelocity, EpisodeVelocities
 from stdvrp.simulation.fleet_routes import PARKED
 from stdvrp.simulation.model import Model
 from stdvrp.simulation.state import State
-from stdvrp.traffic import CsvDataSource, TravelTimeModel
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "chengdu_mini"
 
 HORIZON_START, HORIZON_END = 300, 780
 # The legacy model terminates at hardcoded clock 1150 regardless of the
 # configured horizon end (see the Model module docstring).
 EMERGENCY_HORIZON = 1150
-PERTURBED_DAYS = tuple(range(601, 609))
 # The generator draws event durations from ``uniform(30, max_congestion_duration)``.
 MIN_EVENT_DURATION = 30
 # 12 general-state + 7 state-action features (see the MonteCarloPolicy docstring).
@@ -229,29 +220,19 @@ class RecordingCongestionGenerator(CongestionGenerator):
 
 
 @pytest.fixture(scope="module")
-def sim_world(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
-    """A fixture-derived world whose perturbed days give positive speed stds."""
-    world = tmp_path_factory.mktemp("invariant_world")
-    shutil.copyfile(FIXTURE_DIR / "link.csv", world / "link.csv")
-    for day in PERTURBED_DAYS:
-        rng = np.random.default_rng(day)
-        for half in (0, 1):
-            speeds = pd.read_csv(FIXTURE_DIR / f"speed[601]_[{half}].csv")
-            speeds["Speed"] = speeds["Speed"] * rng.uniform(0.8, 1.2, size=len(speeds))
-            speeds.to_csv(world / f"speed[{day}]_[{half}].csv", index=False)
+def sim_world(perturbed_mini_world: dict[str, Any]) -> dict[str, Any]:
+    """This module's demand generator, layered onto the shared perturbed traffic world.
 
-    source = CsvDataSource(world, "link.csv", 601, PERTURBED_DAYS, "all_shortest_paths.csv")
-    travel_time_model = TravelTimeModel(
-        source.load_road_network(),
-        source.load_traffic_history(),
-        120,
-        horizon_start_minute=HORIZON_START,
-    )
+    ``perturbed_mini_world`` (``tests/conftest.py``, ticket 10) is the road
+    network and travel-time statistics only; this file's own fixed
+    ``FIXTURE_DEMAND`` is a per-module choice, not something a shared fixture
+    should bake in.
+    """
     return {
-        "travel_time_model": travel_time_model,
-        "cache": ShortestPathCache.from_csv(FIXTURE_DIR / "all_shortest_paths.csv"),
+        "travel_time_model": perturbed_mini_world["travel_time_model"],
+        "cache": perturbed_mini_world["shortest_path_cache"],
+        "arcs": perturbed_mini_world["arcs"],
         "client_generator": ClientGenerator(**FIXTURE_DEMAND),
-        "arcs": list(travel_time_model.event_probability),
     }
 
 

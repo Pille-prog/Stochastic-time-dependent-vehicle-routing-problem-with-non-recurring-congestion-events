@@ -1,6 +1,6 @@
 # Spec: Simulator correctness — the simulator does what it says it does
 
-Status: approved (grilling session 2026-07-28)
+Status: closed (ticket 10, 2026-07-30 — see "Closing status" below)
 
 ## Goal
 
@@ -201,3 +201,77 @@ into the code.
 - The full Chengdu training run. It is the first experiment of the repaired lab.
 - Performance. The `simulation-performance` effort closed at ~10× throughput;
   nothing here may regress it without saying so.
+
+## Closing status (ticket 10, 2026-07-30)
+
+**What landed.** All 15 in-scope findings — B1a, B1b, B3, B5, B7, B9, B10, B11,
+B12, B14, B15, B16, B17, B18, B19 — have a red-before/green-after invariant,
+written before its fix in the same ticket per decision 7, all landed across
+tickets 02–09. Three ADRs written inside their tickets as planned: 0004 (the
+episode clock and the price of abandoned demand), 0005 (the State says where
+the vehicle is), and an 0001 addendum (B8's inertness). `CONTEXT.md` gained the
+two-clock and abandoned-demand terms (tickets 02/03) and the State's
+two-meanings distinction (ticket 04). The statistical gate retired as planned
+(ticket 03); `chengdu_full_phase2.json` stays as evidence nothing reads. This
+ticket closes the effort with a 432-combination config sweep (`tests/
+test_config_sweep.py`) and a 16-episode real-scale correctness check plus a
+wall-clock baseline against the real 1900-node dataset — the "machine that
+would have caught them" decision 0's success criterion asked for, not just the
+19 fixes. No production code changed in ticket 10 itself.
+
+**Cumulative measured cost, ticket 01's baseline → now** (60-seed mini-fixture
+bench, three configurations — full detail and per-ticket attribution in ticket
+10's own Comments):
+
+| Config | mean_total_cost before | after | change |
+|---|---|---|---|
+| Default fleet (~5 vehicles), `--w zero` | 512.194224 | 515.646000 | +0.67% |
+| Default fleet, `--w frozen` (real trained policy) | 481.687896 | 474.679231 | −1.45% |
+| `--vehicle-count 1` (the review's own stress config) | 1831.729883 | 2862.068295 | **+56.25%** |
+
+Multi-vehicle fleets absorb almost all of the effect via redistribution slack;
+the single-vehicle config the review used to measure B1b/B3 shows it at full
+strength, because B1a/B1b's extra driving and B3's now-honest abandonment price
+have no alternative capacity to hide behind. Every violation counter (B1a/B1b,
+B7, B9, B10, B11, B14, B15, B17) is zero on every configuration measured.
+
+**Real-scale confirmation.** 16 real episodes on the true 1900-node Chengdu
+network (the exact `baseline_scaled.yaml` shape): zero violations on every
+counter; B9's structural check shows 0/38379 wrong-depth and 0/38379
+missed-entirely, confirming ticket 08's fix at the scale the review's own
+"~15%" figure was originally measured against.
+
+**Performance, disclosed as the out-of-scope clause above requires.** The
+`simulation-performance` effort's ~10× projected full-run speedup is now
+**~6.4×** measured the same way (8669.3s baseline → 1356.2s now, vs. 869.2s at
+that effort's own close) — a real, ~1.56× wall-clock increase, not machine
+noise alone. Explained to a mechanism, not a new finding (decision 10): none of
+tickets 02–09 touched the vectorized architecture itself (world cache, episode
+geometry, feature vectorization all structurally unchanged); the increase is
+more real simulated work per episode — on the matching single-vehicle bench,
+`mean_decisions` rose +31.8% and `mean_km_driven` +36.4%, the same effect
+tickets 03/04/07/08 already measured in cost terms, now also visible in wall
+clock. A fleet that used to wrongly retire early or under-cover the network
+with congestion did less work per episode; fixing that costs more wall clock
+by design.
+
+**Findings that did not reproduce exactly** (recorded in ticket 01, not
+new): B11's "734 transitions" and B17's "116/116 expired" review headline
+figures did not reproduce at their literal magnitude on this fixture — the
+underlying defects did, and both were fixed as scoped regardless.
+
+**New findings from the sweep: none that need their own ticket.** Two
+observations surfaced and are both explained to an already-on-record
+mechanism rather than opened as new tickets: `scripts/measurement_bench.py`'s
+`check_b16_cadence` is a frozen, never-updated reproduction of the *pre-fix*
+formula (ticket 10's Comments); and the performance change above. Neither is
+an unexplained defect in the simulator.
+
+**Self-golden: exactly zero diff**, as predicted — this ticket adds tests and
+runs things, and changes no production code. No re-capture needed. Full suite:
+4039 passed, 3 deselected (golden-marked, need the real dataset).
+
+**Out of scope, unchanged**: the four modeling findings (B4, B6, B8, B13) go to
+a separate, downstream effort informed by `docs/research/`. The full Chengdu
+training run is the first experiment of the repaired lab, not part of
+repairing it, and is deliberately not run here.
