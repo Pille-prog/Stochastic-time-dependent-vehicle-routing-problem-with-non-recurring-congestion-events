@@ -35,8 +35,9 @@ state.
 
 Preserved legacy quirks (ADR-0001) owned by this file:
 
-- The hardcoded clock horizons :data:`EMERGENCY_HORIZON` and
-  :data:`CLOCK_CEILING`, which ignore the configured horizon end.
+- The hardcoded :data:`CLOCK_CEILING`, ~24 simulated minutes past
+  :data:`EMERGENCY_HORIZON` and unreachable in practice — belt-and-braces the
+  legacy never needed and this port keeps.
 - The shifted-clock gates in :meth:`Model._congestion_epoch_due` and
   :meth:`Model._epoch_ends_the_transition`.
 - A decision raised *during* rerouting is discarded (see
@@ -54,6 +55,25 @@ Phase-2 deliberate fixes (ticket 12, ADR-0001 change log):
   due``); the legacy hardcoded ``1150 - due`` in the all-vehicles-back path.
 - Training episodes keep their real ``distance_cost`` (the legacy zeroed the
   accumulator every step; reporting only).
+
+Ticket 02 fixes (simulator-correctness, B12/B15/B16 — spec.md decision 5): the
+config field the legacy called ``horizon_end_minute`` actually meant two
+different clocks, so it now names both, validated ``shift_end_minute <=
+episode_end_minute``:
+
+- ``shift_end_minute`` (``self.shift_end_minute``, formerly the constructor's
+  ``horizon_end_minute``) is the vehicles' shift end — overtime accrues past
+  it, exactly as before, same shipped value (780).
+- ``episode_end_minute`` (``self.episode_end_minute``) is the episode's hard
+  stop — what :data:`EMERGENCY_HORIZON` used to hardcode independent of any
+  config; :meth:`_decision_epoch_begins` now reads the configured attribute
+  instead, same shipped value (1150).
+- :meth:`terminate_state_passing_horizon` gained the ``tau > shift_end_minute``
+  guard :meth:`_vehicle_parks_at_depot` already had (B15: unguarded, a
+  ``shift_end_minute`` outliving the episode priced negative overtime).
+- :meth:`_congestion_epoch_due` dropped the ``/ 60`` float division that
+  silently degraded the cadence for non-dyadic ``max_congestion_duration``
+  values (B16).
 """
 
 from __future__ import annotations
@@ -70,9 +90,13 @@ from stdvrp.simulation.fleet_routes import PARKED, FleetRoutes
 from stdvrp.simulation.state import State, TrainingSnapshot
 from stdvrp.traffic.travel_time_model import TravelTimeModel
 
-#: Preserved legacy quirk (ADR-0001): the clock at which the Episode is
-#: force-terminated, hardcoded in the legacy model and independent of the
-#: configured horizon end.
+#: The clock at which the Episode is force-terminated. Formerly hardcoded here
+#: and independent of any config (B12); ticket 02 (simulator-correctness) makes
+#: it configurable as :class:`~stdvrp.config.ExperimentConfig`'s
+#: ``episode_end_minute``, threaded to the Model as ``self.episode_end_minute``
+#: — this module-level constant is no longer read by :class:`Model` and exists
+#: only as the value every shipped config still sets it to, for callers (e.g.
+#: ``scripts/measurement_bench.py``) that want that default without loading one.
 EMERGENCY_HORIZON = 1150
 
 #: Preserved legacy quirk (ADR-0001): the clock past which no vehicle may still
@@ -109,7 +133,8 @@ class Model:
         time_windows: TimeWindows,
         number_vehicles: int,
         horizon_start_minute: int,
-        horizon_end_minute: int,
+        shift_end_minute: int,
+        episode_end_minute: int,
         depot: int,
         congestion_generator: CongestionGenerator,
         max_congestion_duration: int,
@@ -131,14 +156,22 @@ class Model:
         self.velocities = EpisodeVelocities(travel_time_model, velocity_rng)
         self.fleet = FleetRoutes(number_vehicles, horizon_start_minute)
 
-        # Congestion epoch cadence in hours (legacy ``hours_max_duration``).
-        self.hours_max_duration = max_congestion_duration / 60
+        # Congestion epoch cadence, in minutes (ticket 02, simulator-correctness,
+        # B16: kept as the raw int, not the legacy's float ``hours_max_duration``
+        # ratio — see :meth:`_congestion_epoch_due`).
+        self.max_congestion_duration = max_congestion_duration
 
         # The clock at which the Policy is next asked for a decision.
         self.next_decision_tau: float = horizon_start_minute + DECISION_EPOCH_MINUTES
 
         # End of the vehicles' shift; anything past it is overtime (legacy ``work_time``).
-        self.shift_end_minute = horizon_end_minute
+        self.shift_end_minute = shift_end_minute
+
+        # The clock at which the Episode is force-terminated (ticket 02,
+        # simulator-correctness, B12): configurable, replacing the module-level
+        # hardcoded :data:`EMERGENCY_HORIZON` every shipped config still sets
+        # this to.
+        self.episode_end_minute = episode_end_minute
 
         self.visited_clients: list[float] = []
         self.total_state_counter = 0
@@ -331,7 +364,7 @@ class Model:
         # Phase-2 fix (ticket 12, ADR-0001 change log): the epoch-end gate below
         # always fires at the emergency horizon, so the legacy fell through it
         # after terminating and added the same transition cost a second time.
-        if self.next_decision_tau >= EMERGENCY_HORIZON:
+        if self.next_decision_tau >= self.episode_end_minute:
             self.terminate_state_passing_horizon()
         elif self._epoch_ends_the_transition():
             self._transition_ended = True
@@ -345,14 +378,25 @@ class Model:
         self.costs.commit_transition()
 
     def _congestion_epoch_due(self) -> bool:
-        """Preserved legacy quirk (ADR-0001): congestion is rolled on few epochs.
+        """Congestion is rolled every ``max_congestion_duration`` minutes.
 
-        Only where the clock shifted by ``+ 180 - 2`` and read in hours is an
-        exact float multiple of ``max_congestion_duration / 60``. The shift is
-        written as two operations rather than folded to ``+ 178`` because it
-        rounds twice, and the Tier-1 gate is bit-exact.
+        Fixed (ticket 02, simulator-correctness, B16): the shipped gate divided
+        the shifted clock by 60 and compared it against
+        ``max_congestion_duration / 60`` — a float-equality test that silently
+        degenerates whenever that quotient is not exactly representable in
+        binary (``max_congestion_duration in (50, 70, 200)``, measured), rolling
+        congestion far less often than the calibrated event probabilities
+        assume. ``next_decision_tau`` starts at ``horizon_start_minute +
+        DECISION_EPOCH_MINUTES`` (both ints) and is incremented by the int
+        ``DECISION_EPOCH_MINUTES``, so it is always integer-valued (verified,
+        ticket 01's ``measurement_bench.py``) — plain integer-safe modulo
+        against the raw ``max_congestion_duration`` answers the same question
+        without dividing. The shift stays ``+ 180 - 2`` rather than folded to
+        ``+ 178``: that sub-expression is unchanged from the legacy (it rounds
+        twice, and the Tier-1 gate is bit-exact), only the division it used to
+        feed is gone.
         """
-        return (self.state.tau_episode + 180 - 2) / 60 % self.hours_max_duration == 0
+        return (self.state.tau_episode + 180 - 2) % self.max_congestion_duration == 0
 
     def _epoch_ends_the_transition(self) -> bool:
         """Preserved legacy quirk (ADR-0001): most decision epochs decide nothing.
@@ -553,15 +597,27 @@ class Model:
     # --- Termination ------------------------------------------------------------------
 
     def terminate_state_passing_horizon(self) -> None:
-        """Ports ``terminate_state_passing_horizon``: charge unserved delays and overtime."""
+        """Ports ``terminate_state_passing_horizon``: charge unserved delays and overtime.
+
+        Fixed (ticket 02, simulator-correctness, B15): guards the overtime
+        charge with ``tau > shift_end_minute``, the same guard
+        :meth:`_vehicle_parks_at_depot` already has — the legacy charged
+        ``tau - shift_end_minute`` unconditionally here, pricing *negative*
+        overtime whenever a misconfigured ``shift_end_minute`` outlived the
+        episode's actual termination clock. ``episode_end_minute``'s
+        validation (``ExperimentConfig.__post_init__``) already makes that
+        unreachable under any valid config; this guard is symmetry, not the
+        primary fix.
+        """
         self.state.terminal = True
         self._transition_ended = True
 
         self._charge_unserved_delays()
-        vehicles_out = sum(position != self.depot for position in self.state.vehicle_position)
-        self.costs.charge_fleet_overtime(
-            self.state.tau_episode - self.shift_end_minute, vehicles=vehicles_out
-        )
+        if self.state.tau_episode > self.shift_end_minute:
+            vehicles_out = sum(position != self.depot for position in self.state.vehicle_position)
+            self.costs.charge_fleet_overtime(
+                self.state.tau_episode - self.shift_end_minute, vehicles=vehicles_out
+            )
 
         self.costs.commit_transition()
 

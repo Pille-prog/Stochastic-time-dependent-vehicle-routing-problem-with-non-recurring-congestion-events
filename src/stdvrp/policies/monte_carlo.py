@@ -115,7 +115,8 @@ class MonteCarloPolicy(Policy):
         epsilon: float,
         depot: int,
         number_actions_test: int,
-        horizon_end_minute: int,
+        shift_end_minute: int,
+        episode_end_minute: int,
         W: NDArray[np.float64] | None,
         *,
         exploration_rng: np.random.Generator,
@@ -144,7 +145,7 @@ class MonteCarloPolicy(Policy):
         self.earliness_cost_factor = 0.1
         self.overtime_cost = 5 / 6
         self.service_time = 5
-        self.end_of_horizon = horizon_end_minute
+        self.end_of_horizon = shift_end_minute
 
         # Ticket 05: the feature arithmetic, vectorized over the same geometry.
         self.feature_extractor = FeatureExtractor(
@@ -153,7 +154,8 @@ class MonteCarloPolicy(Policy):
             number_vehicles=number_vehicles,
             number_clients=number_clients,
             depot=depot,
-            horizon_end_minute=horizon_end_minute,
+            shift_end_minute=shift_end_minute,
+            episode_end_minute=episode_end_minute,
             service_time=self.service_time,
             delay_cost_factor=self.delay_cost_factor,
             earliness_cost_factor=self.earliness_cost_factor,

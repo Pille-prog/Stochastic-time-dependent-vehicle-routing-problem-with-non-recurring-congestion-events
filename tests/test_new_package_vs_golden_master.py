@@ -105,7 +105,7 @@ def world(golden: dict[str, Any], data_dir: Path) -> dict[str, Any]:
             clients_per_vehicle=28,
             time_window_spread=protocol["diff_TW"],
             horizon_start_minute=protocol["horizon_start_time"],
-            horizon_end_minute=protocol["horizon_end_time"],
+            shift_end_minute=protocol["horizon_end_time"],
         ),
         "congestion_generator": ArcProbabilityCongestionGenerator(
             event_probability=travel_time_model.event_probability,
@@ -138,7 +138,11 @@ def config_from_protocol(protocol: dict[str, Any], data_dir: Path) -> Experiment
         instance_day=601,
         traffic_days=LEGACY_DAYS,
         horizon_start_minute=protocol["horizon_start_time"],
-        horizon_end_minute=protocol["horizon_end_time"],
+        shift_end_minute=protocol["horizon_end_time"],
+        # The captured protocol predates the two-clocks split (ticket 02,
+        # simulator-correctness): 1150 is the legacy's own hardcoded
+        # EMERGENCY_HORIZON, not a value the protocol carries.
+        episode_end_minute=1150,
         # The legacy ClientGenerator hardcodes (see the ``world`` fixture).
         mean_number_clients=protocol["mean_number_clients"],
         client_count_stddev=30.0,
@@ -222,7 +226,8 @@ def test_evaluation_mean_cost_is_within_tolerance_of_the_baseline(
             epsilon=protocol["epsilon"],
             max_congestion_duration=protocol["max_congestion_duration"],
             horizon_start_minute=protocol["horizon_start_time"],
-            horizon_end_minute=protocol["horizon_end_time"],
+            shift_end_minute=protocol["horizon_end_time"],
+            episode_end_minute=1150,
             n_observed_velocities=protocol["n_arcs"],
         ).total_cost
         for seed in protocol["eval_seeds"]
@@ -256,7 +261,8 @@ def test_final_test_mean_cost_is_within_tolerance_of_the_baseline(
                 epsilon=protocol["epsilon"],
                 max_congestion_duration=protocol["max_congestion_duration"],
                 horizon_start_minute=protocol["horizon_start_time"],
-                horizon_end_minute=protocol["horizon_end_time"],
+                shift_end_minute=protocol["horizon_end_time"],
+                episode_end_minute=1150,
                 n_observed_velocities=protocol["n_arcs"],
                 vehicle_count=entry["vehicles"],
                 number_actions_test=entry["vehicles"] + int(actions),

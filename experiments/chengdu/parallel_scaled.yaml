@@ -25,7 +25,8 @@ traffic_days: [601, 602, 603, 604, 605, 606, 607, 608, 609, 610,
                711, 712, 713, 714]
 
 horizon_start_minute: 300
-horizon_end_minute: 780
+shift_end_minute: 780
+episode_end_minute: 1150
 
 mean_number_clients: 150
 client_count_stddev: 30.0

@@ -34,9 +34,13 @@ columns flagged in :attr:`StateFeatures.active`.
   dead weight: ``final_w[13] == 0.0`` by design. Before that ticket, ``W[10]``
   was dead too, but by accident — it never trained because feature 10 was
   identically zero;
-- every normalization literal (150, 850, 1150, 13, 60, 100, 180, 2500, the
+- every normalization literal (150, 850, 300, 13, 60, 100, 180, 2500, the
   400/500/600 earliness bins, the 310 depot-idle cutoff), which are part of the
-  feature *definition* and stay literal;
+  feature *definition* and stay literal. The one exception is the ``time_left``
+  clock ``1150`` used to hardcode: ticket 02 (simulator-correctness, B12)
+  threads it in as ``episode_end_minute``, the same configurable hard stop
+  :class:`~stdvrp.simulation.model.Model` now uses instead of its own hardcoded
+  constant;
 - ``mean_velocities``, computed by the general-state routine and never appended as
   a feature. Nothing reads it; it is carried on :class:`StateFeatures` rather than
   dropped because deleting legacy computation is a Tier-3 decision, not this
@@ -143,7 +147,8 @@ class FeatureExtractor:
         number_vehicles: int,
         number_clients: int,
         depot: int,
-        horizon_end_minute: int,
+        shift_end_minute: int,
+        episode_end_minute: int,
         service_time: float,
         delay_cost_factor: float,
         earliness_cost_factor: float,
@@ -153,7 +158,8 @@ class FeatureExtractor:
         self._number_vehicles = number_vehicles
         self._number_clients = number_clients
         self._depot = depot
-        self._end_of_horizon = horizon_end_minute
+        self._end_of_horizon = shift_end_minute
+        self._episode_end_minute = episode_end_minute
         self._service_time = service_time
         self._delay_cost_factor = delay_cost_factor
         self._earliness_cost_factor = earliness_cost_factor
@@ -215,7 +221,7 @@ class FeatureExtractor:
         clients_left = remaining_count / 150
 
         if clients_left != 0:
-            time_left = (1150 - tau) / (850)
+            time_left = (self._episode_end_minute - tau) / (850)
             time = (tau - 300) / 850
         else:
             time_left = 0.0

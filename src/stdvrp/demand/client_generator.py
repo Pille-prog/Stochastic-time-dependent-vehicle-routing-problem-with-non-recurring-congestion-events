@@ -50,7 +50,7 @@ class ClientGenerator:
     clients_per_vehicle: int
     time_window_spread: int
     horizon_start_minute: int
-    horizon_end_minute: int
+    shift_end_minute: int
 
     @classmethod
     def from_config(cls, config: ExperimentConfig) -> ClientGenerator:
@@ -62,7 +62,7 @@ class ClientGenerator:
             clients_per_vehicle=config.clients_per_vehicle,
             time_window_spread=config.time_window_spread,
             horizon_start_minute=config.horizon_start_minute,
-            horizon_end_minute=config.horizon_end_minute,
+            shift_end_minute=config.shift_end_minute,
         )
 
     def generate(self, seed: int) -> EpisodeDemand:
@@ -78,7 +78,7 @@ class ClientGenerator:
         else:
             vehicle_count = int(count / self.clients_per_vehicle) + 1
 
-        latest_start = self.horizon_end_minute - self.time_window_spread
+        latest_start = self.shift_end_minute - self.time_window_spread
         clients = []
         for node in nodes:
             start = int(rng.integers(self.horizon_start_minute, latest_start, endpoint=True))

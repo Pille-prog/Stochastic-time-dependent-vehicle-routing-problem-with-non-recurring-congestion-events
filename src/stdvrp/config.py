@@ -28,9 +28,15 @@ class ExperimentConfig:
     instance_day: int
     traffic_days: tuple[int, ...]
 
-    # Horizon in minutes since 03:00 (formerly hardcoded 300 and 780).
+    # Horizon in minutes since 03:00 (formerly hardcoded 300 and 780). Two
+    # distinct clocks (ticket 02, simulator-correctness, B12/B15): the shift's
+    # end, past which overtime accrues (formerly the lying ``horizon_end_minute``
+    # name — the code already called it ``shift_end_minute`` internally), and
+    # the episode's hard stop, formerly the model-internal hardcoded
+    # ``EMERGENCY_HORIZON`` and independent of any config.
     horizon_start_minute: int
-    horizon_end_minute: int
+    shift_end_minute: int
+    episode_end_minute: int
 
     # Demand (former argv: mean_number_clients, diff_TW; former ClientGenerator
     # hardcodes: gauss stddev 30, 60-client floor, the {150: 28, 250: 29}
@@ -85,13 +91,18 @@ class ExperimentConfig:
             raise ValueError("traffic_days must not be empty")
         if self.instance_day not in self.traffic_days:
             raise ValueError(f"instance_day {self.instance_day} must be one of traffic_days")
-        if not 0 <= self.horizon_start_minute < self.horizon_end_minute:
-            raise ValueError("horizon must satisfy 0 <= horizon_start_minute < horizon_end_minute")
+        if not 0 <= self.horizon_start_minute < self.shift_end_minute:
+            raise ValueError("horizon must satisfy 0 <= horizon_start_minute < shift_end_minute")
+        if self.shift_end_minute > self.episode_end_minute:
+            # B15: an unguarded shift end past the episode's hard stop is how the
+            # legacy priced negative overtime — reject the config outright rather
+            # than merely leave it unreached (spec.md decision 5).
+            raise ValueError("shift_end_minute must be <= episode_end_minute")
         if self.mean_number_clients <= 0:
             raise ValueError("mean_number_clients must be positive")
         if self.client_count_stddev < 0:
             raise ValueError("client_count_stddev must be >= 0")
-        if not 0 <= self.time_window_spread <= self.horizon_end_minute - self.horizon_start_minute:
+        if not 0 <= self.time_window_spread <= self.shift_end_minute - self.horizon_start_minute:
             raise ValueError("time_window_spread must fit within the horizon")
         lo, hi = self.client_universe_node_range
         if lo >= hi:
@@ -199,7 +210,8 @@ class ExperimentConfig:
         for name in (
             "instance_day",
             "horizon_start_minute",
-            "horizon_end_minute",
+            "shift_end_minute",
+            "episode_end_minute",
             "mean_number_clients",
             "min_number_clients",
             "clients_per_vehicle",

@@ -37,6 +37,9 @@ from stdvrp.simulation.state import State
 
 DEPOT = 0
 HORIZON_END = 780
+# The oracle keeps this literal (it transcribes the pre-ticket-02 code
+# unchanged); FeatureExtractor now takes it as episode_end_minute.
+EPISODE_END = 1150
 
 
 # --- the oracle: the loop bodies this ticket replaces, copied verbatim ----------
@@ -275,7 +278,8 @@ class Scenario:
             number_vehicles=self.number_vehicles,
             number_clients=self.number_clients,
             depot=DEPOT,
-            horizon_end_minute=HORIZON_END,
+            shift_end_minute=HORIZON_END,
+            episode_end_minute=EPISODE_END,
             service_time=5,
             delay_cost_factor=1,
             earliness_cost_factor=0.1,

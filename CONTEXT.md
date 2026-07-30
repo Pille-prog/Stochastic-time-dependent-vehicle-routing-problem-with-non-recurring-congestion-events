@@ -63,5 +63,5 @@ One complete simulated run over the time horizon: clients are generated, congest
 _Avoid_: iteration, run
 
 **Horizon**:
-The simulated time interval (start minute, end minute) within which all decisions and events happen.
-_Avoid_: time window (reserved for Clients)
+The simulated time interval an Episode runs within, from `horizon_start_minute` to `episode_end_minute` (the hard stop). Not the same as when overtime starts: `shift_end_minute` is the vehicles' shift end, a separate, earlier clock that decisions and events can and do run past (ticket 02, simulator-correctness, B12) — with `horizon_start_minute` = 300 and `shift_end_minute` = 780, Episodes demonstrably run to 1148.
+_Avoid_: time window (reserved for Clients); using "horizon end" to mean the shift end

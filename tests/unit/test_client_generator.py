@@ -23,7 +23,7 @@ def test_from_config_wires_every_demand_knob() -> None:
     assert generator.client_universe_node_range == (1, 45)
     assert generator.time_window_spread == 60
     assert generator.horizon_start_minute == 300
-    assert generator.horizon_end_minute == 780
+    assert generator.shift_end_minute == 780
 
 
 def test_same_seed_reproduces_the_same_demand() -> None:
@@ -65,7 +65,7 @@ def test_client_count_floor_applies() -> None:
         clients_per_vehicle=4,
         time_window_spread=60,
         horizon_start_minute=300,
-        horizon_end_minute=780,
+        shift_end_minute=780,
     )
     assert all(len(generator.generate(seed).clients) == 8 for seed in range(20))
 

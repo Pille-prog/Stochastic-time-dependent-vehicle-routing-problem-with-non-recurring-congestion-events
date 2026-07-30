@@ -8,6 +8,13 @@ from the actual clock (ADR-0001 phase-2 change log).
 The Model is built via ``__new__`` with only the collaborators and attributes
 the termination methods touch: they are pure accounting over the State and the
 CostLedger.
+
+``TestPassingHorizonOvertimeGuard`` pins B15 (ticket 02, simulator-correctness):
+``terminate_state_passing_horizon`` charged ``tau - shift_end_minute``
+unconditionally, so a ``shift_end_minute`` that outlived the episode's actual
+termination clock priced *negative* overtime — the review's own reproduction
+(docs/simulator-review.md, B15) is this exact scenario (tau=1148,
+shift_end_minute=1200, -43.33 per vehicle).
 """
 
 from stdvrp.simulation.cost_ledger import CostLedger
@@ -56,3 +63,25 @@ class TestAllVehiclesComeBack:
         passing.terminate_state_passing_horizon()
 
         assert all_back.costs.delay_cost == passing.costs.delay_cost
+
+
+class TestPassingHorizonOvertimeGuard:
+    def test_no_overtime_when_shift_end_outlives_the_actual_termination_clock(self):
+        model = make_terminating_model(tau=1148.0)
+        model.state.vehicle_position = [CLIENT]  # still out on the road, not home
+        model.shift_end_minute = 1200.0
+        model.terminate_state_passing_horizon()
+        assert model.costs.overtime_cost == 0
+
+    def test_overtime_is_still_charged_when_shift_end_precedes_the_clock(self):
+        model = make_terminating_model(tau=1148.0)
+        model.state.vehicle_position = [CLIENT]
+        model.shift_end_minute = 780.0
+        model.terminate_state_passing_horizon()
+        assert model.costs.overtime_cost == (1148.0 - 780.0) * (5 / 6)
+
+    def test_no_overtime_when_the_fleet_is_home_regardless_of_shift_end(self):
+        model = make_terminating_model(tau=1148.0)
+        model.shift_end_minute = 780.0  # depot, from make_terminating_model's default
+        model.terminate_state_passing_horizon()
+        assert model.costs.overtime_cost == 0

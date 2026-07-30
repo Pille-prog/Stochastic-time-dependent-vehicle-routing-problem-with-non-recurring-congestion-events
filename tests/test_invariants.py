@@ -74,7 +74,7 @@ FIXTURE_DEMAND = dict(
     clients_per_vehicle=4,
     time_window_spread=60,
     horizon_start_minute=HORIZON_START,
-    horizon_end_minute=HORIZON_END,
+    shift_end_minute=HORIZON_END,
 )
 
 
@@ -249,6 +249,11 @@ def episode_configs(draw: st.DrawFn) -> dict[str, Any]:
             ).map(np.array)
         ),
         "vehicle_count": draw(st.none() | st.integers(1, 8)),
+        # Ticket 02 (simulator-correctness, B15): swept rather than fixed at the
+        # shipped 780, up to the episode's hard stop — the existing suite only
+        # ever asserted the non-negative-cost invariant at 780, which is exactly
+        # why a shift_end_minute this high went unseen.
+        "shift_end_minute": draw(st.integers(HORIZON_START + 1, EMERGENCY_HORIZON)),
     }
 
 
@@ -286,7 +291,8 @@ def test_episode_invariants(
         epsilon=0.05,
         max_congestion_duration=duration,
         horizon_start_minute=HORIZON_START,
-        horizon_end_minute=HORIZON_END,
+        shift_end_minute=config["shift_end_minute"],
+        episode_end_minute=EMERGENCY_HORIZON,
         n_observed_velocities=3,
         vehicle_count=config["vehicle_count"],
     )
@@ -392,7 +398,8 @@ def test_horizon_terminated_episode_counts_the_terminating_transition_once(
         epsilon=0.05,
         max_congestion_duration=120,
         horizon_start_minute=HORIZON_START,
-        horizon_end_minute=HORIZON_END,
+        shift_end_minute=HORIZON_END,
+        episode_end_minute=EMERGENCY_HORIZON,
         n_observed_velocities=3,
         vehicle_count=1,
     )

@@ -19,7 +19,8 @@ def valid_values() -> dict:
         "instance_day": 601,
         "traffic_days": [601],
         "horizon_start_minute": 300,
-        "horizon_end_minute": 780,
+        "shift_end_minute": 780,
+        "episode_end_minute": 1150,
         "mean_number_clients": 20,
         "client_count_stddev": 4.0,
         "min_number_clients": 8,
@@ -59,7 +60,8 @@ def test_loads_the_committed_fixture_config() -> None:
     assert config.instance_day == 601
     assert config.traffic_days == (601,)
     assert config.horizon_start_minute == 300
-    assert config.horizon_end_minute == 780
+    assert config.shift_end_minute == 780
+    assert config.episode_end_minute == 1150
     assert config.n_observed_velocities == 3
     assert config.warmup_learning_rate == 1.0e-6
     assert config.data_dir == FIXTURE_CONFIG.parent / "."
@@ -117,12 +119,21 @@ def test_scientific_notation_without_dot_still_parses_as_float(tmp_path: Path) -
     assert ExperimentConfig.from_yaml(path).warmup_learning_rate == 1.0e-6
 
 
+def test_shift_end_minute_equal_to_episode_end_minute_is_accepted(tmp_path: Path) -> None:
+    # Ticket 02 (simulator-correctness, B15): the boundary itself is valid —
+    # only shift_end_minute > episode_end_minute is rejected.
+    values = valid_values() | {"shift_end_minute": 1150, "episode_end_minute": 1150}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.shift_end_minute == config.episode_end_minute == 1150
+
+
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [
         ({"traffic_days": []}, "traffic_days"),
         ({"instance_day": 602}, "instance_day"),
         ({"horizon_start_minute": 780}, "horizon"),
+        ({"shift_end_minute": 1200}, "episode_end_minute"),
         ({"epsilon": 1.5}, "epsilon"),
         ({"congestion_lower_bound": 0.5}, "congestion bounds"),
         ({"max_congestion_duration": 29}, "max_congestion_duration"),

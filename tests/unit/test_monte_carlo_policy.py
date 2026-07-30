@@ -32,6 +32,7 @@ from stdvrp.simulation.state import State, TrainingSnapshot
 
 DEPOT = 0
 HORIZON_END = 780
+EPISODE_END = 1150
 
 
 class World(NamedTuple):
@@ -92,7 +93,8 @@ def make_policy(world: World, *, epsilon=0.0, W=None, lr=0.0, seed=0, rng=None, 
         epsilon=epsilon,
         depot=DEPOT,
         number_actions_test=2,
-        horizon_end_minute=HORIZON_END,
+        shift_end_minute=HORIZON_END,
+        episode_end_minute=EPISODE_END,
         W=W,
         exploration_rng=rng,
         number_actions_train=2,
@@ -321,7 +323,8 @@ class TestEpsilonGreedy:
             epsilon=0.0,
             depot=DEPOT,
             number_actions_test=2,
-            horizon_end_minute=HORIZON_END,
+            shift_end_minute=HORIZON_END,
+            episode_end_minute=EPISODE_END,
             W=np.zeros(19),
             exploration_rng=np.random.default_rng(0),
         )
