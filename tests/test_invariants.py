@@ -121,6 +121,9 @@ class RecordingVelocities:
     def congestion_expiry(self, arc: tuple[float, float]) -> float | None:
         return self.inner.congestion_expiry(arc)
 
+    def purge_expired(self, tau_episode: float) -> None:
+        self.inner.purge_expired(tau_episode)
+
     def release(self) -> None:
         self.inner.release()
 
@@ -153,6 +156,16 @@ class RecordingModel(Model):
         delay_before = self.costs.delay_cost
         super().terminate_state_if_all_vehicles_come_back()
         self.termination_delay_charges.append(self.costs.delay_cost - delay_before)
+
+    def advance_fleet_to(self, minute: float) -> None:
+        """B17: the congestion book holds no expired entries after a clock advance."""
+        super().advance_fleet_to(minute)
+        expired = [
+            arc
+            for arc, event in self.velocities.congested_arcs.items()
+            if self.state.tau_episode >= event[1]
+        ]
+        assert not expired, f"expired congestion entries survived a clock advance: {expired}"
 
 
 class RecordingCongestionGenerator(CongestionGenerator):

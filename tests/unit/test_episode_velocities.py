@@ -159,6 +159,39 @@ class TestCongestion:
         assert velocities.congestion_expiry(ARC) == 400.0
 
 
+class TestPurgeExpired:
+    def test_purge_removes_an_expired_entry(self):
+        velocities, _ = make_velocities()
+        velocities.congested_arcs[ARC] = [0.5, 400.0]
+
+        velocities.purge_expired(400.0)
+
+        assert velocities.congested_arcs == {}
+
+    def test_purge_keeps_a_still_active_entry(self):
+        velocities, _ = make_velocities()
+        velocities.congested_arcs[ARC] = [0.5, 400.0]
+
+        velocities.purge_expired(399.0)
+
+        assert velocities.congested_arcs == {ARC: [0.5, 400.0]}
+
+    def test_purge_removes_only_the_expired_arcs(self):
+        velocities, _ = make_velocities()
+        active = (2.0, 3.0)
+        velocities.congested_arcs[ARC] = [0.5, 400.0]
+        velocities.congested_arcs[active] = [0.5, 500.0]
+
+        velocities.purge_expired(400.0)
+
+        assert velocities.congested_arcs == {active: [0.5, 500.0]}
+
+    def test_purge_is_a_no_op_on_an_empty_book(self):
+        velocities, _ = make_velocities()
+        velocities.purge_expired(300.0)
+        assert velocities.congested_arcs == {}
+
+
 class TestRelease:
     def test_release_forgets_the_memoized_samples(self):
         velocities, _ = make_velocities(0.4, 0.7)

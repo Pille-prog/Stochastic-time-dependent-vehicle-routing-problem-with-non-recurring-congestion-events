@@ -528,6 +528,11 @@ class Model:
 
         Every vehicle still travelling covers ``its observed velocity x the
         elapsed time`` and is charged for it.
+
+        Every call is a clock advance, so this is also the one place that
+        purges the congestion book (B17, ticket 07): whatever event book
+        entries lift as of ``minute`` are gone from here on, not just at
+        Episode end.
         """
         elapsed = minute - self.state.tau_episode
         observed_velocity = self.state.observed_velocity
@@ -543,6 +548,7 @@ class Model:
                 charge_distance(distance_travelled)
 
         self.state.tau_episode = minute
+        self.velocities.purge_expired(minute)
 
     # --- Termination ------------------------------------------------------------------
 
