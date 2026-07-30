@@ -274,7 +274,7 @@ def test_episode_invariants(
         max_congestion_duration=duration,
         horizon_start_minute=HORIZON_START,
         horizon_end_minute=HORIZON_END,
-        n_observed_arcs=3,
+        n_observed_velocities=3,
         vehicle_count=config["vehicle_count"],
     )
     model = RecordingModel.last_instance
@@ -380,7 +380,7 @@ def test_horizon_terminated_episode_counts_the_terminating_transition_once(
         max_congestion_duration=120,
         horizon_start_minute=HORIZON_START,
         horizon_end_minute=HORIZON_END,
-        n_observed_arcs=3,
+        n_observed_velocities=3,
         vehicle_count=1,
     )
     model = RecordingModel.last_instance

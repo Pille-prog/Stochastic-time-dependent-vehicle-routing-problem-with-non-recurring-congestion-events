@@ -459,7 +459,8 @@ class Model:
             fleet.horizon_change_tau[vehicle] = self.state.tau_episode
 
             distance_travelled = (
-                self.state.observed_velocity[vehicle][self.state.n_arcs - 1] * time_in_arc
+                self.state.observed_velocity[vehicle][self.state.n_observed_velocities - 1]
+                * time_in_arc
             )
             fleet.arc_distance_travelled[vehicle] += distance_travelled
 
@@ -530,14 +531,14 @@ class Model:
         """
         elapsed = minute - self.state.tau_episode
         observed_velocity = self.state.observed_velocity
-        last_arc = self.state.n_arcs - 1
+        last_slot = self.state.n_observed_velocities - 1
         distance_by_vehicle = self.state.total_vehicle_distance_travelled
         arrival_tau = self.fleet.arrival_tau
         charge_distance = self.costs.charge_distance
 
         for vehicle in range(self.number_vehicles):
             if arrival_tau[vehicle] != PARKED:
-                distance_travelled = observed_velocity[vehicle][last_arc] * elapsed
+                distance_travelled = observed_velocity[vehicle][last_slot] * elapsed
                 distance_by_vehicle[vehicle] += distance_travelled
                 charge_distance(distance_travelled)
 

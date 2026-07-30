@@ -89,7 +89,7 @@ def config_from_protocol(protocol: dict[str, Any], data_dir: Path) -> Any:
         learning_rate=protocol["learning_rate"],
         warmup_learning_rate=protocol["warmup_learning_rate"],
         epsilon=protocol["epsilon"],
-        n_observed_arcs=protocol["n_arcs"],
+        n_observed_velocities=protocol["n_arcs"],
         first_train_seed=train_seeds[0],
         evaluation_seed_start=eval_seeds[0],
         evaluation_seed_count=len(eval_seeds),

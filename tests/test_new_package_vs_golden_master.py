@@ -157,7 +157,7 @@ def config_from_protocol(protocol: dict[str, Any], data_dir: Path) -> Experiment
         learning_rate=protocol["learning_rate"],
         warmup_learning_rate=protocol["warmup_learning_rate"],
         epsilon=protocol["epsilon"],
-        n_observed_arcs=protocol["n_arcs"],
+        n_observed_velocities=protocol["n_arcs"],
         first_train_seed=train_seeds[0],
         evaluation_seed_start=eval_seeds[0],
         evaluation_seed_count=len(eval_seeds),
@@ -223,7 +223,7 @@ def test_evaluation_mean_cost_is_within_tolerance_of_the_baseline(
             max_congestion_duration=protocol["max_congestion_duration"],
             horizon_start_minute=protocol["horizon_start_time"],
             horizon_end_minute=protocol["horizon_end_time"],
-            n_observed_arcs=protocol["n_arcs"],
+            n_observed_velocities=protocol["n_arcs"],
         ).total_cost
         for seed in protocol["eval_seeds"]
     ]
@@ -257,7 +257,7 @@ def test_final_test_mean_cost_is_within_tolerance_of_the_baseline(
                 max_congestion_duration=protocol["max_congestion_duration"],
                 horizon_start_minute=protocol["horizon_start_time"],
                 horizon_end_minute=protocol["horizon_end_time"],
-                n_observed_arcs=protocol["n_arcs"],
+                n_observed_velocities=protocol["n_arcs"],
                 vehicle_count=entry["vehicles"],
                 number_actions_test=entry["vehicles"] + int(actions),
             ).total_cost

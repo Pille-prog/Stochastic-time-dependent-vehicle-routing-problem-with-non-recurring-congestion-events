@@ -54,7 +54,7 @@ def make_config(**overrides: Any) -> ExperimentConfig:
         "learning_rate": 1.0e-5,
         "warmup_learning_rate": 1.0e-6,
         "epsilon": 0.1,
-        "n_observed_arcs": 3,
+        "n_observed_velocities": 3,
         "first_train_seed": 1000,
         "evaluation_seed_start": 100000,
         "evaluation_seed_count": 2,

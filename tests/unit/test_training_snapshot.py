@@ -19,7 +19,11 @@ DEPOT = 0
 
 def make_state() -> State:
     state = State(
-        number_vehicles=2, clients=[1, 2, 3], n_arcs=3, horizon_start_minute=300, depot=DEPOT
+        number_vehicles=2,
+        clients=[1, 2, 3],
+        n_observed_velocities=3,
+        horizon_start_minute=300,
+        depot=DEPOT,
     )
     state.tau_episode = 400.0
     state.vehicle_position = [1.0, 2.0]

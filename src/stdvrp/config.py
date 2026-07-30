@@ -59,7 +59,7 @@ class ExperimentConfig:
     learning_rate: float
     warmup_learning_rate: float | None
     epsilon: float
-    n_observed_arcs: int
+    n_observed_velocities: int
     first_train_seed: int
     evaluation_seed_start: int
     evaluation_seed_count: int
@@ -117,7 +117,7 @@ class ExperimentConfig:
             "test_frequency",
             "test_episodes",
             "evaluation_seed_count",
-            "n_observed_arcs",
+            "n_observed_velocities",
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -209,7 +209,7 @@ class ExperimentConfig:
             "max_congestion_duration",
             "total_train_iterations",
             "test_frequency",
-            "n_observed_arcs",
+            "n_observed_velocities",
             "first_train_seed",
             "evaluation_seed_start",
             "evaluation_seed_count",

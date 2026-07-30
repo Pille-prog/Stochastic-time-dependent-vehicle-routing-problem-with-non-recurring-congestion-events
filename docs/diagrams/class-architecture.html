@@ -544,7 +544,7 @@ sequenceDiagram
   TR->>RTE: seed, W, learning_rate, world.episode_kwargs()
   RTE->>CG: generate(seed)
   CG-->>RTE: EpisodeDemand(clients, vehicle_count)
-  RTE->>ST: new State(vehicle_count, clients, n_observed_arcs, depot)
+  RTE->>ST: new State(vehicle_count, clients, n_observed_velocities, depot)
   RTE->>EG: EpisodeGeometry.build(shortest_path_cache, clients, depot)
   RTE->>POL: new MonteCarloPolicy(state, geometry, W, exploration_rng, learning_rate, number_actions_train)
   activate POL
@@ -784,7 +784,7 @@ sequenceDiagram
       <div class="module-body">
         <div class="card">
           <h4>State <span class="filepath">state.py</span></h4>
-          <p class="role">Mutable per-Episode information the Policy sees: vehicle positions, unvisited clients, observed velocities (per vehicle, last <code>n_arcs</code> arcs), terminal flag. Mutated in place by Model across the whole Episode.</p>
+          <p class="role">Mutable per-Episode information the Policy sees: vehicle positions, unvisited clients, observed velocities (per vehicle, last <code>n_observed_velocities</code> observations — a recency window, not a distinct-arc count; see B18 in <code>docs/simulator-review.md</code>), terminal flag. Mutated in place by Model across the whole Episode.</p>
         </div>
         <div class="card">
           <h4>TrainingSnapshot <span class="filepath">state.py — frozen dataclass</span></h4>

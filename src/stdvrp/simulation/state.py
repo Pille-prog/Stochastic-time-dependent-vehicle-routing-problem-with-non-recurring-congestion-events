@@ -21,7 +21,7 @@ class State:
         self,
         number_vehicles: int,
         clients: list[int],
-        n_arcs: int,
+        n_observed_velocities: int,
         horizon_start_minute: int,
         depot: int,
     ) -> None:
@@ -35,11 +35,14 @@ class State:
         # The very list handed in — the legacy aliased and mutated it in place.
         self.clients_not_visited = clients
 
-        # Velocities observed on the last n_arcs arcs, per vehicle (km/min).
+        # Sliding window of the last n_observed_velocities velocity observations,
+        # per vehicle (km/min) — one entry per decision epoch, not per distinct
+        # arc: a vehicle resampled several times on the same arc fills several
+        # slots with that one arc's velocities (B18, docs/simulator-review.md).
         self.observed_velocity: list[list[float]] = [
-            [0 for _ in range(n_arcs)] for _ in range(number_vehicles)
+            [0 for _ in range(n_observed_velocities)] for _ in range(number_vehicles)
         ]
-        self.n_arcs = n_arcs
+        self.n_observed_velocities = n_observed_velocities
 
         self.terminal = False
         self.number_vehicles = number_vehicles

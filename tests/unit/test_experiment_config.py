@@ -36,7 +36,7 @@ def valid_values() -> dict:
         "learning_rate": 1.0e-5,
         "warmup_learning_rate": 1.0e-6,
         "epsilon": 0.1,
-        "n_observed_arcs": 3,
+        "n_observed_velocities": 3,
         "first_train_seed": 1000,
         "evaluation_seed_start": 100000,
         "evaluation_seed_count": 50,
@@ -60,7 +60,7 @@ def test_loads_the_committed_fixture_config() -> None:
     assert config.traffic_days == (601,)
     assert config.horizon_start_minute == 300
     assert config.horizon_end_minute == 780
-    assert config.n_observed_arcs == 3
+    assert config.n_observed_velocities == 3
     assert config.warmup_learning_rate == 1.0e-6
     assert config.data_dir == FIXTURE_CONFIG.parent / "."
     assert (config.data_dir / config.links_file).is_file()
