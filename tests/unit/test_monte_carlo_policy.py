@@ -116,7 +116,11 @@ def make_update_world():
     )
     time_windows = {1: (350, 400), 2: (450, 500)}
     state = State(
-        number_vehicles=1, clients=[1, 2], n_arcs=3, horizon_start_minute=300, depot=DEPOT
+        number_vehicles=1,
+        clients=[1, 2],
+        n_observed_velocities=3,
+        horizon_start_minute=300,
+        depot=DEPOT,
     )
     state.tau_episode = 400
     return World(cache, time_windows, state)
@@ -236,7 +240,11 @@ def make_selection_world():
 
     time_windows = {1: (400, 500), 2: (420, 520), 3: (440, 540), 4: (460, 560)}
     state = State(
-        number_vehicles=1, clients=[1, 2, 3, 4], n_arcs=3, horizon_start_minute=300, depot=DEPOT
+        number_vehicles=1,
+        clients=[1, 2, 3, 4],
+        n_observed_velocities=3,
+        horizon_start_minute=300,
+        depot=DEPOT,
     )
     return World(cache, time_windows, state)
 
@@ -441,7 +449,7 @@ def make_fleet_world(minutes, *, clients, vehicles, nodes=None, tau=300.0) -> Wo
     state = State(
         number_vehicles=vehicles,
         clients=list(clients),
-        n_arcs=3,
+        n_observed_velocities=3,
         horizon_start_minute=300,
         depot=DEPOT,
     )
@@ -481,7 +489,7 @@ class TestCandidateSelection:
         state = State(
             number_vehicles=1,
             clients=list(clients),
-            n_arcs=3,
+            n_observed_velocities=3,
             horizon_start_minute=300,
             depot=DEPOT,
         )
