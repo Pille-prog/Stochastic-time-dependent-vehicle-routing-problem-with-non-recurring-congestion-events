@@ -410,6 +410,10 @@ class MonteCarloPolicy(Policy):
         clients_remaining = len(self.state.clients_not_visited)
 
         if clients_remaining == 2:
+            # 310 here, 350 in _select_vehicle_possible_actions above — the
+            # disagreement documented there. heapq.nsmallest(2, []) == [] below
+            # if this filters out every vehicle, so this branch never hits B5's
+            # empty-min() crash (that's the one-Client branch just below).
             vehicle_distances = []
             for vehicle_idx, vehicle_position in enumerate(self.state.vehicle_position):
                 if vehicle_position == self.depot and self.state.tau_episode > 310:
@@ -447,8 +451,6 @@ class MonteCarloPolicy(Policy):
             if distances:
                 closest_vehicle = min(distances)
                 assigned_vehicle_idx = closest_vehicle[1]
-                shortest_distance_clients[assigned_vehicle_idx].append(
-                    (closest_vehicle[0], client)
-                )
+                shortest_distance_clients[assigned_vehicle_idx].append((closest_vehicle[0], client))
 
         return shortest_distance_clients

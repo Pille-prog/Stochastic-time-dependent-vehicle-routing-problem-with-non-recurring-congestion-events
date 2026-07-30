@@ -621,6 +621,9 @@ def endgame_configs(draw: st.DrawFn) -> dict[str, Any]:
     }
 
 
+AWAY_FROM_DEPOT = 9  # any node the dense cache below prices; never the depot itself
+
+
 def make_endgame_world(vehicle_count: int) -> World:
     """Two Clients, a fleet of ``vehicle_count``, plus one node away from the depot.
 
@@ -629,14 +632,16 @@ def make_endgame_world(vehicle_count: int) -> World:
     world the Policy can build a greedy initial decision from (ticket 13's
     constructor draw needs a non-empty ``clients_not_visited``).
     """
-    return make_fleet_world({}, clients=[1, 2], vehicles=vehicle_count, nodes=[DEPOT, 1, 2, 9])
+    return make_fleet_world(
+        {}, clients=[1, 2], vehicles=vehicle_count, nodes=[DEPOT, 1, 2, AWAY_FROM_DEPOT]
+    )
 
 
 def _apply_endgame_config(world: World, config: dict[str, Any]) -> None:
     world.state.clients_not_visited[:] = [1, 2][: config["remaining"]]
     world.state.tau_episode = config["tau"]
     world.state.vehicle_position[:] = [
-        DEPOT if at_depot else 9 for at_depot in config["at_depot"]
+        DEPOT if at_depot else AWAY_FROM_DEPOT for at_depot in config["at_depot"]
     ]
 
 
