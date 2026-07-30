@@ -294,17 +294,25 @@ class MonteCarloPolicy(Policy):
             else:
                 forbidden_actions.append(self.action[v])
 
+        # This 350 and the 310 in _classify_shortest_distance_clients below disagree
+        # by 40 minutes (module docstring, "Depot-idle cutoffs"); ticket 05 leaves
+        # both literals as-is (spec.md decision 3: fix what crashes or
+        # misclassifies, never re-tune what is tuned) and only added the fallback
+        # in the 310 branch for the window this gap otherwise leaves uncovered.
         if (
             self.state.vehicle_position[vehicle] == self.depot and self.state.tau_episode > 350
         ) or len(self.state.clients_not_visited) == 0:
             possible_actions.append(self.depot)
 
         elif len(self.state.clients_not_visited) < 3:
+            # B11: filter forbidden_actions here too, matching the normal branch
+            # below — otherwise two vehicles can both be offered (and both pick)
+            # the same Client this classifier assigns to more than one of them.
             shortest_distance_clients = self._classify_shortest_distance_clients()
-            if shortest_distance_clients[vehicle]:
-                for i in range(len(shortest_distance_clients[vehicle])):
-                    possible_actions.append(shortest_distance_clients[vehicle][i][1])
-            else:
+            for _distance, client in shortest_distance_clients[vehicle]:
+                if client not in forbidden_actions:
+                    possible_actions.append(client)
+            if not possible_actions:
                 possible_actions.append(self.depot)
 
         else:
@@ -432,8 +440,15 @@ class MonteCarloPolicy(Policy):
                 travel_time = self.geometry.average_minutes(vehicle_position, client)
                 distances.append((travel_time, vehicle_idx))
 
-            closest_vehicle = min(distances)
-            assigned_vehicle_idx = closest_vehicle[1]
-            shortest_distance_clients[assigned_vehicle_idx].append((closest_vehicle[0], client))
+            # B5: every vehicle can read position == depot with tau in (310, 350]
+            # (see the disagreement noted in _select_vehicle_possible_actions above),
+            # leaving `distances` empty. Fall back to the depot, exactly as the
+            # two-Client branch above already does via heapq.nsmallest(2, []) == [].
+            if distances:
+                closest_vehicle = min(distances)
+                assigned_vehicle_idx = closest_vehicle[1]
+                shortest_distance_clients[assigned_vehicle_idx].append(
+                    (closest_vehicle[0], client)
+                )
 
         return shortest_distance_clients

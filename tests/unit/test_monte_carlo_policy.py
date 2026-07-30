@@ -17,10 +17,12 @@ exactly as ``decide``/``decide_train`` do. Feature *arithmetic* is pinned in
 
 import heapq
 import math
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPath, ShortestPathCache
@@ -398,11 +400,14 @@ def reference_possible_actions(
         possible_actions.append(policy.depot)
 
     elif len(state.clients_not_visited) < 3:
+        # ticket 05 (B11): filtered here too, to stay in lockstep with the fix in
+        # _select_vehicle_possible_actions — this oracle pins ticket 07's
+        # vectorization, not the pre-ticket-05 duplicate-booking bug.
         shortest_distance_clients = policy._classify_shortest_distance_clients()
-        if shortest_distance_clients[vehicle]:
-            for i in range(len(shortest_distance_clients[vehicle])):
-                possible_actions.append(shortest_distance_clients[vehicle][i][1])
-        else:
+        for _distance, client in shortest_distance_clients[vehicle]:
+            if client not in forbidden_actions:
+                possible_actions.append(client)
+        if not possible_actions:
             possible_actions.append(policy.depot)
 
     else:
@@ -586,3 +591,87 @@ class TestCandidateSelection:
                     policy._select_vehicle_possible_actions(number_of_actions, vehicle, features)
                     == expected
                 )
+
+
+# --- Endgame invariants (ticket 05, simulator-correctness: B5's crash, B11's --
+# --- duplicate booking) ---------------------------------------------------------
+
+
+@st.composite
+def endgame_configs(draw: st.DrawFn) -> dict[str, Any]:
+    """Small pending-Client counts and small fleets, tau swept across 310/350.
+
+    The regime the review flags as most exposed for both findings: B5's crash
+    needs exactly one pending Client with every vehicle reading
+    ``position == depot`` in the uncovered ``(310, 350]`` window; B11's
+    duplicate booking needs the two-Client classifier branch and >=2 vehicles.
+    Sweeping 0/1/2 remaining Clients keeps 0 and 2 as controls alongside 1, the
+    branch B5 actually crashes in.
+    """
+    vehicle_count = draw(st.integers(1, 4))
+    return {
+        "tau": draw(st.floats(300, 360, allow_nan=False)),
+        "remaining": draw(st.integers(0, 2)),
+        "vehicle_count": vehicle_count,
+        "at_depot": draw(st.lists(st.booleans(), min_size=vehicle_count, max_size=vehicle_count)),
+    }
+
+
+def make_endgame_world(vehicle_count: int) -> World:
+    """Two Clients, a fleet of ``vehicle_count``, plus one node away from the depot.
+
+    The test body overwrites ``clients_not_visited``/``tau_episode``/
+    ``vehicle_position`` per Hypothesis example; construction just needs a
+    world the Policy can build a greedy initial decision from (ticket 13's
+    constructor draw needs a non-empty ``clients_not_visited``).
+    """
+    return make_fleet_world({}, clients=[1, 2], vehicles=vehicle_count, nodes=[DEPOT, 1, 2, 9])
+
+
+def _apply_endgame_config(world: World, config: dict[str, Any]) -> None:
+    world.state.clients_not_visited[:] = [1, 2][: config["remaining"]]
+    world.state.tau_episode = config["tau"]
+    world.state.vehicle_position[:] = [
+        DEPOT if at_depot else 9 for at_depot in config["at_depot"]
+    ]
+
+
+class TestEndgameInvariants:
+    """Invariant catalogue (spec.md), ticket 05's two rows.
+
+    "The Policy returns a legal action for every vehicle, at every tau, under
+    every valid config" (B5) and "Two vehicles never receive the same
+    non-depot Client in one decision" (B11). Both endgame branches (fewer than
+    3 Clients left) are exercised directly, since that is where both findings
+    live (``_select_vehicle_possible_actions``'s ``elif`` branch and
+    ``_classify_shortest_distance_clients``).
+    """
+
+    @settings(max_examples=300, deadline=None, derandomize=True)
+    @given(config=endgame_configs())
+    def test_b5_never_raises_and_always_returns_a_legal_action(self, config: dict[str, Any]):
+        vehicle_count = config["vehicle_count"]
+        world = make_endgame_world(vehicle_count)
+        policy = make_policy(world, W=np.zeros(19), vehicles=vehicle_count)
+
+        _apply_endgame_config(world, config)
+        features = state_features(policy)
+
+        for vehicle in range(vehicle_count):
+            actions = policy._select_vehicle_possible_actions(2, vehicle, features)
+            assert actions, "the Policy must return at least one legal action"
+
+    @settings(max_examples=300, deadline=None, derandomize=True)
+    @given(config=endgame_configs())
+    def test_b11_two_vehicles_never_get_the_same_non_depot_client(self, config: dict[str, Any]):
+        vehicle_count = config["vehicle_count"]
+        if vehicle_count < 2:
+            return  # a duplicate booking needs at least two vehicles to collide
+        world = make_endgame_world(vehicle_count)
+        policy = make_policy(world, W=np.zeros(19), vehicles=vehicle_count)
+
+        _apply_endgame_config(world, config)
+        actions = policy.decide(world.state)
+
+        non_depot = [action for action in actions if action != DEPOT]
+        assert len(non_depot) == len(set(non_depot)), f"duplicate non-depot assignment: {actions}"
