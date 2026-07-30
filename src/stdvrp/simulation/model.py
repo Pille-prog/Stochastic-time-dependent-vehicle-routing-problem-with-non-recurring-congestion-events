@@ -74,6 +74,23 @@ episode_end_minute``:
 - :meth:`_congestion_epoch_due` dropped the ``/ 60`` float division that
   silently degraded the cadence for non-dyadic ``max_congestion_duration``
   values (B16).
+
+Ticket 03 fixes (simulator-correctness, B3/B14 — spec.md decision 6,
+ADR-0004): a Client the Episode ends without serving is priced against a
+fixed **reference clock**, ``max(episode_end_minute, tau_episode)``, not the
+live ``tau_episode`` ticket 12 charged both termination paths from. The two
+are the same event handled two different ways: ``tau_episode`` is correct for
+the live, in-episode lateness check (a pending Client's window might still be
+met), but termination closes the outcome, so the price must not depend on
+*when* the fleet happened to stop — a defect ticket 01 measured moving the
+same 19 abandoned Clients' cost by four orders of magnitude across otherwise
+identical seeds. Because both termination call sites only ever fire with
+``tau_episode <= episode_end_minute`` (the Model force-terminates at
+``episode_end_minute``, ticket 02, B12), the ``max`` degenerates in practice to
+the constant ``episode_end_minute``, which is the whole point: the charge
+becomes a pure function of ``due`` and config, comparable across episodes
+regardless of which clock each one actually stopped at. See
+:meth:`_charge_unserved_delays`.
 """
 
 from __future__ import annotations
@@ -624,9 +641,8 @@ class Model:
     def terminate_state_if_all_vehicles_come_back(self) -> None:
         """Ports ``terminate_state_if_all_vehicles_come_back``.
 
-        Phase-2 fix (ticket 12, ADR-0001 change log): late unserved Clients are
-        charged from the actual clock (``tau - due``) like the passing-horizon
-        sibling — the legacy hardcoded its 1150 emergency horizon here. Unlike
+        Priced like its passing-horizon sibling, from the reference clock
+        (ticket 03, B3, ADR-0004) — see :meth:`_charge_unserved_delays`. Unlike
         that sibling this path charges no overtime: every vehicle is home.
         """
         self.state.terminal = True
@@ -637,11 +653,26 @@ class Model:
         self.costs.commit_transition()
 
     def _charge_unserved_delays(self) -> None:
-        """Charge every Client this Episode ends without having served, if it is late."""
-        tau_episode = self.state.tau_episode
+        """Charge every Client this Episode ends without having served.
+
+        Priced against the fixed reference clock ``max(episode_end_minute,
+        tau_episode)`` (ticket 03, simulator-correctness, B3, ADR-0004), never
+        ``tau_episode`` alone: the live in-episode formula (``cost(t) = max(0,
+        t - due)``, unchanged, still used while a decision is pending) is
+        correct because a pending Client's window might still be met, but a
+        Client that reaches termination unserved never will be — its outcome
+        is priced at the worst clock the Episode could have reached, not the
+        one it happened to stop at, so the price is comparable across
+        episodes regardless of *when* each one terminated. Floored at 0, like
+        the live formula: a Client whose window closes at or after the
+        reference clock owes nothing. Every unserved Client is priced, not
+        only the ones already late by the actual clock (B14: some of those
+        prices may still floor to 0; :meth:`CostLedger.charge_unserved_delays`
+        counts only the ones that do not).
+        """
+        reference_clock = max(self.episode_end_minute, self.state.tau_episode)
         time_windows = self.time_windows
         self.costs.charge_unserved_delays(
-            tau_episode - time_windows[client][1]
+            max(0.0, reference_clock - time_windows[client][1])
             for client in self.state.clients_not_visited
-            if tau_episode > time_windows[client][1]
         )

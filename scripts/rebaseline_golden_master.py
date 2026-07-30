@@ -6,11 +6,20 @@ the capture protocol stored in ``chengdu_full.json`` through the ported Trainer
 on the full local dataset and writes the outcome to ``chengdu_full_phase2.json``.
 
 Ticket 13 (RNG modernization) repurposed that file as the pre-migration
-statistical baseline: ``tests/test_new_package_vs_golden_master.py`` now compares
+statistical baseline: ``tests/test_new_package_vs_golden_master.py`` compared
 its mean-cost-over-N-seeds against it within a tolerance, instead of asserting
-exact equality (ADR-0001 phase-2 addendum) — this script is unchanged, since it
-still captures exactly the moment right before ticket 13 touched any RNG call
-site.
+exact equality (ADR-0001 phase-2 addendum) — this script was unchanged, since
+it still captures exactly the moment right before ticket 13 touched any RNG
+call site.
+
+**Retired (simulator-correctness ticket 03, spec.md decision 8, ADR-0004):**
+that comparison test is deleted — a baseline computed under the old
+termination-pricing formula (B3) cannot gate a run under the new one, and
+continuity with the legacy is no longer this effort's purpose. Nothing reads
+``chengdu_full_phase2.json`` any more; it stays in the repo as historical
+evidence of the new package's pre-ticket-13 behavior. This script is unused
+by any test or gate; keep it only if that history is ever worth
+regenerating.
 
 The legacy capture is NOT touched: ``chengdu_full.json`` remains the frozen
 evidence of what the monolith computed, and ``tests/test_golden_master.py``

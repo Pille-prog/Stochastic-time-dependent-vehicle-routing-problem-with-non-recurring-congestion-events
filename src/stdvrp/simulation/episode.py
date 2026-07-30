@@ -80,6 +80,7 @@ class EpisodeResult:
     state_count: int
     delay_clients: int
     earliness_clients: int
+    unserved_clients: int
 
 
 def run_evaluation_episode(
@@ -167,6 +168,7 @@ def _episode_result(model: Model) -> EpisodeResult:
         state_count=model.total_state_counter,
         delay_clients=costs.late_clients,
         earliness_clients=costs.early_clients,
+        unserved_clients=costs.unserved_clients,
     )
 
 

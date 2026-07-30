@@ -92,6 +92,7 @@ def episode_result(total_cost: float = 100.0) -> EpisodeResult:
         state_count=10,
         delay_clients=3,
         earliness_clients=2,
+        unserved_clients=0,
     )
 
 

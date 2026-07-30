@@ -31,8 +31,9 @@ Legacy fidelity notes:
   division-order float noise that quirk could otherwise leak into the
   report). ``test_episodes`` stays in ``ExperimentConfig`` for config-file
   compatibility but is no longer read.
-* **Reported metrics**: the nine golden-pinned Episode metrics. The legacy
-  report's three mean-time metrics (``mean_delay_time``, ``mean_earliness_time``,
+* **Reported metrics**: the ten golden-pinned Episode metrics (``unserved_clients``
+  added by ticket 03, simulator-correctness, ADR-0004). The legacy report's
+  three mean-time metrics (``mean_delay_time``, ``mean_earliness_time``,
   ``mean_overtime``) were not ported with the ticket 07 Model and are not pinned
   by the golden master (ADR-0001 ticket 09 addendum).
 
@@ -75,6 +76,7 @@ EPISODE_METRICS = (
     "state_count",
     "delay_clients",
     "earliness_clients",
+    "unserved_clients",
 )
 
 

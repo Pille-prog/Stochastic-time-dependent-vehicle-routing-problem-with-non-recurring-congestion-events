@@ -65,3 +65,7 @@ _Avoid_: iteration, run
 **Horizon**:
 The simulated time interval an Episode runs within, from `horizon_start_minute` to `episode_end_minute` (the hard stop). Not the same as when overtime starts: `shift_end_minute` is the vehicles' shift end, a separate, earlier clock that decisions and events can and do run past (ticket 02, simulator-correctness, B12) — with `horizon_start_minute` = 300 and `shift_end_minute` = 780, Episodes demonstrably run to 1148.
 _Avoid_: time window (reserved for Clients); using "horizon end" to mean the shift end
+
+**Unserved Client**:
+A Client the Episode ends without ever having assigned a vehicle to. While the Episode is still running this is provisional — the Client is merely pending, and a vehicle could still reach it before its window closes. Once the Episode terminates it is final: the Client is abandoned, a different outcome from one served after its window closed (late, but served — see Client). An abandoned Client is priced at termination against the fixed reference clock `max(episode_end_minute, tau_episode)`, never the live `tau_episode` alone (ticket 03, simulator-correctness, B3, ADR-0004): a pending Client's window might still be met, but an abandoned one's never will be, so its price cannot depend on *when* the Episode happened to stop.
+_Avoid_: late (reserved for a Client actually served past its window); treating "unserved" as one outcome — pending (Episode still running) and abandoned (Episode terminated) are priced by two different formulas for exactly this reason

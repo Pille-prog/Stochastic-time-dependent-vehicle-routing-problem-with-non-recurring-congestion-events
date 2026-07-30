@@ -7,7 +7,9 @@ fixture and regardless of policy quality:
   rules (terminal state, clock inside [horizon start, the legacy 1150 emergency
   horizon]);
 - every Client ends the Episode served exactly once or left unserved and
-  penalized by exactly one termination charge;
+  penalized by exactly one termination charge, priced against the fixed
+  reference clock ``max(episode_end_minute, tau)`` (ticket 03,
+  simulator-correctness, B3, ADR-0004), never ``tau`` alone;
 - every sampled travel time and velocity is strictly positive and finite;
 - congestion factors stay within the configured bounds (ticket 12 clamped
   spread multipliers at the upper bound) and events expire inside
@@ -332,17 +334,18 @@ def test_episode_invariants(
     if unserved:
         assert termination_charges == 1, "unserved Clients were never penalized"
     if termination_charges:
-        # The single termination call charges each late unserved Client its
-        # delay exactly once, from the actual clock on either termination path
-        # (ticket 12 fixed the legacy's hardcoded 1150 in the all-back path).
+        # The single termination call charges every unserved Client its delay
+        # exactly once, against the fixed reference clock
+        # max(episode_end_minute, tau) — never tau alone (ticket 03,
+        # simulator-correctness, B3, ADR-0004).
         time_windows = {
             client.node: (client.time_window_start, client.time_window_end)
             for client in demand.clients
         }
+        reference_clock = max(config["episode_end_minute"], state.tau_episode)
         expected_delay = sum(
-            state.tau_episode - time_windows[client][1]
+            max(0.0, reference_clock - time_windows[client][1])
             for client in state.clients_not_visited
-            if state.tau_episode > time_windows[client][1]
         )
         assert math.isclose(
             model.termination_delay_charges[0], expected_delay, rel_tol=1e-9, abs_tol=1e-9

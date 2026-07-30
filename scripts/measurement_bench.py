@@ -258,9 +258,15 @@ FIELDS: tuple[str, ...] = tuple(SeedMeasurement.__dataclass_fields__)
 
 
 def _money_without_counter_violations(costs: Any) -> int:
-    """B14: money charged > 0 must imply its counter > 0, and vice versa."""
+    """B14: money charged > 0 must imply its counter > 0, and vice versa.
+
+    Ticket 03 gave the termination delay charge its own counter
+    (``unserved_clients``, never folded into ``late_clients`` — see
+    ``CostLedger``), so ``delay_cost`` now agrees with *either* counter being
+    positive, not just ``late_clients``.
+    """
     violations = 0
-    if (costs.delay_cost > 0) != (costs.late_clients > 0):
+    if (costs.delay_cost > 0) != (costs.late_clients > 0 or costs.unserved_clients > 0):
         violations += 1
     if (costs.overtime_cost > 0) != (costs.overtime_vehicles > 0):
         violations += 1

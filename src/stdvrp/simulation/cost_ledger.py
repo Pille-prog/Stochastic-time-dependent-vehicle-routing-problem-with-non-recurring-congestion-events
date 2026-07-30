@@ -17,14 +17,21 @@ effort's Tier-1 gate is bit-exact equality (spec,
 ``.scratch/simulation-performance/``). Both methods say so at their definition;
 do not "simplify" them into per-item calls.
 
-Preserved legacy quirks (ADR-0001), each documented at the method that owns it:
+Preserved legacy quirk (ADR-0001), documented at the method that owns it: the
+emergency-abort penalty (``40000 - 200 x served``) lands in
+:attr:`transition_cost` and :attr:`total_cost` but in *no* component total, so
+an aborted Episode's components do not sum to its total.
 
-- The two collection charges above count no Clients and no vehicles, unlike
-  their per-event siblings — an Episode terminated past the horizon reports 0
-  late Clients however many it left unserved.
-- The emergency-abort penalty (``40000 - 200 x served``) lands in
-  :attr:`transition_cost` and :attr:`total_cost` but in *no* component total, so
-  an aborted Episode's components do not sum to its total.
+**Retired quirk** (simulator-correctness ticket 03, B14, ADR-0004): the two
+collection charges above used to count no Clients and no vehicles, unlike
+their per-event siblings — an Episode terminated past the horizon reported 0
+late Clients however many it left unserved. Both now count exactly the
+Clients/vehicles they charge a strictly positive amount to, which is what
+keeps "money charged > 0 iff its counter > 0" true for every component:
+:meth:`charge_unserved_delays` into its own :attr:`unserved_clients` (never
+folded into :attr:`late_clients` — "served late" and "never served" are
+different outcomes) and :meth:`charge_fleet_overtime` into the same
+:attr:`overtime_vehicles` :meth:`charge_vehicle_overtime` already uses.
 """
 
 from __future__ import annotations
@@ -68,6 +75,7 @@ class CostLedger:
         self.early_clients = 0
         self.late_clients = 0
         self.overtime_vehicles = 0
+        self.unserved_clients = 0
 
     # --- The transition in flight -------------------------------------------
 
@@ -123,24 +131,39 @@ class CostLedger:
 
         Summed into a local and added to the totals once, which is the legacy's
         accumulation order and therefore the bit-exact one (module docstring).
-        Preserved legacy quirk (ADR-0001): unlike :meth:`charge_lateness` this
-        counts no Clients, so :attr:`late_clients` reports only the Clients that
-        were actually served late.
+        Ticket 03 (simulator-correctness, B14, ADR-0004): unlike
+        :meth:`charge_lateness`, which counts unconditionally because the Model
+        never calls it with a non-positive amount, this counts only the
+        Clients actually charged a strictly positive amount — the caller
+        (:meth:`~stdvrp.simulation.model.Model._charge_unserved_delays`) passes
+        every unserved Client through the same reference-clock formula, some of
+        which may floor to 0, and those must not inflate :attr:`unserved_clients`
+        past what :attr:`delay_cost` actually moved by. Never folded into
+        :attr:`late_clients`: a Client that was never served is a different
+        outcome from one served late.
         """
         costs: float = 0
+        unserved = 0
         for minutes in minutes_late:
             costs += minutes * self._delay_rate
+            if minutes > 0:
+                unserved += 1
 
         self.delay_cost += costs
         self.transition_cost += costs
+        self.unserved_clients += unserved
 
     def charge_fleet_overtime(self, minutes_over: float, vehicles: int) -> None:
         """Charge ``vehicles`` that were still out when the Episode terminated.
 
         Accumulated by repeated addition rather than multiplied by ``vehicles``,
         which is the legacy's order and therefore the bit-exact one (module
-        docstring). Preserved legacy quirk (ADR-0001): unlike
-        :meth:`charge_vehicle_overtime` this counts no vehicles.
+        docstring). Ticket 03 (simulator-correctness, B14, ADR-0004): counts
+        every vehicle it charges into the same :attr:`overtime_vehicles`
+        :meth:`charge_vehicle_overtime` uses, guarded on ``minutes_over > 0`` so
+        a ``vehicles`` count passed alongside a zero (or, pre-B15-fix, negative)
+        ``minutes_over`` cannot count vehicles :attr:`overtime_cost` charges
+        nothing to.
         """
         costs: float = 0
         for _ in range(vehicles):
@@ -148,6 +171,8 @@ class CostLedger:
 
         self.overtime_cost += costs
         self.transition_cost += costs
+        if minutes_over > 0:
+            self.overtime_vehicles += vehicles
 
     def charge_abort_penalty(self, served_clients: int) -> None:
         """Charge the emergency abort's flat penalty, rebated per served Client.

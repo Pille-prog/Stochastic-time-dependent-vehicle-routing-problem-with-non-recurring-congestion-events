@@ -15,7 +15,7 @@ ticket 13):
   the first Episode exactly as the Trainer does. Each Episode records its W vector
   (the "per-episode W trajectory") and all nine ``EPISODE_METRICS``.
 * **Evaluation** — ``EVAL_SEEDS`` run greedily with the *final* trained W (so the
-  eval golden also pins the training outcome). Each records the nine metrics.
+  eval golden also pins the training outcome). Each records the ten metrics.
 
 **Environment sensitivity.** numpy's ``Generator`` guarantees a reproducible
 *integer* stream per seed, but float distribution methods (the per-arc velocity
@@ -134,7 +134,7 @@ benchmark = _load_benchmark()
 
 
 def _metrics(episode: EpisodeResult) -> dict[str, float]:
-    """The nine golden-pinned metrics, each coerced to a round-trippable float/int."""
+    """The ten golden-pinned metrics, each coerced to a round-trippable float/int."""
     return {name: _as_number(getattr(episode, name)) for name in EPISODE_METRICS}
 
 
