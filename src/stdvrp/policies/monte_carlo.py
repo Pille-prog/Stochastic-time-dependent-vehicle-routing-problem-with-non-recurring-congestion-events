@@ -80,6 +80,7 @@ from stdvrp.policies.feature_extraction import (
     StateFeatures,
     TimeWindows,
 )
+from stdvrp.simulation.state import is_parked_at_depot
 
 if TYPE_CHECKING:
     from stdvrp.simulation.state import State, TrainingSnapshot
@@ -251,10 +252,10 @@ class MonteCarloPolicy(Policy):
             if delay_tw < state.tau_episode:
                 total_cost_acquired += (state.tau_episode - delay_tw) * self.delay_cost_factor
         for vehicle in range(self.number_vehicles):
-            if (
-                state.vehicle_position[vehicle] != self.depot
-                and state.tau_episode > self.end_of_horizon
-            ):
+            at_depot = is_parked_at_depot(
+                state.last_node_reached[vehicle], state.vehicle_standing[vehicle], self.depot
+            )
+            if not at_depot and state.tau_episode > self.end_of_horizon:
                 total_cost_acquired += (
                     state.tau_episode - self.end_of_horizon
                 ) * self.overtime_cost
@@ -301,8 +302,17 @@ class MonteCarloPolicy(Policy):
         # both literals as-is (spec.md decision 3: fix what crashes or
         # misclassifies, never re-tune what is tuned) and only added the fallback
         # in the 310 branch for the window this gap otherwise leaves uncovered.
+        # Ticket 04 (B1a, ADR-0005): the ``vehicle_standing`` guard is the fix —
+        # without it, a vehicle merely last seen at the depot while mid-arc past
+        # it (an interior waypoint on 6.8% of cached shortest paths) read as
+        # "idle at the depot" and was offered only the depot as an action,
+        # taking it out of service. The literal 350 is untouched; only what it
+        # applies to changes.
         if (
-            self.state.vehicle_position[vehicle] == self.depot and self.state.tau_episode > 350
+            is_parked_at_depot(
+                self.state.last_node_reached[vehicle], self.state.vehicle_standing[vehicle], self.depot
+            )
+            and self.state.tau_episode > 350
         ) or len(self.state.clients_not_visited) == 0:
             possible_actions.append(self.depot)
 
@@ -319,13 +329,13 @@ class MonteCarloPolicy(Policy):
 
         else:
             possible_actions = self._closest_allowed_clients(
-                self.state.vehicle_position[vehicle], number_of_actions, forbidden_actions
+                self.state.last_node_reached[vehicle], number_of_actions, forbidden_actions
             )
 
             possible_actions = list(set(possible_actions))
 
             if (
-                self.geometry.average_minutes(self.state.vehicle_position[vehicle], self.depot)
+                self.geometry.average_minutes(self.state.last_node_reached[vehicle], self.depot)
                 + self.state.tau_episode
                 > self.end_of_horizon
             ):
@@ -410,19 +420,27 @@ class MonteCarloPolicy(Policy):
         shortest_distance_clients: defaultdict[int, list[tuple[float, int]]] = defaultdict(list)
 
         clients_remaining = len(self.state.clients_not_visited)
+        last_node_reached = self.state.last_node_reached
+        vehicle_standing = self.state.vehicle_standing
 
         if clients_remaining == 2:
             # 310 here, 350 in _select_vehicle_possible_actions above — the
             # disagreement documented there. heapq.nsmallest(2, []) == [] below
             # if this filters out every vehicle, so this branch never hits B5's
             # empty-min() crash (that's the one-Client branch just below).
+            # Ticket 04 (ADR-0005): ``vehicle_standing`` guards the same
+            # depot-idle predicate as B1a — a vehicle mid-arc past the depot
+            # must stay eligible.
             vehicle_distances = []
-            for vehicle_idx, vehicle_position in enumerate(self.state.vehicle_position):
-                if vehicle_position == self.depot and self.state.tau_episode > 310:
+            for vehicle_idx, node in enumerate(last_node_reached):
+                if (
+                    is_parked_at_depot(node, vehicle_standing[vehicle_idx], self.depot)
+                    and self.state.tau_episode > 310
+                ):
                     continue
 
                 total_distance = sum(
-                    self.geometry.average_minutes(vehicle_position, client)
+                    self.geometry.average_minutes(node, client)
                     for client in self.state.clients_not_visited
                 )
                 vehicle_distances.append((total_distance, vehicle_idx))
@@ -432,18 +450,21 @@ class MonteCarloPolicy(Policy):
             for _, vehicle_idx in closest_two_vehicles:
                 for client in self.state.clients_not_visited:
                     travel_time = self.geometry.average_minutes(
-                        self.state.vehicle_position[vehicle_idx], client
+                        last_node_reached[vehicle_idx], client
                     )
                     shortest_distance_clients[vehicle_idx].append((travel_time, client))
 
         elif clients_remaining == 1:
             client = next(iter(self.state.clients_not_visited))
             distances = []
-            for vehicle_idx, vehicle_position in enumerate(self.state.vehicle_position):
-                if vehicle_position == self.depot and self.state.tau_episode > 310:
+            for vehicle_idx, node in enumerate(last_node_reached):
+                if (
+                    is_parked_at_depot(node, vehicle_standing[vehicle_idx], self.depot)
+                    and self.state.tau_episode > 310
+                ):
                     continue
 
-                travel_time = self.geometry.average_minutes(vehicle_position, client)
+                travel_time = self.geometry.average_minutes(node, client)
                 distances.append((travel_time, vehicle_idx))
 
             # B5: every vehicle can read position == depot with tau in (310, 350]

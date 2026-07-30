@@ -398,12 +398,15 @@ def reference_possible_actions(
     """
     forbidden_actions = [policy.action[v] for v in range(policy.number_vehicles) if v != vehicle]
     state = policy.state
-    position = state.vehicle_position[vehicle]
+    position = state.last_node_reached[vehicle]
     possible_actions: list[int] = []
 
-    if (position == policy.depot and state.tau_episode > 350) or len(
-        state.clients_not_visited
-    ) == 0:
+    # Ticket 04 (ADR-0005): moved in lockstep with the corrected
+    # ``_select_vehicle_possible_actions`` definition (same precedent as B10,
+    # ticket 06) — a vehicle mid-arc past the depot is not idle.
+    if (
+        position == policy.depot and state.vehicle_standing[vehicle] and state.tau_episode > 350
+    ) or len(state.clients_not_visited) == 0:
         possible_actions.append(policy.depot)
 
     elif len(state.clients_not_visited) < 3:
@@ -508,7 +511,7 @@ class TestCandidateSelection:
         world = World(cache, {client: (400, 900) for client in clients}, state)
         policy = make_policy(world, W=np.zeros(19))
 
-        state.vehicle_position[0] = 9
+        state.last_node_reached[0] = 9
 
         with pytest.raises(KeyError):
             policy.geometry.average_minutes(9, 3)
@@ -586,7 +589,7 @@ class TestCandidateSelection:
             remaining = rng.choice(clients, size=rng.integers(0, len(clients) + 1), replace=False)
             # In place, exactly as Model.vehicle_reaches_client mutates the list.
             world.state.clients_not_visited[:] = [int(client) for client in remaining]
-            world.state.vehicle_position[:] = [int(node) for node in rng.choice(nodes, size=3)]
+            world.state.last_node_reached[:] = [int(node) for node in rng.choice(nodes, size=3)]
             world.state.tau_episode = float(rng.integers(300, 800))
             policy.action = [int(action) for action in rng.choice(columns, size=3)]
             features = state_features(policy)
@@ -613,7 +616,10 @@ def endgame_configs(draw: st.DrawFn) -> dict[str, Any]:
     ``position == depot`` in the uncovered ``(310, 350]`` window; B11's
     duplicate booking needs the two-Client classifier branch and >=2 vehicles.
     Sweeping 0/1/2 remaining Clients keeps 0 and 2 as controls alongside 1, the
-    branch B5 actually crashes in.
+    branch B5 actually crashes in. ``standing`` sweeps ticket 04's fact
+    independently of ``at_depot`` — a vehicle can read ``last_node_reached ==
+    depot`` while merely having crossed it (``standing=False``), which is
+    exactly the state B1a/B1b need distinguished from genuinely parked there.
     """
     vehicle_count = draw(st.integers(1, 4))
     return {
@@ -621,6 +627,7 @@ def endgame_configs(draw: st.DrawFn) -> dict[str, Any]:
         "remaining": draw(st.integers(0, 2)),
         "vehicle_count": vehicle_count,
         "at_depot": draw(st.lists(st.booleans(), min_size=vehicle_count, max_size=vehicle_count)),
+        "standing": draw(st.lists(st.booleans(), min_size=vehicle_count, max_size=vehicle_count)),
     }
 
 
@@ -631,7 +638,7 @@ def make_endgame_world(vehicle_count: int) -> World:
     """Two Clients, a fleet of ``vehicle_count``, plus one node away from the depot.
 
     The test body overwrites ``clients_not_visited``/``tau_episode``/
-    ``vehicle_position`` per Hypothesis example; construction just needs a
+    ``last_node_reached`` per Hypothesis example; construction just needs a
     world the Policy can build a greedy initial decision from (ticket 13's
     constructor draw needs a non-empty ``clients_not_visited``).
     """
@@ -643,9 +650,10 @@ def make_endgame_world(vehicle_count: int) -> World:
 def _apply_endgame_config(world: World, config: dict[str, Any]) -> None:
     world.state.clients_not_visited[:] = [1, 2][: config["remaining"]]
     world.state.tau_episode = config["tau"]
-    world.state.vehicle_position[:] = [
+    world.state.last_node_reached[:] = [
         DEPOT if at_depot else AWAY_FROM_DEPOT for at_depot in config["at_depot"]
     ]
+    world.state.vehicle_standing[:] = config["standing"]
 
 
 class TestEndgameInvariants:
@@ -687,3 +695,41 @@ class TestEndgameInvariants:
 
         non_depot = [action for action in actions if action != DEPOT]
         assert len(non_depot) == len(set(non_depot)), f"duplicate non-depot assignment: {actions}"
+
+
+class TestB1aDepotIdleGuard:
+    """Ticket 04 (ADR-0005): ``last_node_reached == depot`` alone must not idle a vehicle.
+
+    The review's headline finding: a vehicle that merely crossed the depot as
+    an interior waypoint (6.8% of cached shortest paths use it as one) reads
+    the same ``last_node_reached`` a genuinely parked vehicle would, and used
+    to be limited to the depot as its only candidate action past ``tau=350``
+    — taking it out of service while Clients were still pending.
+    """
+
+    def test_a_vehicle_that_only_crossed_the_depot_is_not_limited_to_it(self):
+        world = make_endgame_world(1)
+        policy = make_policy(world, W=np.zeros(19))
+        world.state.clients_not_visited[:] = [1, 2]
+        world.state.tau_episode = 351.0  # past the depot-idle literal (350)
+        world.state.last_node_reached[:] = [DEPOT]
+        world.state.vehicle_standing[:] = [False]  # crossed it, never stopped
+
+        features = state_features(policy)
+        actions = policy._select_vehicle_possible_actions(2, 0, features)
+
+        assert DEPOT not in actions, f"a mid-arc vehicle was exiled to the depot: {actions}"
+
+    def test_a_vehicle_genuinely_parked_past_350_is_still_limited_to_the_depot(self):
+        """The branch's intended, frequent case: unaffected by the fix."""
+        world = make_endgame_world(1)
+        policy = make_policy(world, W=np.zeros(19))
+        world.state.clients_not_visited[:] = [1, 2]
+        world.state.tau_episode = 351.0
+        world.state.last_node_reached[:] = [DEPOT]
+        world.state.vehicle_standing[:] = [True]
+
+        features = state_features(policy)
+        actions = policy._select_vehicle_possible_actions(2, 0, features)
+
+        assert actions == [DEPOT]

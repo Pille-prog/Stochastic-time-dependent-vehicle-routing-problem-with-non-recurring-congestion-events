@@ -16,7 +16,14 @@ fixture and regardless of policy quality:
   ``[start + 30, start + max_congestion_duration]``;
 - the Episode total cost equals distance + delay + earliness + overtime, up to
   float accumulation order (the legacy double-charged the terminating
-  transition past the horizon; fixed in ticket 12, ADR-0001 change log).
+  transition past the horizon; fixed in ticket 12, ADR-0001 change log);
+- no vehicle becomes ``PARKED`` while mid-arc (ticket 04, simulator-correctness,
+  B1a/B1b, ADR-0005 — the review's own proposed invariant). One check for two
+  catalogue rows, not two independent measurements: a vehicle wrongly parked
+  mid-arc is simultaneously "``PARKED`` while travelling" and "the recorded
+  node changed with the remaining arc's distance never charged" — the review
+  measured these as the same event, never separately (``docs/simulator-review.md``,
+  B1b).
 
 Randomness comes from real gauss draws: the module fixture builds a multi-day
 traffic world by deterministically perturbing the fixture day's speeds, giving
@@ -51,6 +58,7 @@ from stdvrp.demand import ClientGenerator
 from stdvrp.network import ShortestPathCache
 from stdvrp.simulation import run_evaluation_episode
 from stdvrp.simulation.episode_velocities import ArcVelocity, EpisodeVelocities
+from stdvrp.simulation.fleet_routes import PARKED
 from stdvrp.simulation.model import Model
 from stdvrp.simulation.state import State
 from stdvrp.traffic import CsvDataSource, TravelTimeModel
@@ -168,6 +176,34 @@ class RecordingModel(Model):
             if self.state.tau_episode >= event[1]
         ]
         assert not expired, f"expired congestion entries survived a clock advance: {expired}"
+
+    def _reroute_for(self, action: list[int]) -> None:
+        """Ticket 04 (B1a/B1b, ADR-0005): no vehicle becomes ``PARKED`` mid-arc.
+
+        Watches, before rerouting, every vehicle genuinely mid-arc
+        (``not vehicle_standing`` and ``departure_tau < tau < arrival_tau`` —
+        the two facts agree by construction once the fix holds) and asserts
+        none of them is ``PARKED`` afterward. One assertion for two catalogue
+        rows (see the module docstring): a violation here is simultaneously
+        "``PARKED`` while travelling" and "the recorded node changed with the
+        remaining arc's distance never charged".
+        """
+        fleet = self.fleet
+        state = self.state
+        tau = state.tau_episode
+        mid_arc = [
+            vehicle
+            for vehicle in range(self.number_vehicles)
+            if not state.vehicle_standing[vehicle]
+            and fleet.is_travelling(vehicle)
+            and fleet.departure_tau[vehicle] < tau < fleet.arrival_tau[vehicle]
+        ]
+        super()._reroute_for(action)
+        for vehicle in mid_arc:
+            assert fleet.arrival_tau[vehicle] != PARKED, (
+                f"vehicle {vehicle} became PARKED while mid-arc at tau={tau} "
+                f"(departure_tau={fleet.departure_tau[vehicle]})"
+            )
 
 
 class RecordingCongestionGenerator(CongestionGenerator):

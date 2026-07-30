@@ -7,8 +7,8 @@ Simulation and policy-optimization laboratory for the Stochastic Time-Dependent 
 ### Sequential decision core (Powell)
 
 **State**:
-The information available to make a decision at a point in simulated time: vehicle positions, pending clients, current velocities, elapsed time.
-_Avoid_: snapshot, context
+The information available to make a decision at a point in simulated time: vehicle positions, pending clients, current velocities, elapsed time. "Vehicle position" is not one field: `last_node_reached` is only the last node a vehicle reached — it can be strictly mid-arc, having merely driven through that node on the way somewhere else — while `vehicle_standing` is the separate fact of whether the vehicle is actually standing there (parked, serving, or holding) rather than travelling past it (ticket 04, simulator-correctness, B1a/B1b, ADR-0005). The depot is not only the fleet's starting point — it is an interior node on 6.8% of cached shortest paths — so `last_node_reached == depot` is true for vehicles genuinely parked *and* for vehicles merely passing through; only `vehicle_standing` tells them apart.
+_Avoid_: snapshot, context; treating `last_node_reached == depot` as "the vehicle is home" — that also needs `vehicle_standing`
 
 **Policy**:
 A rule that maps a State to a decision (which client each vehicle serves next). The first axis of variation: static, dynamic, Monte Carlo, Q-learning variants implement one interface.

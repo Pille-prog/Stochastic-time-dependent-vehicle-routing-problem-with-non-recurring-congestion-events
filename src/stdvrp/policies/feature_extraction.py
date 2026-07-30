@@ -83,6 +83,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from stdvrp.network.episode_geometry import EpisodeGeometry
+from stdvrp.simulation.state import is_parked_at_depot
 
 if TYPE_CHECKING:
     from stdvrp.simulation.state import State, TrainingSnapshot
@@ -192,9 +193,11 @@ class FeatureExtractor:
         active = np.zeros(self._column_count, dtype=np.bool_)
         active[self._geometry.column_positions(remaining)] = True
 
-        positions = state.vehicle_position
+        positions = state.last_node_reached
         vehicle_minutes = self._geometry.average_minutes_rows(positions)
-        counts, delayed = self._classify_closest_clients(tau, active, vehicle_minutes, positions)
+        counts, delayed = self._classify_closest_clients(
+            tau, active, vehicle_minutes, positions, state.vehicle_standing
+        )
 
         return StateFeatures(
             general=self._general_features(tau, len(remaining), active),
@@ -271,6 +274,7 @@ class FeatureExtractor:
         active: NDArray[np.bool_],
         vehicle_minutes: NDArray[np.float64],
         positions: Sequence[float],
+        standing: Sequence[bool],
     ) -> tuple[NDArray[np.int64], tuple[tuple[int, ...], ...]]:
         """Ports ``clasify_delayed_clients`` — duplicate-append quirk and all.
 
@@ -297,10 +301,14 @@ class FeatureExtractor:
         column_count = self._column_count
         empty_delayed = tuple(() for _ in range(vehicle_count))  # type: tuple[tuple[int, ...], ...]
 
+        # Ticket 04 (ADR-0005): idle-at-depot requires ``standing`` too — a
+        # vehicle mid-arc past the depot (an interior waypoint on 6.8% of
+        # cached shortest paths) reads ``position == depot`` but is not idle
+        # and must stay eligible.
         eligible = [
             vehicle
-            for vehicle, position in enumerate(positions)
-            if not (position == self._depot and tau > _DEPOT_IDLE_CUTOFF)
+            for vehicle, (position, is_standing) in enumerate(zip(positions, standing, strict=True))
+            if not (is_parked_at_depot(position, is_standing, self._depot) and tau > _DEPOT_IDLE_CUTOFF)
         ]
         columns = np.flatnonzero(active)
         if not eligible or columns.size == 0:

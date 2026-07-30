@@ -164,12 +164,14 @@ class BenchModel(Model):
         "comparten disparador y en las mediciones nunca aparecen por separado" —
         of 71 mid-arc retirements, all 71 came from the one depot-idle trigger).
         A count here is evidence for both rows; it is not two independent
-        measurements, and ticket 04 still owes each row its own property test
-        once the State carries the fact this bench cannot observe directly.
+        measurements. Ticket 04 (ADR-0005) gave ``State`` the fact this bench
+        used to reach into ``fleet`` internals for (``state.vehicle_standing``);
+        both this probe and ``tests/test_invariants.py``'s dedicated property
+        now agree it stays at zero.
 
         Mirrors the review's own reproduction probe (``docs/simulator-review.md``,
         "Reproducción"): watch vehicles that, before rerouting, are travelling
-        (``departure_tau < tau < arrival_tau``) with ``vehicle_position == depot``
+        (``departure_tau < tau < arrival_tau``) with ``last_node_reached == depot``
         and ``action == depot``; count the ones ``PARKED`` afterward.
 
         A wrongly-parked vehicle never revives (``is_travelling`` is permanently
@@ -187,7 +189,7 @@ class BenchModel(Model):
             for v in range(len(action))
             if v not in self._counted_mid_arc_park
             and action[v] == self.depot
-            and self.state.vehicle_position[v] == self.depot
+            and self.state.last_node_reached[v] == self.depot
             and fleet.is_travelling(v)
             and fleet.departure_tau[v] < tau < fleet.arrival_tau[v]
         ]

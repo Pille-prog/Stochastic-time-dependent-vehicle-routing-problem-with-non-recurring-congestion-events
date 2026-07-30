@@ -788,8 +788,8 @@ sequenceDiagram
         </div>
         <div class="card">
           <h4>TrainingSnapshot <span class="filepath">state.py — frozen dataclass</span></h4>
-          <p class="role">Immutable capture of the four State fields <code>update_W</code>'s replay reads (cheaper than <code>copy.deepcopy(state)</code>). One snapshot taken before every training transition.</p>
-          <ul class="methods"><li><code>capture(state)</code> — copies <code>tau_episode</code>, <code>clients_not_visited</code>, <code>vehicle_position</code>, <code>observed_velocity</code>.</li></ul>
+          <p class="role">Immutable capture of the five State fields <code>update_W</code>'s replay reads (cheaper than <code>copy.deepcopy(state)</code>). One snapshot taken before every training transition.</p>
+          <ul class="methods"><li><code>capture(state)</code> — copies <code>tau_episode</code>, <code>clients_not_visited</code>, <code>last_node_reached</code>, <code>vehicle_standing</code>, <code>observed_velocity</code>.</li></ul>
         </div>
         <div class="card">
           <h4>Model <span class="filepath">model.py</span></h4>

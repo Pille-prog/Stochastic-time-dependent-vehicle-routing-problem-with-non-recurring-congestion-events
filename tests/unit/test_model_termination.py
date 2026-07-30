@@ -83,14 +83,14 @@ class TestAllVehiclesComeBack:
 class TestPassingHorizonOvertimeGuard:
     def test_no_overtime_when_shift_end_outlives_the_actual_termination_clock(self):
         model = make_terminating_model(tau=1148.0)
-        model.state.vehicle_position = [CLIENT]  # still out on the road, not home
+        model.state.last_node_reached = [CLIENT]  # still out on the road, not home
         model.shift_end_minute = 1200.0
         model.terminate_state_passing_horizon()
         assert model.costs.overtime_cost == 0
 
     def test_overtime_is_still_charged_when_shift_end_precedes_the_clock(self):
         model = make_terminating_model(tau=1148.0)
-        model.state.vehicle_position = [CLIENT]
+        model.state.last_node_reached = [CLIENT]
         model.shift_end_minute = 780.0
         model.terminate_state_passing_horizon()
         assert model.costs.overtime_cost == (1148.0 - 780.0) * (5 / 6)
@@ -100,6 +100,24 @@ class TestPassingHorizonOvertimeGuard:
         model.shift_end_minute = 780.0  # depot, from make_terminating_model's default
         model.terminate_state_passing_horizon()
         assert model.costs.overtime_cost == 0
+
+
+class TestOvertimeCountsGenuineDepotCrossing:
+    """Ticket 04 (simulator-correctness, ADR-0005): "home" means genuinely parked.
+
+    Before the fix, ``vehicles_out`` counted only ``last_node_reached != depot``
+    — a vehicle mid-arc past the depot (an interior waypoint on 6.8% of cached
+    shortest paths) reads ``last_node_reached == depot`` and was silently
+    excluded from ever owing overtime.
+    """
+
+    def test_a_vehicle_mid_arc_past_the_depot_still_owes_overtime(self):
+        model = make_terminating_model(tau=1148.0)
+        model.state.last_node_reached = [0]  # crossed the depot, per vehicle_reaches_node
+        model.state.vehicle_standing = [False]  # ...but never stopped
+        model.shift_end_minute = 780.0
+        model.terminate_state_passing_horizon()
+        assert model.costs.overtime_cost == (1148.0 - 780.0) * (5 / 6)
 
 
 @st.composite
