@@ -131,9 +131,13 @@ def make_update_world():
 def hand_computed_features() -> np.ndarray:
     """The 19 features of the update world for action [1], derived on paper.
 
-    General state (12): polynomial terms of clients-left and normalized time; the
-    earliness bins hold only Client 2 (window start 450 in [400, 500), tau < 500);
-    the mean-earliness diff is 0 because mean earliness == tau == 400.
+    General state (12): polynomial terms of clients-left and normalized time.
+    Bin 1 holds Client 2 (window start 450 in [400, 500), tau < 500). Bin 0
+    would hold Client 1 (window start 350 < 400), but tau == 400 already gates
+    it shut (``tau < 400`` is false) — so Client 1 falls into bin 3 instead
+    (B10: the fourth bin is whatever the first three leave uncounted, keeping
+    the four bins a partition of the two pending Clients). The mean-earliness
+    diff is 0 because mean earliness == tau == 400.
     State-action (7) for sending the vehicle from the depot to Client 1: distance
     5 km; arrival 400 + 10 breaches Client 1's due time 400 by 10 minutes; no
     earliness, future delay or overtime; the second feature is the preserved
@@ -153,7 +157,7 @@ def hand_computed_features() -> np.ndarray:
         0.0,
         1 / 2,
         0.0,
-        0.0,
+        1 / 2,
         0.0,
     ]
     state_action = [0.0, 0.0, 5 / 100, 0.0, 10 / 60, 0.0, 0.0]

@@ -28,8 +28,12 @@ columns flagged in :attr:`StateFeatures.active`.
   cost +15-25% across every action count — for a ~4% throughput gain. The user
   rejected adoption on that evidence; the quirk stays as the sole, deliberate
   implementation (see the ticket's ``## Comments`` for the full numbers);
-- the permanently-zero state-action feature, which is what pads ``W`` to its
-  legacy 19 components and keeps stored weight vectors valid;
+- the permanently-zero state-action feature (``X[:, 13]``), which is what pads
+  ``W`` to its legacy 19 components and keeps stored weight vectors valid. It
+  is, after simulator-correctness ticket 06 (below), the *only* deliberately
+  dead weight: ``final_w[13] == 0.0`` by design. Before that ticket, ``W[10]``
+  was dead too, but by accident — it never trained because feature 10 was
+  identically zero;
 - every normalization literal (150, 850, 1150, 13, 60, 100, 180, 2500, the
   400/500/600 earliness bins, the 310 depot-idle cutoff), which are part of the
   feature *definition* and stay literal;
@@ -46,6 +50,18 @@ third such site — a BLAS ``gemv`` rather than 19-term dot products.) The
 general-state features stay bit-exact: their only sum is over time-window starts,
 which are integers. See the ticket ``## Comments`` for what this measures out to on
 the committed fixture.
+
+**B10 fixed (simulator-correctness ticket 06).** The legacy's fourth earliness
+bin (``general[10]``) was never assigned, so it was identically zero and
+``W[10]`` never trained. :meth:`FeatureExtractor._general_features` now assigns
+it as *whatever the first three bins leave uncounted* — not redefined as "a
+Client whose window opens at minute 600 or later", because a bin also drops to
+zero once ``tau`` passes its own gate (e.g. bin 0 once ``tau >= 400``) while its
+Clients are still pending. Bin 3 absorbs those too. This keeps the invariant
+the four bins exist to satisfy: they partition pending demand, at every
+``tau`` — the four fractions in ``general[7:11]`` always sum to
+``len(clients_not_visited) / number_clients``. The bin *boundaries*
+(400/500/600) are unchanged; only the bin that was missing is filled in.
 """
 
 from __future__ import annotations
@@ -212,6 +228,13 @@ class FeatureExtractor:
             counts_earliness[1] = int(np.count_nonzero((earliness >= 400) & (earliness < 500)))
         if tau < 600:
             counts_earliness[2] = int(np.count_nonzero((earliness >= 500) & (earliness < 600)))
+        # B10: the fourth bin is whatever the first three leave uncounted — not
+        # redefined as "earliness >= 600", because a bin above also goes to zero
+        # once tau passes its own gate (e.g. bin 0 at tau >= 400) even though its
+        # Clients are still pending. Bin 3 absorbs those too, so the four counts
+        # always partition pending demand: they sum to `remaining_count` at every
+        # tau, which is exactly the invariant this bin exists to satisfy.
+        counts_earliness[3] = remaining_count - sum(counts_earliness[:3])
 
         mean_earliness_diff = 0.0
         if (580 - tau) / (280) > 0 and remaining_count != 0:

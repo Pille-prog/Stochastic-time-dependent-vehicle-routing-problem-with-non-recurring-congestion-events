@@ -8,6 +8,12 @@ is :class:`LoopReference` — the pre-ticket-05 ``MonteCarloPolicy`` bodies
 **including the duplicate-append quirk**. Every test drives both over the same
 randomized worlds and States and asserts they agree.
 
+Simulator-correctness ticket 06 (B10) is the one deliberate exception: the
+loop's fourth earliness bin was never assigned, so ``LoopReference`` carries
+the same one-line fix as :class:`~stdvrp.policies.feature_extraction.FeatureExtractor`
+rather than reproducing that bug. Both sides must move together, or this file
+would stop testing that the vectorization matches the (corrected) definition.
+
 Two tolerances, deliberately:
 
 * ``rtol=0`` (bit-exact) for the general-state features, the delayed-Client
@@ -117,6 +123,12 @@ class LoopReference:
                 client_counts_earliness[1] += 1
             elif 500 <= i < 600 and self.state.tau_episode < 600:
                 client_counts_earliness[2] += 1
+
+        # B10 fix: the fourth bin is whatever the first three left uncounted,
+        # so the four bins always partition clients_not_visited.
+        client_counts_earliness[3] = len(self.state.clients_not_visited) - sum(
+            client_counts_earliness[:3]
+        )
 
         for count in client_counts_earliness:
             self.X_general_state.append(count / self.number_clients)
@@ -348,6 +360,25 @@ class TestGeneralStateFeatureParity:
 
         assert produced.shape == (12,)
         np.testing.assert_array_equal(produced, np.array(expected, dtype=np.float64))
+
+
+class TestEarlinessBinPartition:
+    """B10: the four earliness bins partition pending demand, at every tau.
+
+    ``general[7:11]`` are ``count / number_clients`` for the four earliness
+    bins; their sum must equal ``len(clients_not_visited) / number_clients``
+    regardless of which of the tau-gated bins is open, so that no pending
+    Client is ever counted by zero bins.
+    """
+
+    @pytest.mark.parametrize("scenario, state", ALL_SCENARIOS)
+    def test_the_four_bins_sum_to_pending_clients(self, scenario, state):
+        features = scenario.extractor().state_features(state)
+
+        produced = float(np.sum(features.general[7:11]))
+        expected = len(state.clients_not_visited) / scenario.number_clients
+
+        assert produced == pytest.approx(expected, abs=1e-9)
 
 
 class TestStateActionFeatureParity:
