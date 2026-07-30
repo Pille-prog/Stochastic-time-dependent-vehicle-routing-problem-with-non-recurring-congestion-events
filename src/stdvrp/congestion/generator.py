@@ -18,6 +18,13 @@ Phase-2 deliberate fixes (ticket 12, ADR-0001 change log): the spread walks the
 full ``max_depth`` (the legacy passed ``max_depth - 1``, leaving the depth-3
 damping dead), and spread multipliers saturate at ``congestion_upper_bound``
 (damping divides by a factor < 1, which let them exceed the configured bound).
+
+Ticket 07 fix (B7, ADR-0001 change log): every write to ``congested_arcs``
+composes with a still-active existing entry instead of replacing it outright —
+see :func:`_compose_congestion`. The legacy (and the phase-1 port) let a later,
+milder or shorter-lived event overwrite an earlier, still-active one wholesale,
+which could silently end an arc's congestion up to ``max_congestion_duration``
+early.
 """
 
 from __future__ import annotations
@@ -30,6 +37,28 @@ import numpy as np
 ArcKey = tuple[float, float]
 # velocity multiplier applied while congested, minute the event ends.
 CongestedArcs = dict[ArcKey, list[float]]
+
+
+def _compose_congestion(
+    congested_arcs: CongestedArcs,
+    arc: ArcKey,
+    event: list[float],
+    minute_start: float,
+) -> None:
+    """Write one congestion ``event`` to ``arc``, composing with an active existing one.
+
+    B7: a write never shortens an active event's expiry and never makes an
+    active arc faster. ``arc``'s existing entry (if any) is "active" when its
+    expiry is still ahead of ``minute_start`` — the same threshold
+    :meth:`EpisodeVelocities.sample` uses to treat an event as lifted. Against
+    an active entry the write keeps the more severe multiplier (the smaller
+    one) and the later expiry; an absent or already-expired entry is replaced
+    outright, since there is nothing live to preserve.
+    """
+    existing = congested_arcs.get(arc)
+    if existing is not None and existing[1] > minute_start:
+        event = [min(event[0], existing[0]), max(event[1], existing[1])]
+    congested_arcs[arc] = event
 
 
 class CongestionGenerator(ABC):
@@ -85,10 +114,15 @@ class ArcProbabilityCongestionGenerator(CongestionGenerator):
                     )
                     state_time_elimination = rng.uniform(30, self.max_congestion_duration)
 
-                    congested_arcs[(float(node_start_congestion), float(node_end_congestion))] = [
-                        float(velocity_penalization),
-                        float(minute_start + state_time_elimination),
-                    ]
+                    _compose_congestion(
+                        congested_arcs,
+                        (float(node_start_congestion), float(node_end_congestion)),
+                        [
+                            float(velocity_penalization),
+                            float(minute_start + state_time_elimination),
+                        ],
+                        minute_start,
+                    )
 
                     for node in congestion_road:
                         # Phase-2 fix (ticket 12, ADR-0001 change log): the legacy
@@ -121,17 +155,15 @@ class ArcProbabilityCongestionGenerator(CongestionGenerator):
                                     velocity_penalization / factor,
                                     self.congestion_upper_bound,
                                 )
-                                if (node_start, affected_node) in congested_arcs and (
-                                    congested_arcs[(node_start, affected_node)][1] > minute_start
-                                    and congested_arcs[(node_start, affected_node)][0]
-                                    <= velocity_penalization_for_depth
-                                ):
-                                    continue
-
-                                congested_arcs[(float(node_start), float(affected_node))] = [
-                                    float(velocity_penalization_for_depth),
-                                    float(minute_start + state_time_elimination),
-                                ]
+                                _compose_congestion(
+                                    congested_arcs,
+                                    (float(node_start), float(affected_node)),
+                                    [
+                                        float(velocity_penalization_for_depth),
+                                        float(minute_start + state_time_elimination),
+                                    ],
+                                    minute_start,
+                                )
 
     def _reachable_nodes(
         self,

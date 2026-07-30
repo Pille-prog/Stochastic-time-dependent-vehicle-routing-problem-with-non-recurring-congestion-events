@@ -106,14 +106,54 @@ class TestEventValues:
 
         assert congested[(2.0, 3.0)] == [0.1, 400.0]
 
-    def test_weaker_existing_event_is_overwritten(self):
+    def test_weaker_existing_event_is_overwritten_but_keeps_the_later_expiry(self):
+        # B7: the new event is more severe (0.2 < 0.9) but shorter-lived (duration
+        # 30 => expiry 330) than the still-active existing one (expiry 400). The
+        # write must take the more severe multiplier *and* the later expiry —
+        # never regress the expiry just because the multiplier improved.
         generator = make_generator({(1, 2): 1.0}, lower=0.2, upper=0.2)
-        congested: dict = {(2.0, 3.0): [0.9, 400.0]}  # weaker (higher multiplier)
+        congested: dict = {(2.0, 3.0): [0.9, 400.0]}  # weaker (higher multiplier), active
         rng = ScriptedRng([0.0, 0.2, 30.0])
 
         generator.generate(300, congested, rng)
 
-        assert congested[(2.0, 3.0)][0] != 0.9
+        assert congested[(2.0, 3.0)] == [0.2, 400.0]
+
+    def test_primary_write_composes_with_a_stronger_active_existing_event(self):
+        # B7 at the direct-write site (not the spread): a pre-existing, more
+        # severe and longer-lived event on the trigger arc itself must survive.
+        generator = make_generator({(1, 2): 1.0}, lower=0.5, upper=0.5)
+        congested: dict = {(1.0, 2.0): [0.1, 400.0]}  # stronger and longer, active
+        rng = ScriptedRng([0.0, 0.5, 30.0])
+
+        generator.generate(300, congested, rng)
+
+        assert congested[(1.0, 2.0)] == [0.1, 400.0]
+
+    def test_primary_write_never_shortens_an_active_expiry(self):
+        # B7's dominant defect, at the direct-write site: the new event is more
+        # severe (0.2) but shorter (duration 30 => expiry 330) than the existing,
+        # still-active one (expiry 400). Composing must keep 0.2 (more severe)
+        # *and* 400.0 (later) — the pre-fix code overwrote both fields, giving
+        # [0.2, 330.0] and ending the congestion 70 minutes early.
+        generator = make_generator({(1, 2): 1.0}, lower=0.2, upper=0.2)
+        congested: dict = {(1.0, 2.0): [0.9, 400.0]}  # weaker but longer-lived, active
+        rng = ScriptedRng([0.0, 0.2, 30.0])
+
+        generator.generate(300, congested, rng)
+
+        assert congested[(1.0, 2.0)] == [0.2, 400.0]
+
+    def test_an_expired_existing_event_is_fully_overwritten(self):
+        # Not "active" (its expiry is exactly minute_start): compose must not
+        # keep an entry that has already lifted, however severe it was.
+        generator = make_generator({(1, 2): 1.0}, lower=0.5, upper=0.5)
+        congested: dict = {(1.0, 2.0): [0.05, 300.0]}  # very severe, but expired
+        rng = ScriptedRng([0.0, 0.5, 30.0])
+
+        generator.generate(300, congested, rng)
+
+        assert congested[(1.0, 2.0)] == [0.5, 330.0]
 
 
 class TestPhase2Fixes:
