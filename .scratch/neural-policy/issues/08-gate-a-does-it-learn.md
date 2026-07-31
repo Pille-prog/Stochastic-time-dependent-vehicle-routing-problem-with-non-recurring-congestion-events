@@ -4,7 +4,10 @@
 network learned anything at all. This is the **hard landing gate** of the
 effort — independent of whether it beats the baseline.
 
-**Blocked by:** 07
+**Blocked by:** 07, and `simulator-correctness`/11 (B20 — a crash in the shared
+`Model._reroute_for` reached by this Policy's action set; it blocks the real
+run, and its Client filter changes every decision, so any Gate A number
+gathered before it lands is void)
 
 **Status:** open
 

@@ -1,6 +1,15 @@
 # Spec: Simulator correctness — the simulator does what it says it does
 
-Status: closed (ticket 10, 2026-07-30 — see "Closing status" below)
+Status: reopened (ticket 11, 2026-07-31 — B20) · was closed at ticket 10,
+2026-07-30, see "Closing status" below
+
+**Why reopened.** Ticket 10 closed this effort on the criterion *"the next
+defect of this shape fails a test instead of surviving until someone reads the
+code"*. B20 (`issues/11-an-action-must-be-executable.md`) is exactly that
+shape and failed no test — it crashed a `neural-policy` training run. The three
+artefacts it needs edited are this effort's own deliverables: the catalogue
+(`docs/simulator-review.md`), an ADR-0005 consequence, and
+`tests/test_invariants.py`.
 
 ## Goal
 
