@@ -42,8 +42,6 @@ test_action_counts: [2]
 test_seeds: [100, 101]
 test_vehicle_counts: [4, 4]
 
-static_policy_mean_cost: null
-
 # Neural policy (ticket 03): same architecture as the real configs — the mini
 # fixture's job is exercising the config/tokenizer plumbing, not a smaller net.
 neural_d_model: 128

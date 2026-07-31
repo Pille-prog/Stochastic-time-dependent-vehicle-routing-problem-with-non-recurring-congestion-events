@@ -63,7 +63,6 @@ def make_config(**overrides: Any) -> ExperimentConfig:
         "test_action_counts": (2,),
         "test_seeds": (100, 101),
         "test_vehicle_counts": (6, 5),
-        "static_policy_mean_cost": None,
         "neural_d_model": 128,
         "neural_n_layers": 3,
         "neural_n_heads": 4,

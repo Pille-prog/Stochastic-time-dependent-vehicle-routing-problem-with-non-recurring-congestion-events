@@ -58,11 +58,6 @@ test_vehicle_counts: [6, 5, 5, 7, 7, 6, 6, 5, 6, 5,
                       4, 4, 5, 4, 5, 6, 8, 5, 5, 7,
                       5, 7, 6, 6, 4, 6, 7, 5, 6, 6]
 
-# Legacy plot baseline for THIS parameter combination (upper bound 0.4, duration
-# 120, 150 mean clients). The legacy's full 16-entry lookup table lives in the
-# `legacy-monolith` tag (lines 6153-6203); each config carries only its own value.
-static_policy_mean_cost: 2490
-
 # Neural policy (ticket 03): spec.md's "Starting architecture" — a starting
 # point, tuned on the evaluation seeds only, not a frozen constant.
 neural_d_model: 128

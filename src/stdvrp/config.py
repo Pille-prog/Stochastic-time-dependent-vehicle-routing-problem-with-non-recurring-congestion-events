@@ -3,8 +3,13 @@
 Replaces the legacy comma-separated ``sys.argv`` string plus the values that were
 hardcoded across ``main()``, ``training_and_testing`` and ``model`` (horizon 300-780,
 ``n_arcs=3``, warm-up learning rate 1e-6, evaluation seeds 100000-100049, data file
-paths, the ``mean_static_policy`` plot baseline). One YAML file per experiment,
-versioned next to the experiment.
+paths). One YAML file per experiment, versioned next to the experiment.
+
+The legacy's hardcoded ``mean_static_policy`` plot baseline lived here as
+``static_policy_mean_cost`` through simulator-correctness; ticket 01
+(neural-policy) retired it in favour of ``ReferenceCard``
+(``stdvrp.training.reference_card``) — a frozen per-seed cost vector, which
+supports the paired comparison a single scalar cannot.
 """
 
 from __future__ import annotations
@@ -82,9 +87,6 @@ class ExperimentConfig:
     test_action_counts: tuple[int, ...]
     test_seeds: tuple[int, ...]
     test_vehicle_counts: tuple[int, ...]
-
-    # Plot baseline (was a hardcoded lookup table keyed by experiment parameters).
-    static_policy_mean_cost: float | None
 
     # Neural policy (ticket 03, neural-policy): the transformer approximator's
     # architecture, tunable on the evaluation seeds only (spec.md's "Starting
@@ -166,8 +168,6 @@ class ExperimentConfig:
             )
         if not 0 <= self.epsilon <= 1:
             raise ValueError("epsilon must be in [0, 1]")
-        if self.static_policy_mean_cost is not None and self.static_policy_mean_cost <= 0:
-            raise ValueError("static_policy_mean_cost must be positive or null")
         for name in ("neural_d_model", "neural_n_layers", "neural_n_heads"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -224,10 +224,6 @@ class ExperimentConfig:
         if values["warmup_learning_rate"] is not None:
             values["warmup_learning_rate"] = _require_float(
                 path, "warmup_learning_rate", values["warmup_learning_rate"]
-            )
-        if values["static_policy_mean_cost"] is not None:
-            values["static_policy_mean_cost"] = _require_float(
-                path, "static_policy_mean_cost", values["static_policy_mean_cost"]
             )
         for name in ("links_file", "shortest_paths_file", "device"):
             if not isinstance(values[name], str) or not values[name]:
