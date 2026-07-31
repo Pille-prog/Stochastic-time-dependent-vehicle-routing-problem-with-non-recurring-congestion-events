@@ -59,6 +59,38 @@ def test_resolve_device_with_torch() -> None:
 
 
 @pytest.mark.neural
+def test_resolve_device_cpu_does_not_force_deterministic_algorithms() -> None:
+    """ "cuda" opts into determinism (see module docstring); "cpu" needs no such
+    global side effect (stdvrp.policies.network's forward pass has no
+    stochastic op at all -- see its own docstring), so resolve_device("cpu")
+    must not flip a process-wide torch setting nobody asked for."""
+    torch = pytest.importorskip("torch")
+    was_enabled = torch.are_deterministic_algorithms_enabled()
+    try:
+        torch.use_deterministic_algorithms(False)
+        resolve_device("cpu")
+        assert not torch.are_deterministic_algorithms_enabled()
+    finally:
+        torch.use_deterministic_algorithms(was_enabled)
+
+
+@pytest.mark.neural
+def test_resolve_device_cuda_enables_deterministic_algorithms() -> None:
+    """Ticket 05's determinism requirement: resolve_device("cuda") must set
+    torch.use_deterministic_algorithms(True) even without CUDA hardware present
+    -- torch.device("cuda") itself never touches the GPU, so this is safe to
+    assert on CPU-only CI."""
+    torch = pytest.importorskip("torch")
+    was_enabled = torch.are_deterministic_algorithms_enabled()
+    try:
+        torch.use_deterministic_algorithms(False)
+        resolve_device("cuda")
+        assert torch.are_deterministic_algorithms_enabled()
+    finally:
+        torch.use_deterministic_algorithms(was_enabled)
+
+
+@pytest.mark.neural
 def test_resolve_device_rejects_an_invalid_device_name_like_torch_itself() -> None:
     torch = pytest.importorskip("torch")
     with pytest.raises(RuntimeError):
