@@ -8,7 +8,7 @@ diff.
 
 **Blocked by:** —
 
-**Status:** open
+**Status:** resolved
 
 **Reopens this effort.** Closed at ticket 10 (2026-07-30) on the criterion
 *"the next defect of this shape fails a test instead of surviving until
@@ -234,3 +234,105 @@ Extra latent defects surfaced while widening the suite are fixed **inside this
 ticket**, not deferred (user decision, 2026-07-31). Measured risk: a
 uniform-random full-action-space policy found **zero** new defects in 300
 episodes.
+
+## Comments
+
+### Resolution (2026-07-31)
+
+Landed exactly as scoped in "The fix":
+
+- `simulation/fleet_routes.py` — `FleetRoutes.is_at_node(vehicle, tau) ->
+  bool`, `departure_tau[vehicle] >= tau`. One call site.
+- `simulation/model.py` `_reroute_for` — the park branch's condition is now
+  `action[v] == depot and last_node_reached[v] == depot and
+  fleet.is_at_node(v, tau)`, replacing `is_parked_at_depot(...)`, and sets
+  `vehicle_standing[v] = True` on park so the seven other `is_parked_at_depot`
+  call sites (overtime accounting, both termination paths) stay correct.
+- `policies/transformer_policy.py` `_sweep` — a pending Client equal to
+  `last_node_reached[v]` is excluded from both the greedy argmin and the
+  ε-exploration candidate list, via the same `infeasible_mask` both branches
+  now share (`claimed_mask | (pending_array == vehicle_position)`). The depot
+  is never filtered.
+- `policies/monte_carlo.py` — untouched, as predicted: its own candidate
+  construction already excludes the vehicle's current node by construction.
+
+**Red-before/green-after** (decision 7): `tests/unit/test_model_reroute.py`
+gained a third `TestDepotParkForeverGuard` case that reproduces the exact
+crash — a hand-built `ShortestPathCache` with the `(depot, depot)` self-row
+the real CSV carries, `departure_tau == tau` (zero arc progress),
+`vehicle_standing = False`. Verified against the pre-fix code (`git stash` on
+the three touched source files) that it raises the documented
+`IndexError: list index out of range` at `FleetRoutes.current_arc`'s
+`route[1]`, then verified green after restoring the fix. One pre-existing
+fixture in the same file (`test_a_vehicle_genuinely_parked_at_the_depot_is_left_parked`)
+needed its `departure_tau` corrected from an arbitrary `0` to `tau` itself
+(360.0) — under the old `is_parked_at_depot` check that value was irrelevant,
+but the new positional-presence check reads it directly, so the fixture had
+to actually represent "at the node."
+
+**End-to-end regression**: `tests/unit/test_neural_episode.py` gained
+`TestSeed1131Regression`, running `run_neural_training_episode` with seed
+1131 against `chengdu_mini` (untrained network, the fixture's `epsilon: 0.1`).
+Same `git stash` verification: crashes with the identical `IndexError`
+pre-fix (vehicle 0, `route[1]`), passes post-fix.
+
+**The net, not the catch**: `tests/test_invariants.py`'s `RecordingModel._reroute_for`
+gained a route-well-formedness assertion (`len(route) >= 2`) for every
+travelling vehicle after each reroute, scoped like the review's own
+measurement. Green before and after this ticket's fix under the linear
+Policy (confirms the review's 0/600), by design — the trigger needs
+correlated fleet behaviour a Hypothesis-drawn or uniform-random Policy does
+not reproduce (measured: 0/300 uniform-random, 0/120 hand-built adversarial
+lockstep-flip-flop), so this invariant could never have caught B20 on its
+own; it is documented as the net, and the hand-built unit test plus the
+seed-1131 regression as the catch.
+
+**Also added**: `tests/unit/test_fleet_routes.py::TestIsAtNode` (the new
+fact in isolation), and `tests/unit/test_transformer_policy.py::TestSelfNodeNotACandidate`
+(three cases: greedy exclusion via a rigged `_score` that forces the
+self-node to the global minimum Q, so the assertion is on the mask, not on
+the network happening not to prefer it; ε-exploration exclusion over 30 rng
+seeds; and a control proving the depot itself is never filtered).
+
+**Documentation**: `docs/adr/0008-an-action-must-be-executable.md` (the
+decision, both halves, the rejected alternatives, and the "structurally
+invisible to fuzzing" measurement). Cross-reference pointers added to
+ADR-0005 (the `vehicle_standing`/positional-presence gap) and ADR-0007
+("that is the whole rule" is no longer the whole rule). `docs/simulator-review.md`:
+the "Ruta degenerada inicial `[0,0]`" bullet moved out of *Hipótesis
+descartadas* into a full **B20** entry (table row + section, placed after
+B19) — the review's own 120-episode measurement was correct, re-measured at
+5× the sample (600 episodes, still 0), but the *inference* ("never
+reachable") was wrong: reachability depends on the Policy's action set, not
+on `_reroute_for` alone.
+
+`neural-policy/issues/08` already carried its `Blocked by:` pointer to this
+ticket — filed that way at ticket creation, no edit needed.
+
+### Gates
+
+- `tests/test_self_golden.py`: 6/6 passed, zero diff — as predicted (the
+  widened predicate's trigger set is 0/600 for the linear Policy).
+- `tests/test_invariants.py`: 3/3 passed (Hypothesis, `derandomize=True`).
+- `tests/test_config_sweep.py`: 434/434 passed.
+- `tests/test_data_spine.py`: 21/21 passed.
+- `tests/*benchmark*`: 10/10 passed.
+- `tests/test_golden_master.py`: not applicable, as predicted — it re-runs
+  the frozen legacy monolith, untouched here.
+- Full suite (`uv run pytest -q`, project default `-m "not golden"`): **4218
+  passed, 3 deselected**, ~6m20s, including the `neural`-marked torch-gated
+  tests (torch is installed in this environment).
+- `uv run mypy src/stdvrp`: clean.
+- `uv run ruff check` / `ruff format --check` on every file this ticket
+  touched: clean except four pre-existing violations this ticket's diff does
+  not introduce (verified via `git stash` on the touched source files and
+  re-running ruff against the unstashed base) — three are the same `E501`
+  gap ticket 10 already recorded (`feature_extraction.py`, `monte_carlo.py`,
+  `model.py`, now at shifted line numbers) plus one pre-existing `RUF059` in
+  `neural_episode.py`, a file this ticket never touches. Not this ticket's to
+  fix, per the same precedent ticket 10 set.
+
+### Scope: no extra latent defects surfaced
+
+The widened suite (config sweep, full suite, self-golden) stayed green
+throughout; nothing beyond the scoped fix and its own tests was needed.

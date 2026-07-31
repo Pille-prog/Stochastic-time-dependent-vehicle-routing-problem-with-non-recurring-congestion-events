@@ -136,3 +136,12 @@ what they apply to, not their values.
   rows — "`PARKED` while travelling" and "recorded node changed without
   charged distance" — because the review measured them as the same event,
   never independently.
+
+**See also ADR-0008.** `vehicle_standing` flips to `False` the instant
+`begin_arc` launches a vehicle — the same instant `departure_tau == tau` also
+holds, zero arc progress. `is_parked_at_depot` (which requires `standing`)
+therefore misses that one instant; `_reroute_for`'s own park branch answers
+"can this vehicle park here" from positional presence
+(`FleetRoutes.is_at_node`) directly instead of from this ADR's predicate.
+Every other `is_parked_at_depot` call site is unaffected — this is a gap in
+one read site, not in the fact itself.

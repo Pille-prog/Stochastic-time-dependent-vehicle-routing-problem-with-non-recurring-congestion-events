@@ -43,6 +43,7 @@ exactamente el número por el que se elige `best_w`.
 | B17 | El libro de congestión nunca purga los eventos expirados | Bajo | 116/116 arcos expirados en el fixture |
 | B18 | El nombre sugiere "N arcos"; el diseño real es una ventana de las últimas N velocidades observadas (correcto, solo mal nombrado) | Bajo | 68 % son remuestreos del mismo arco — dato descriptivo, no un fallo |
 | B19 | El endpoint derecho de la ventana de std no es la primera observación | Bajo | Mediana 10 % de diferencia relativa en la std |
+| B20 | Una acción debe ser ejecutable: `path_between(n, n)` no lanza, y el crash aguas abajo depende del action set de la Policy — no descartado, ver *Hipótesis descartadas* de la versión anterior de este informe | **Alto** (crash) | 3 crashes / 80 episodios (transformer, ε-greedy, sin entrenar); 0/600 con `MonteCarloPolicy` lineal |
 
 ---
 
@@ -747,6 +748,109 @@ equivalente.
 
 ---
 
+### B20 — Una acción debe ser ejecutable
+
+**Severidad: alta (crash).** `src/stdvrp/simulation/model.py`, rama at-a-node de
+`_reroute_for`.
+
+**Corrección a esta misma revisión.** La primera versión de este informe clasificó la búsqueda de
+arcos auto-lazo (`path_between(n, n)`) como hipótesis descartada — *"0 búsquedas de arcos
+auto-lazo en 120 episodios"* — bajo la premisa de que `_reroute_for` reemplaza la ruta inicial
+antes del primer `begin_arc` y por tanto nunca la consulta. **La medición era correcta; la
+inferencia, no.** No es que la búsqueda sea inalcanzable — es que alcanzarla depende del *action
+set* de la Policy evaluada, y `MonteCarloPolicy` (la única evaluada entonces) construye el suyo de
+forma que nunca nombra el nodo en el que el vehículo ya está. Encontrado por el ticket 08 de
+`neural-policy` entrenando el transformer sobre Chengdu, cuyo action set (ADR-0007: "todo cliente
+pendiente no reclamado, más el depósito") sí puede nombrarlo. La cifra 6.8 % de rutas cacheadas que
+usan el depósito como nodo interior (la causa raíz de B1, más arriba) es un hallazgo relacionado
+pero distinto: `path(0→13)` en la reproducción de abajo pasa por `0→4→16→13`, así que el depósito
+se vuelve interior porque el vehículo *ya iba hacia allí* y fue redirigido a mitad de arco, no
+porque una ruta cacheada lo contenga.
+
+```python
+elif (
+    action[vehicle] == self.depot and self.state.vehicle_position[vehicle] == self.depot
+):
+    ...
+elif fleet.destination[vehicle] != action[vehicle] and fleet.is_travelling(vehicle):
+    ...
+    if fleet.departure_tau[vehicle] == self.state.tau_episode:
+        fleet.route[vehicle] = list(
+            self.shortest_path_cache.path_between(last_node_reached, vehicle_destination).nodes
+        )
+        self.begin_arc(vehicle)
+```
+
+**El hueco.** ADR-0005 define `vehicle_standing = False` en el instante exacto en que `begin_arc`
+lanza al vehículo — el mismo instante en que `departure_tau == tau` (cero progreso de arco). Ese
+instante el simulador dice a la vez "en el nodo" (por lo que corre la rama at-a-node) y "no
+parado" (por lo que el guardia `is_parked_at_depot`, que exige `standing`, no se dispara). Si la
+decisión de ese instante nombra el nodo en el que el vehículo ya está, la rama cae al re-ruteo de
+más abajo y pide `path_between(n, n)`. `all_shortest_paths.csv` contiene las 45 filas de
+autobucle (`0,0,0,0.0,0.0`), así que la búsqueda **no lanza excepción** — devuelve una ruta
+bien formada de un nodo y longitud cero. `FleetRoutes.current_arc` lee entonces `route[1]` sobre
+esa ruta de un elemento y muere con `IndexError`.
+
+Hoy solo el **depósito** es alcanzable así, porque es el único nodo que está siempre en el action
+set (ADR-0007). El caso **cliente** — un vehículo parado sobre un Client pendiente que cruzó sin
+servir — es alcanzable por construcción y falla de forma idéntica.
+
+**Disparador.** Las cuatro condiciones a la vez:
+
+1. el vehículo está *en* un nodo con progreso de arco cero (`departure_tau == tau`);
+2. `vehicle_standing` es `False` — `begin_arc` ya lo lanzó, así que el guardia
+   `is_parked_at_depot` del ticket 04 no se dispara;
+3. la decisión nombra ese mismo nodo;
+4. `fleet.destination != action` (si no, no hay re-ruteo).
+
+**Reproducción.** `tests/fixtures/chengdu_mini`, semilla **1131**, red sin entrenar, vehículo 0:
+
+| τ | evento |
+|---|---|
+| 302.0 | rumbo al Client 10, a mitad del arco `0→4`. La decisión cambia a **depósito**. Empalme a mitad de arco `[último] + path(4→0)` → ruta `[0, 4, 0]` |
+| 303.28 | cruza el nodo 4 → ruta `[4, 0]` |
+| 308.0 | la decisión cambia a **Client 13**. Empalme `[4] + path(0→13)` → ruta `[4, 0, 4, 16, 13]` — **el depósito queda ahora como waypoint interior** |
+| 308.7466 | llega al depósito como waypoint; `begin_arc` fija `departure_tau = τ`, `standing = False`. **En el mismo instante**, el vehículo 2 aparca en el depósito → termina la transición |
+| 308.7466 | `_reroute_for`: rama at-a-node, `last_node_reached = 0`, acción = `0` → `path_between(0,0)` → `[0.0]` → 💥 |
+
+La coincidencia del último paso no es azar: los vehículos 0 y 2 iban en **lockstep** —
+lanzados juntos, con rutas más cortas que comparten prefijo, y `EpisodeVelocities` memoiza la
+velocidad por (arco, minuto) — así que viajan de forma idéntica y llegan juntos. La llegada de un
+vehículo termina rutinariamente la transición en el instante exacto en que otro está cruzando un
+nodo.
+
+**Medido:**
+
+| medición | muestra | resultado |
+|---|---|---|
+| Crashes, transformer (sin entrenar, episodios de entrenamiento ε-greedy) | 80 episodios | **3** (semillas 1116, 1131, 1134) — todas en τ = 308.7466 |
+| Crash / precondición, `MonteCarloPolicy` lineal | 600 episodios (200 semillas × flotas 1/3/6) | **0 / 0** — la hipótesis descartada original, remedida a 5× la muestra |
+| Rutas degeneradas, política lineal | 600 episodios | **0** |
+| "Depósito registrado, no parado" (el estado que un guardia Policy-side tendría que excluir) | 2229 decisiones del transformer | 15 (0.67 %) — **todas** genuinamente a mitad de arco, ninguna con progreso cero |
+| Crashes, política uniforme-aleatoria de action set completo | 300 episodios | **0** |
+| Crashes, política adversarial hand-built "lockstep flip-flop" | 120 episodios | **0** |
+
+**Las dos últimas filas son el hallazgo importante.** El disparador necesita *comportamiento
+correlacionado de la flota* — vehículos lanzados juntos, en rutas que comparten prefijo,
+sincronizados por el memo per-(arco, minuto). La aleatoriedad uniforme **destruye** esa
+correlación; una Policy greedy real la produce gratis. Por eso este defecto es estructuralmente
+invisible al fuzzing, y ampliar la suite de invariantes de la forma obvia tampoco lo habría
+cazado — el catch real es un test unitario hand-built y una regresión end-to-end sobre la semilla
+observada, no un barrido de política aleatoria.
+
+**El arreglo.** ADR-0008: `FleetRoutes.is_at_node(vehicle, tau)` nombra la presencia
+posicional (`departure_tau >= tau`) que la rama de aparcar de `_reroute_for` necesita en
+lugar de `is_parked_at_depot`; `vehicle_standing` se fija `True` al aparcar por esta vía, para no
+romper los otros siete sitios que leen `is_parked_at_depot`. El caso cliente se cierra del lado de
+la Policy: `TransformerMonteCarloPolicy._sweep` excluye un Client pendiente igual a
+`last_node_reached[v]`, en la rama greedy y en la de exploración ε — el depósito nunca se filtra,
+porque conserva sus dos significados (aparcar / viajar). `monte_carlo.py` queda intacto: su propio
+candidate set ya excluye por construcción el nodo actual del vehículo. Consecuencia para
+`neural-policy`: el action set del transformer cambia, así que toda cifra de Gate A recogida antes
+de este arreglo queda invalidada.
+
+---
+
 ## Hipótesis descartadas
 
 Se probaron y **no** se sostuvieron. Se listan para que no se reinvestiguen:
@@ -759,8 +863,6 @@ Se probaron y **no** se sostuvieron. Se listan para que no se reinvestiguen:
 - **`arc_distance_travelled` superando la longitud del arco** (que daría llegadas en el pasado).
   **0 casos en 675 episodios.**
 - **Doble cobro de distancia** entre `resample_arc` y `advance_fleet_to`. No existe.
-- **Ruta degenerada inicial `[0,0]`.** Nunca se muestrea: `_reroute_for` reemplaza la ruta antes
-  del primer `begin_arc`. **0 búsquedas de arcos auto-lazo en 120 episodios.**
 - **Rotura de la identidad "total = suma de componentes"** por la transición sin commit.
   Latente pero no alcanzada (ver B11).
 - **Velocidades o std NaN** por el `dropna()` heredado. Los datos reales no tienen huecos en el

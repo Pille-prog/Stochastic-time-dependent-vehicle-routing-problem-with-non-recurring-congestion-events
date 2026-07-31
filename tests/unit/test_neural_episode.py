@@ -156,6 +156,42 @@ class TestEpisodeRunners:
         assert run() == run()
 
 
+class TestSeed1131Regression:
+    """Ticket 11 (simulator-correctness, B20, ADR-0008): the real reproduction.
+
+    Untrained network, epsilon-greedy training (the fixture's ``epsilon:
+    0.1``), seed 1131 against the committed mini fixture: two vehicles
+    launched in lockstep on prefix-sharing shortest paths arrive at the depot
+    at the exact instant the decision names it -- ``departure_tau == tau``
+    (zero arc progress) and ``vehicle_standing == False`` (``begin_arc`` had
+    already launched the vehicle). Before the fix, ``_reroute_for``'s
+    at-a-node branch routed depot -> depot and crashed in
+    ``FleetRoutes.current_arc`` at tau=308.7466. This is the only test in the
+    suite that reproduces the real failure -- it needs the *correlated* fleet
+    behaviour a real Policy produces, which uniform-random and Hypothesis-drawn
+    Policies do not (measured in the ticket: 0 crashes in 300 uniform-random
+    episodes and 120 adversarial lockstep-flip-flop episodes).
+    """
+
+    def test_training_episode_does_not_crash(self) -> None:
+        config = make_config()
+        world = EpisodeWorld.load(config)
+        state = build_neural_policy_state(config, np.random.default_rng(0))
+
+        result, loss = run_neural_training_episode(
+            seed=1131,
+            client_generator=world.client_generator,
+            travel_time_model=world.travel_time_model,
+            shortest_path_cache=world.shortest_path_cache,
+            congestion_generator=world.congestion_generator,
+            policy_state=state,
+            config=config,
+        )
+
+        assert result.total_cost >= 0
+        assert loss >= 0
+
+
 class TestRunNeuralCalibrationEpisode:
     """Greedy, capturing, read-only -- Gate A's (Q_predicted, U_t) source (ticket 08)."""
 

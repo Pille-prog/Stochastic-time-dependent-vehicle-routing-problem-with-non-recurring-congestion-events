@@ -189,6 +189,72 @@ class TestFeasibility:
             assert len(non_depot) == len(set(non_depot))
 
 
+# --- A node the vehicle is on is not a travel destination (ticket 11, B20, ADR-0008) --
+
+
+class TestSelfNodeNotACandidate:
+    """ADR-0008: a node the vehicle is already on is not a travel destination.
+
+    Only the depot has two meanings the simulator can tell apart (park vs.
+    travel); for a pending Client there is nothing to travel to, so this is a
+    Policy-side feasibility rule enforced by ``_sweep`` directly, in both the
+    greedy argmin branch and the epsilon-exploration branch -- the depot is
+    never filtered.
+    """
+
+    def test_greedy_excludes_the_vehicle_s_own_node_even_when_it_scores_lowest(self) -> None:
+        """A hard mask, not a hope that the network never prefers it.
+
+        ``_score`` is rigged to make the self-node candidate the global
+        minimum -- if the exclusion were merely incidental (the network
+        happening not to prefer it), this would expose that immediately.
+        """
+        geometry, time_windows, clients = make_world(4, seed=44)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=1)
+        own_node = clients[0]
+        state = make_state(1, pending=clients, positions=[own_node])
+
+        original_score = policy._score
+
+        def rigged_score(embeddings, vehicle, vehicle_position, pending, claimed_mask):
+            q = original_score(embeddings, vehicle, vehicle_position, pending, claimed_mask)
+            q = q.clone()
+            q[pending.index(own_node)] = -1e9
+            return q
+
+        policy._score = rigged_score
+
+        action = policy.decide(state)
+
+        assert action[0] != own_node
+
+    def test_epsilon_exploration_excludes_the_vehicle_s_own_node(self) -> None:
+        """The only pending Client is where the vehicle stands: the depot must win every time."""
+        geometry, time_windows, clients = make_world(3, seed=45)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=1, epsilon=1.0)
+        own_node = clients[0]
+        state = make_state(1, pending=[own_node], positions=[own_node])
+
+        for trial in range(30):
+            policy.exploration_rng = np.random.default_rng(trial)
+            action = policy.decide_train(state)
+            assert action[0] == DEPOT
+
+    def test_the_depot_stays_feasible_even_when_the_vehicle_is_on_it(self) -> None:
+        """Only a pending Client is excluded -- the depot keeps both its meanings."""
+        geometry, time_windows, clients = make_world(3, seed=46)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=1, epsilon=1.0)
+        state = make_state(1, pending=clients, positions=[DEPOT])
+
+        seen = set()
+        for trial in range(30):
+            policy.exploration_rng = np.random.default_rng(trial)
+            action = policy.decide_train(state)
+            seen.add(action[0])
+
+        assert DEPOT in seen
+
+
 # --- One encoder pass per decision epoch --------------------------------------
 
 

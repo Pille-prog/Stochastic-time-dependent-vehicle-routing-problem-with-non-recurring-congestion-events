@@ -15,14 +15,17 @@ package-import time. Callers import it explicitly:
 are hand-engineered ranking built for the linear baseline's small candidate
 pool. None of it applies here: **feasible = every pending Client not already
 claimed by another vehicle this decision, plus the depot (always legal)**.
-That is the whole action rule (spec.md, ticket 06). The no-double-booking rule
-(the B11 invariant) survives as a **constraint** on the argmin's candidate set
-— enforced by :meth:`TransformerMonteCarloPolicy._sweep` directly, never
+That was the whole action rule at ticket 06 (spec.md); ticket 11 (B20,
+ADR-0008) added one more: a pending Client the vehicle is already standing on
+is excluded too — there is nothing to travel to, and the simulator has no
+"stay put" arc for a Client the way it does for the depot. The no-double-booking
+rule (the B11 invariant) survives as a **constraint** on the argmin's candidate
+set — enforced by :meth:`TransformerMonteCarloPolicy._sweep` directly, never
 reconstructed from a heuristic — not as a bias the network merely learns to
 respect. ``claimed`` is still fed to the network as an input (spec.md decision
 6: "claimed enters at the head"), so a trained network's *predictions* can
 account for contention, but the actual legality of an action never depends on
-what the network outputs for an already-claimed candidate.
+what the network outputs for an already-claimed or self-node candidate.
 
 ## The depot's Q value
 
@@ -231,21 +234,27 @@ class TransformerMonteCarloPolicy(Policy):
 
         pending = list(state.clients_not_visited)
         n_pending = len(pending)
+        pending_array = np.asarray(pending)
         claimed_mask = np.zeros(n_pending, dtype=np.bool_)
         action = [self.depot] * self.number_vehicles
 
         for vehicle in range(self.number_vehicles):
+            vehicle_position = state.last_node_reached[vehicle]
+            # ADR-0008: a node the vehicle is already on is not a travel
+            # destination -- there is nothing to travel to. Policy-side
+            # feasibility, not a heuristic (unlike ``claimed_mask``, this
+            # never applies to the depot, which keeps both its meanings).
+            infeasible_mask = claimed_mask | (pending_array == vehicle_position)
+
             if epsilon > 0.0 and rng is not None and rng.random() < epsilon:
-                feasible = [index for index in range(n_pending) if not claimed_mask[index]]
+                feasible = [index for index in range(n_pending) if not infeasible_mask[index]]
                 feasible.append(n_pending)  # the depot sentinel, always feasible
                 chosen = int(rng.choice(feasible))
             else:
-                q = self._score(
-                    embeddings, vehicle, state.last_node_reached[vehicle], pending, claimed_mask
-                )
+                q = self._score(embeddings, vehicle, vehicle_position, pending, claimed_mask)
                 masked = q.clone()
                 if n_pending:
-                    masked[:n_pending][torch.from_numpy(claimed_mask)] = float("inf")
+                    masked[:n_pending][torch.from_numpy(infeasible_mask)] = float("inf")
                 chosen = int(torch.argmin(masked).item())
 
             if chosen == n_pending:

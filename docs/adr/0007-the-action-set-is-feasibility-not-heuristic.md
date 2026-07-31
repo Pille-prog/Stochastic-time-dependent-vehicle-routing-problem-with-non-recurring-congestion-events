@@ -95,3 +95,11 @@ shortlist, no delayed-Client classifier, no depot-idle cutoff.
   `tau`, since the depot is always feasible even with zero pending Clients)
   — holds for this Policy by construction, not by inheriting
   `MonteCarloPolicy`'s own guards against them.
+
+**See also ADR-0008.** "Every pending Client not already claimed, plus the
+depot — that is the whole rule" is no longer the whole rule: ticket 11 (B20)
+added one more clause — a pending Client equal to the vehicle's own
+`last_node_reached` is excluded too, in both `_sweep`'s greedy and
+ε-exploration branches. The depot keeps its two meanings (park vs. travel,
+ADR-0008) and is never filtered; a pending Client has no such second meaning
+— there is nothing to travel to on the node you are already standing on.
