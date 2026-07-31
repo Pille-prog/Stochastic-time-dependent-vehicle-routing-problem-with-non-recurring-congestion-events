@@ -7,14 +7,23 @@ fixture and regardless of policy quality:
   rules (terminal state, clock inside [horizon start, the legacy 1150 emergency
   horizon]);
 - every Client ends the Episode served exactly once or left unserved and
-  penalized by exactly one termination charge;
+  penalized by exactly one termination charge, priced against the fixed
+  reference clock ``max(episode_end_minute, tau)`` (ticket 03,
+  simulator-correctness, B3, ADR-0004), never ``tau`` alone;
 - every sampled travel time and velocity is strictly positive and finite;
 - congestion factors stay within the configured bounds (ticket 12 clamped
   spread multipliers at the upper bound) and events expire inside
   ``[start + 30, start + max_congestion_duration]``;
 - the Episode total cost equals distance + delay + earliness + overtime, up to
   float accumulation order (the legacy double-charged the terminating
-  transition past the horizon; fixed in ticket 12, ADR-0001 change log).
+  transition past the horizon; fixed in ticket 12, ADR-0001 change log);
+- no vehicle becomes ``PARKED`` while mid-arc (ticket 04, simulator-correctness,
+  B1a/B1b, ADR-0005 — the review's own proposed invariant). One check for two
+  catalogue rows, not two independent measurements: a vehicle wrongly parked
+  mid-arc is simultaneously "``PARKED`` while travelling" and "the recorded
+  node changed with the remaining arc's distance never charged" — the review
+  measured these as the same event, never separately (``docs/simulator-review.md``,
+  B1b).
 
 Randomness comes from real gauss draws: the module fixture builds a multi-day
 traffic world by deterministically perturbing the fixture day's speeds, giving
@@ -29,12 +38,9 @@ from __future__ import annotations
 
 import itertools
 import math
-import shutil
-from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
@@ -46,21 +52,16 @@ from stdvrp.congestion import (
     CongestionGenerator,
 )
 from stdvrp.demand import ClientGenerator
-from stdvrp.network import ShortestPathCache
 from stdvrp.simulation import run_evaluation_episode
 from stdvrp.simulation.episode_velocities import ArcVelocity, EpisodeVelocities
+from stdvrp.simulation.fleet_routes import PARKED
 from stdvrp.simulation.model import Model
 from stdvrp.simulation.state import State
-from stdvrp.traffic import CsvDataSource, TravelTimeModel
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "chengdu_mini"
 
 HORIZON_START, HORIZON_END = 300, 780
 # The legacy model terminates at hardcoded clock 1150 regardless of the
 # configured horizon end (see the Model module docstring).
 EMERGENCY_HORIZON = 1150
-PERTURBED_DAYS = tuple(range(601, 609))
 # The generator draws event durations from ``uniform(30, max_congestion_duration)``.
 MIN_EVENT_DURATION = 30
 # 12 general-state + 7 state-action features (see the MonteCarloPolicy docstring).
@@ -74,7 +75,7 @@ FIXTURE_DEMAND = dict(
     clients_per_vehicle=4,
     time_window_spread=60,
     horizon_start_minute=HORIZON_START,
-    horizon_end_minute=HORIZON_END,
+    shift_end_minute=HORIZON_END,
 )
 
 
@@ -121,6 +122,9 @@ class RecordingVelocities:
     def congestion_expiry(self, arc: tuple[float, float]) -> float | None:
         return self.inner.congestion_expiry(arc)
 
+    def purge_expired(self, tau_episode: float) -> None:
+        self.inner.purge_expired(tau_episode)
+
     def release(self) -> None:
         self.inner.release()
 
@@ -154,6 +158,44 @@ class RecordingModel(Model):
         super().terminate_state_if_all_vehicles_come_back()
         self.termination_delay_charges.append(self.costs.delay_cost - delay_before)
 
+    def advance_fleet_to(self, minute: float) -> None:
+        """B17: the congestion book holds no expired entries after a clock advance."""
+        super().advance_fleet_to(minute)
+        expired = [
+            arc
+            for arc, event in self.velocities.congested_arcs.items()
+            if self.state.tau_episode >= event[1]
+        ]
+        assert not expired, f"expired congestion entries survived a clock advance: {expired}"
+
+    def _reroute_for(self, action: list[int]) -> None:
+        """Ticket 04 (B1a/B1b, ADR-0005): no vehicle becomes ``PARKED`` mid-arc.
+
+        Watches, before rerouting, every vehicle genuinely mid-arc
+        (``not vehicle_standing`` and ``departure_tau < tau < arrival_tau`` —
+        the two facts agree by construction once the fix holds) and asserts
+        none of them is ``PARKED`` afterward. One assertion for two catalogue
+        rows (see the module docstring): a violation here is simultaneously
+        "``PARKED`` while travelling" and "the recorded node changed with the
+        remaining arc's distance never charged".
+        """
+        fleet = self.fleet
+        state = self.state
+        tau = state.tau_episode
+        mid_arc = [
+            vehicle
+            for vehicle in range(self.number_vehicles)
+            if not state.vehicle_standing[vehicle]
+            and fleet.is_travelling(vehicle)
+            and fleet.departure_tau[vehicle] < tau < fleet.arrival_tau[vehicle]
+        ]
+        super()._reroute_for(action)
+        for vehicle in mid_arc:
+            assert fleet.arrival_tau[vehicle] != PARKED, (
+                f"vehicle {vehicle} became PARKED while mid-arc at tau={tau} "
+                f"(departure_tau={fleet.departure_tau[vehicle]})"
+            )
+
 
 class RecordingCongestionGenerator(CongestionGenerator):
     """Delegates to the live generator, recording every event it writes."""
@@ -178,29 +220,19 @@ class RecordingCongestionGenerator(CongestionGenerator):
 
 
 @pytest.fixture(scope="module")
-def sim_world(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
-    """A fixture-derived world whose perturbed days give positive speed stds."""
-    world = tmp_path_factory.mktemp("invariant_world")
-    shutil.copyfile(FIXTURE_DIR / "link.csv", world / "link.csv")
-    for day in PERTURBED_DAYS:
-        rng = np.random.default_rng(day)
-        for half in (0, 1):
-            speeds = pd.read_csv(FIXTURE_DIR / f"speed[601]_[{half}].csv")
-            speeds["Speed"] = speeds["Speed"] * rng.uniform(0.8, 1.2, size=len(speeds))
-            speeds.to_csv(world / f"speed[{day}]_[{half}].csv", index=False)
+def sim_world(perturbed_mini_world: dict[str, Any]) -> dict[str, Any]:
+    """This module's demand generator, layered onto the shared perturbed traffic world.
 
-    source = CsvDataSource(world, "link.csv", 601, PERTURBED_DAYS, "all_shortest_paths.csv")
-    travel_time_model = TravelTimeModel(
-        source.load_road_network(),
-        source.load_traffic_history(),
-        120,
-        horizon_start_minute=HORIZON_START,
-    )
+    ``perturbed_mini_world`` (``tests/conftest.py``, ticket 10) is the road
+    network and travel-time statistics only; this file's own fixed
+    ``FIXTURE_DEMAND`` is a per-module choice, not something a shared fixture
+    should bake in.
+    """
     return {
-        "travel_time_model": travel_time_model,
-        "cache": ShortestPathCache.from_csv(FIXTURE_DIR / "all_shortest_paths.csv"),
+        "travel_time_model": perturbed_mini_world["travel_time_model"],
+        "cache": perturbed_mini_world["shortest_path_cache"],
+        "arcs": perturbed_mini_world["arcs"],
         "client_generator": ClientGenerator(**FIXTURE_DEMAND),
-        "arcs": list(travel_time_model.event_probability),
     }
 
 
@@ -221,6 +253,16 @@ def instrumented_episode() -> Any:
 @st.composite
 def episode_configs(draw: st.DrawFn) -> dict[str, Any]:
     lower = draw(st.floats(0.05, 0.9, allow_nan=False))
+    # Ticket 02 (simulator-correctness, B15): swept as genuine (shift_end_minute,
+    # episode_end_minute) pairs rather than fixed at the shipped (780, 1150) —
+    # the existing suite only ever asserted the non-negative-cost invariant at
+    # that one pair, which is exactly why a shift_end_minute this high went
+    # unseen. episode_end_minute is drawn no lower than shift_end_minute
+    # (ExperimentConfig's own validity constraint) and capped at
+    # EMERGENCY_HORIZON to keep episode length — and therefore example
+    # runtime — bounded.
+    shift_end_minute = draw(st.integers(HORIZON_START + 1, EMERGENCY_HORIZON))
+    episode_end_minute = draw(st.integers(shift_end_minute, EMERGENCY_HORIZON))
     return {
         "seed": draw(st.integers(0, 2**32 - 1)),
         "congestion_lower_bound": lower,
@@ -236,6 +278,8 @@ def episode_configs(draw: st.DrawFn) -> dict[str, Any]:
             ).map(np.array)
         ),
         "vehicle_count": draw(st.none() | st.integers(1, 8)),
+        "shift_end_minute": shift_end_minute,
+        "episode_end_minute": episode_end_minute,
     }
 
 
@@ -273,8 +317,9 @@ def test_episode_invariants(
         epsilon=0.05,
         max_congestion_duration=duration,
         horizon_start_minute=HORIZON_START,
-        horizon_end_minute=HORIZON_END,
-        n_observed_arcs=3,
+        shift_end_minute=config["shift_end_minute"],
+        episode_end_minute=config["episode_end_minute"],
+        n_observed_velocities=3,
         vehicle_count=config["vehicle_count"],
     )
     model = RecordingModel.last_instance
@@ -306,17 +351,18 @@ def test_episode_invariants(
     if unserved:
         assert termination_charges == 1, "unserved Clients were never penalized"
     if termination_charges:
-        # The single termination call charges each late unserved Client its
-        # delay exactly once, from the actual clock on either termination path
-        # (ticket 12 fixed the legacy's hardcoded 1150 in the all-back path).
+        # The single termination call charges every unserved Client its delay
+        # exactly once, against the fixed reference clock
+        # max(episode_end_minute, tau) — never tau alone (ticket 03,
+        # simulator-correctness, B3, ADR-0004).
         time_windows = {
             client.node: (client.time_window_start, client.time_window_end)
             for client in demand.clients
         }
+        reference_clock = max(config["episode_end_minute"], state.tau_episode)
         expected_delay = sum(
-            state.tau_episode - time_windows[client][1]
+            max(0.0, reference_clock - time_windows[client][1])
             for client in state.clients_not_visited
-            if state.tau_episode > time_windows[client][1]
         )
         assert math.isclose(
             model.termination_delay_charges[0], expected_delay, rel_tol=1e-9, abs_tol=1e-9
@@ -379,8 +425,9 @@ def test_horizon_terminated_episode_counts_the_terminating_transition_once(
         epsilon=0.05,
         max_congestion_duration=120,
         horizon_start_minute=HORIZON_START,
-        horizon_end_minute=HORIZON_END,
-        n_observed_arcs=3,
+        shift_end_minute=HORIZON_END,
+        episode_end_minute=EMERGENCY_HORIZON,
+        n_observed_velocities=3,
         vehicle_count=1,
     )
     model = RecordingModel.last_instance

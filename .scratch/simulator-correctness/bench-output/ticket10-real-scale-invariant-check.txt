@@ -1,0 +1,23 @@
+# Ticket 10: real-scale (1900-node) invariant check
+# ad hoc script (not committed as a permanent test — spec.md decision 11 keeps real-dataset runs out of the per-ticket loop); reproduces the exact episode shape of experiments/chengdu/baseline_scaled.yaml (5 train + 5 eval + 6 test) with the same BenchModel counters as the mini-fixture sweep.
+
+train     seed=1000    total=   27715.40 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+train     seed=1001    total=    7146.66 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+train     seed=1002    total=    3356.75 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+train     seed=1003    total=    2304.70 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+train     seed=1004    total=    5321.61 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+eval      seed=100000  total=    2277.71 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+eval      seed=100001  total=    2350.64 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+eval      seed=100002  total=    1298.15 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+eval      seed=100003  total=    3113.55 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+eval      seed=100004  total=    3548.29 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+test@2    seed=100     total=    1322.20 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+test@50   seed=100     total=    1088.22 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+test@2    seed=101     total=    2637.74 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+test@50   seed=101     total=    2192.64 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+test@2    seed=102     total=    7213.58 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+test@50   seed=102     total=    7433.86 neg=0 nonfin=0 midarc=0 dup=0 earl=0 shorten=0 bookexp=0 purge=0 -> violations=0
+
+B9 structural check (real 1900-node topology): B9Check(wrong_depth=0, reached_total=38379, missed_entirely=0, genuinely_reachable_total=38379)
+
+TOTAL: 16 real episodes, 0 violations

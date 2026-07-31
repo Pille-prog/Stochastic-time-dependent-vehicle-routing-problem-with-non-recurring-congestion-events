@@ -5,8 +5,10 @@ training loop with periodic evaluation and best-W tracking, then the final test
 over the configured seed/vehicle tables, writing ``results.json`` and the
 training plot to a per-run output directory. Every value the legacy hardcoded —
 horizon, ``n_arcs``, the warm-up learning rate, the evaluation seed range, the
-test seed/fleet tables and the ``mean_static_policy`` plot baseline — comes from
-``ExperimentConfig``.
+test seed/fleet tables — comes from ``ExperimentConfig``. The legacy's
+hardcoded ``mean_static_policy`` plot baseline is a ``ReferenceCard``
+(``stdvrp.training.reference_card``, ticket 01) passed to :meth:`Trainer.run`
+instead — a frozen per-seed cost vector, not a config field.
 
 Legacy fidelity notes:
 
@@ -31,8 +33,9 @@ Legacy fidelity notes:
   division-order float noise that quirk could otherwise leak into the
   report). ``test_episodes`` stays in ``ExperimentConfig`` for config-file
   compatibility but is no longer read.
-* **Reported metrics**: the nine golden-pinned Episode metrics. The legacy
-  report's three mean-time metrics (``mean_delay_time``, ``mean_earliness_time``,
+* **Reported metrics**: the ten golden-pinned Episode metrics (``unserved_clients``
+  added by ticket 03, simulator-correctness, ADR-0004). The legacy report's
+  three mean-time metrics (``mean_delay_time``, ``mean_earliness_time``,
   ``mean_overtime``) were not ported with the ticket 07 Model and are not pinned
   by the golden master (ADR-0001 ticket 09 addendum).
 
@@ -64,6 +67,7 @@ from matplotlib.figure import Figure
 from stdvrp.config import ExperimentConfig
 from stdvrp.simulation import EpisodeResult, run_training_episode
 from stdvrp.training.episode_pool import EpisodePool, EpisodeRequest, EpisodeWorld, W
+from stdvrp.training.reference_card import ReferenceCard
 
 EPISODE_METRICS = (
     "total_cost",
@@ -75,6 +79,7 @@ EPISODE_METRICS = (
     "state_count",
     "delay_clients",
     "earliness_clients",
+    "unserved_clients",
 )
 
 
@@ -205,8 +210,16 @@ class Trainer:
     ) -> None:
         self.close()
 
-    def run(self, output_dir: Path) -> ExperimentResult:
-        """Train, run the final test, and write results + plot into ``output_dir``."""
+    def run(
+        self, output_dir: Path, *, reference_card: ReferenceCard | None = None
+    ) -> ExperimentResult:
+        """Train, run the final test, and write results + plot into ``output_dir``.
+
+        ``reference_card`` (ticket 01) is the linear baseline's frozen per-seed
+        cost vector; when given, the training plot draws it as the comparison
+        line ``config.static_policy_mean_cost`` used to be. ``None`` (the
+        default) omits the line — what a run producing the card itself uses.
+        """
         config = self.config
         try:
             training = self.train()
@@ -219,9 +232,7 @@ class Trainer:
 
         output_dir.mkdir(parents=True, exist_ok=True)
         write_results(output_dir / "results.json", config, result)
-        write_training_plot(
-            output_dir / "training_plot.png", training.evaluations, config.static_policy_mean_cost
-        )
+        write_training_plot(output_dir / "training_plot.png", training.evaluations, reference_card)
         self._log(f"results written to {output_dir}")
         return result
 
@@ -433,12 +444,17 @@ def _w_as_json(w: W | None) -> list[float] | None:
 
 
 def write_training_plot(
-    path: Path, evaluations: tuple[EvaluationBlock, ...], static_policy_mean_cost: float | None
+    path: Path, evaluations: tuple[EvaluationBlock, ...], reference_card: ReferenceCard | None
 ) -> None:
-    """The legacy training plot: evaluation means with the static-policy baseline.
+    """The legacy training plot: evaluation means with the linear-baseline comparison.
 
     Rendered through a directly constructed Figure (no pyplot): backend-independent,
     headless-safe, and free of pyplot's global figure registry.
+
+    ``reference_card`` (ticket 01) replaces the legacy's hardcoded
+    ``static_policy_mean_cost`` scalar: the red line is now the frozen linear
+    ``MonteCarloPolicy``'s mean cost over ``evaluation_seeds`` — the same seeds
+    this plot's own evaluation blocks use — rather than an unpaired constant.
     """
     figure = Figure(figsize=(20, 5))
     axes = figure.subplots()
@@ -449,9 +465,12 @@ def write_training_plot(
         linestyle="-",
         label="Cost",
     )
-    if static_policy_mean_cost is not None:
+    if reference_card is not None:
         axes.axhline(
-            y=static_policy_mean_cost, color="red", linestyle=":", label="Mean Static Policy"
+            y=reference_card.evaluation_mean_cost,
+            color="red",
+            linestyle=":",
+            label="Linear baseline (reference card)",
         )
     axes.set_title("Objective Function under Greedy Policy during Training")
     axes.set_xlabel("Number of Episodes")

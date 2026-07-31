@@ -17,10 +17,12 @@ exactly as ``decide``/``decide_train`` do. Feature *arithmetic* is pinned in
 
 import heapq
 import math
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPath, ShortestPathCache
@@ -30,6 +32,7 @@ from stdvrp.simulation.state import State, TrainingSnapshot
 
 DEPOT = 0
 HORIZON_END = 780
+EPISODE_END = 1150
 
 
 class World(NamedTuple):
@@ -90,7 +93,8 @@ def make_policy(world: World, *, epsilon=0.0, W=None, lr=0.0, seed=0, rng=None, 
         epsilon=epsilon,
         depot=DEPOT,
         number_actions_test=2,
-        horizon_end_minute=HORIZON_END,
+        shift_end_minute=HORIZON_END,
+        episode_end_minute=EPISODE_END,
         W=W,
         exploration_rng=rng,
         number_actions_train=2,
@@ -116,7 +120,11 @@ def make_update_world():
     )
     time_windows = {1: (350, 400), 2: (450, 500)}
     state = State(
-        number_vehicles=1, clients=[1, 2], n_arcs=3, horizon_start_minute=300, depot=DEPOT
+        number_vehicles=1,
+        clients=[1, 2],
+        n_observed_velocities=3,
+        horizon_start_minute=300,
+        depot=DEPOT,
     )
     state.tau_episode = 400
     return World(cache, time_windows, state)
@@ -125,9 +133,13 @@ def make_update_world():
 def hand_computed_features() -> np.ndarray:
     """The 19 features of the update world for action [1], derived on paper.
 
-    General state (12): polynomial terms of clients-left and normalized time; the
-    earliness bins hold only Client 2 (window start 450 in [400, 500), tau < 500);
-    the mean-earliness diff is 0 because mean earliness == tau == 400.
+    General state (12): polynomial terms of clients-left and normalized time.
+    Bin 1 holds Client 2 (window start 450 in [400, 500), tau < 500). Bin 0
+    would hold Client 1 (window start 350 < 400), but tau == 400 already gates
+    it shut (``tau < 400`` is false) — so Client 1 falls into bin 3 instead
+    (B10: the fourth bin is whatever the first three leave uncounted, keeping
+    the four bins a partition of the two pending Clients). The mean-earliness
+    diff is 0 because mean earliness == tau == 400.
     State-action (7) for sending the vehicle from the depot to Client 1: distance
     5 km; arrival 400 + 10 breaches Client 1's due time 400 by 10 minutes; no
     earliness, future delay or overtime; the second feature is the preserved
@@ -147,7 +159,7 @@ def hand_computed_features() -> np.ndarray:
         0.0,
         1 / 2,
         0.0,
-        0.0,
+        1 / 2,
         0.0,
     ]
     state_action = [0.0, 0.0, 5 / 100, 0.0, 10 / 60, 0.0, 0.0]
@@ -236,7 +248,11 @@ def make_selection_world():
 
     time_windows = {1: (400, 500), 2: (420, 520), 3: (440, 540), 4: (460, 560)}
     state = State(
-        number_vehicles=1, clients=[1, 2, 3, 4], n_arcs=3, horizon_start_minute=300, depot=DEPOT
+        number_vehicles=1,
+        clients=[1, 2, 3, 4],
+        n_observed_velocities=3,
+        horizon_start_minute=300,
+        depot=DEPOT,
     )
     return World(cache, time_windows, state)
 
@@ -307,7 +323,8 @@ class TestEpsilonGreedy:
             epsilon=0.0,
             depot=DEPOT,
             number_actions_test=2,
-            horizon_end_minute=HORIZON_END,
+            shift_end_minute=HORIZON_END,
+            episode_end_minute=EPISODE_END,
             W=np.zeros(19),
             exploration_rng=np.random.default_rng(0),
         )
@@ -381,20 +398,26 @@ def reference_possible_actions(
     """
     forbidden_actions = [policy.action[v] for v in range(policy.number_vehicles) if v != vehicle]
     state = policy.state
-    position = state.vehicle_position[vehicle]
+    position = state.last_node_reached[vehicle]
     possible_actions: list[int] = []
 
-    if (position == policy.depot and state.tau_episode > 350) or len(
-        state.clients_not_visited
-    ) == 0:
+    # Ticket 04 (ADR-0005): moved in lockstep with the corrected
+    # ``_select_vehicle_possible_actions`` definition (same precedent as B10,
+    # ticket 06) — a vehicle mid-arc past the depot is not idle.
+    if (
+        position == policy.depot and state.vehicle_standing[vehicle] and state.tau_episode > 350
+    ) or len(state.clients_not_visited) == 0:
         possible_actions.append(policy.depot)
 
     elif len(state.clients_not_visited) < 3:
+        # ticket 05 (B11): filtered here too, to stay in lockstep with the fix in
+        # _select_vehicle_possible_actions — this oracle pins ticket 07's
+        # vectorization, not the pre-ticket-05 duplicate-booking bug.
         shortest_distance_clients = policy._classify_shortest_distance_clients()
-        if shortest_distance_clients[vehicle]:
-            for i in range(len(shortest_distance_clients[vehicle])):
-                possible_actions.append(shortest_distance_clients[vehicle][i][1])
-        else:
+        for _distance, client in shortest_distance_clients[vehicle]:
+            if client not in forbidden_actions:
+                possible_actions.append(client)
+        if not possible_actions:
             possible_actions.append(policy.depot)
 
     else:
@@ -441,7 +464,7 @@ def make_fleet_world(minutes, *, clients, vehicles, nodes=None, tau=300.0) -> Wo
     state = State(
         number_vehicles=vehicles,
         clients=list(clients),
-        n_arcs=3,
+        n_observed_velocities=3,
         horizon_start_minute=300,
         depot=DEPOT,
     )
@@ -481,14 +504,14 @@ class TestCandidateSelection:
         state = State(
             number_vehicles=1,
             clients=list(clients),
-            n_arcs=3,
+            n_observed_velocities=3,
             horizon_start_minute=300,
             depot=DEPOT,
         )
         world = World(cache, {client: (400, 900) for client in clients}, state)
         policy = make_policy(world, W=np.zeros(19))
 
-        state.vehicle_position[0] = 9
+        state.last_node_reached[0] = 9
 
         with pytest.raises(KeyError):
             policy.geometry.average_minutes(9, 3)
@@ -566,7 +589,7 @@ class TestCandidateSelection:
             remaining = rng.choice(clients, size=rng.integers(0, len(clients) + 1), replace=False)
             # In place, exactly as Model.vehicle_reaches_client mutates the list.
             world.state.clients_not_visited[:] = [int(client) for client in remaining]
-            world.state.vehicle_position[:] = [int(node) for node in rng.choice(nodes, size=3)]
+            world.state.last_node_reached[:] = [int(node) for node in rng.choice(nodes, size=3)]
             world.state.tau_episode = float(rng.integers(300, 800))
             policy.action = [int(action) for action in rng.choice(columns, size=3)]
             features = state_features(policy)
@@ -578,3 +601,135 @@ class TestCandidateSelection:
                     policy._select_vehicle_possible_actions(number_of_actions, vehicle, features)
                     == expected
                 )
+
+
+# --- Endgame invariants (ticket 05, simulator-correctness: B5's crash, B11's --
+# --- duplicate booking) ---------------------------------------------------------
+
+
+@st.composite
+def endgame_configs(draw: st.DrawFn) -> dict[str, Any]:
+    """Small pending-Client counts and small fleets, tau swept across 310/350.
+
+    The regime the review flags as most exposed for both findings: B5's crash
+    needs exactly one pending Client with every vehicle reading
+    ``position == depot`` in the uncovered ``(310, 350]`` window; B11's
+    duplicate booking needs the two-Client classifier branch and >=2 vehicles.
+    Sweeping 0/1/2 remaining Clients keeps 0 and 2 as controls alongside 1, the
+    branch B5 actually crashes in. ``standing`` sweeps ticket 04's fact
+    independently of ``at_depot`` — a vehicle can read ``last_node_reached ==
+    depot`` while merely having crossed it (``standing=False``), which is
+    exactly the state B1a/B1b need distinguished from genuinely parked there.
+    """
+    vehicle_count = draw(st.integers(1, 4))
+    return {
+        "tau": draw(st.floats(300, 360, allow_nan=False)),
+        "remaining": draw(st.integers(0, 2)),
+        "vehicle_count": vehicle_count,
+        "at_depot": draw(st.lists(st.booleans(), min_size=vehicle_count, max_size=vehicle_count)),
+        "standing": draw(st.lists(st.booleans(), min_size=vehicle_count, max_size=vehicle_count)),
+    }
+
+
+AWAY_FROM_DEPOT = 9  # any node the dense cache below prices; never the depot itself
+
+
+def make_endgame_world(vehicle_count: int) -> World:
+    """Two Clients, a fleet of ``vehicle_count``, plus one node away from the depot.
+
+    The test body overwrites ``clients_not_visited``/``tau_episode``/
+    ``last_node_reached`` per Hypothesis example; construction just needs a
+    world the Policy can build a greedy initial decision from (ticket 13's
+    constructor draw needs a non-empty ``clients_not_visited``).
+    """
+    return make_fleet_world(
+        {}, clients=[1, 2], vehicles=vehicle_count, nodes=[DEPOT, 1, 2, AWAY_FROM_DEPOT]
+    )
+
+
+def _apply_endgame_config(world: World, config: dict[str, Any]) -> None:
+    world.state.clients_not_visited[:] = [1, 2][: config["remaining"]]
+    world.state.tau_episode = config["tau"]
+    world.state.last_node_reached[:] = [
+        DEPOT if at_depot else AWAY_FROM_DEPOT for at_depot in config["at_depot"]
+    ]
+    world.state.vehicle_standing[:] = config["standing"]
+
+
+class TestEndgameInvariants:
+    """Invariant catalogue (spec.md), ticket 05's two rows.
+
+    "The Policy returns a legal action for every vehicle, at every tau, under
+    every valid config" (B5) and "Two vehicles never receive the same
+    non-depot Client in one decision" (B11). Both endgame branches (fewer than
+    3 Clients left) are exercised directly, since that is where both findings
+    live (``_select_vehicle_possible_actions``'s ``elif`` branch and
+    ``_classify_shortest_distance_clients``).
+    """
+
+    @settings(max_examples=300, deadline=None, derandomize=True)
+    @given(config=endgame_configs())
+    def test_b5_never_raises_and_always_returns_a_legal_action(self, config: dict[str, Any]):
+        vehicle_count = config["vehicle_count"]
+        world = make_endgame_world(vehicle_count)
+        policy = make_policy(world, W=np.zeros(19), vehicles=vehicle_count)
+
+        _apply_endgame_config(world, config)
+        features = state_features(policy)
+
+        for vehicle in range(vehicle_count):
+            actions = policy._select_vehicle_possible_actions(2, vehicle, features)
+            assert actions, "the Policy must return at least one legal action"
+
+    @settings(max_examples=300, deadline=None, derandomize=True)
+    @given(config=endgame_configs())
+    def test_b11_two_vehicles_never_get_the_same_non_depot_client(self, config: dict[str, Any]):
+        vehicle_count = config["vehicle_count"]
+        if vehicle_count < 2:
+            return  # a duplicate booking needs at least two vehicles to collide
+        world = make_endgame_world(vehicle_count)
+        policy = make_policy(world, W=np.zeros(19), vehicles=vehicle_count)
+
+        _apply_endgame_config(world, config)
+        actions = policy.decide(world.state)
+
+        non_depot = [action for action in actions if action != DEPOT]
+        assert len(non_depot) == len(set(non_depot)), f"duplicate non-depot assignment: {actions}"
+
+
+class TestB1aDepotIdleGuard:
+    """Ticket 04 (ADR-0005): ``last_node_reached == depot`` alone must not idle a vehicle.
+
+    The review's headline finding: a vehicle that merely crossed the depot as
+    an interior waypoint (6.8% of cached shortest paths use it as one) reads
+    the same ``last_node_reached`` a genuinely parked vehicle would, and used
+    to be limited to the depot as its only candidate action past ``tau=350``
+    — taking it out of service while Clients were still pending.
+    """
+
+    def test_a_vehicle_that_only_crossed_the_depot_is_not_limited_to_it(self):
+        world = make_endgame_world(1)
+        policy = make_policy(world, W=np.zeros(19))
+        world.state.clients_not_visited[:] = [1, 2]
+        world.state.tau_episode = 351.0  # past the depot-idle literal (350)
+        world.state.last_node_reached[:] = [DEPOT]
+        world.state.vehicle_standing[:] = [False]  # crossed it, never stopped
+
+        features = state_features(policy)
+        actions = policy._select_vehicle_possible_actions(2, 0, features)
+
+        assert DEPOT not in actions, f"a mid-arc vehicle was exiled to the depot: {actions}"
+
+    def test_a_vehicle_genuinely_parked_past_350_is_still_limited_to_the_depot(self):
+        """The branch's intended, frequent case: unaffected by the fix."""
+        world = make_endgame_world(1)
+        policy = make_policy(world, W=np.zeros(19))
+        world.state.clients_not_visited[:] = [1, 2]
+        world.state.tau_episode = 351.0
+        world.state.last_node_reached[:] = [DEPOT]
+        world.state.vehicle_standing[:] = [True]
+
+        features = state_features(policy)
+        actions = policy._select_vehicle_possible_actions(2, 0, features)
+
+        assert actions == [DEPOT]

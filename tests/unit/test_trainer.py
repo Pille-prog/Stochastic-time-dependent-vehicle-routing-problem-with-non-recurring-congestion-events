@@ -37,7 +37,8 @@ def make_config(**overrides: Any) -> ExperimentConfig:
         "instance_day": 601,
         "traffic_days": (601,),
         "horizon_start_minute": 300,
-        "horizon_end_minute": 780,
+        "shift_end_minute": 780,
+        "episode_end_minute": 1150,
         "mean_number_clients": 20,
         "client_count_stddev": 4.0,
         "min_number_clients": 8,
@@ -54,7 +55,7 @@ def make_config(**overrides: Any) -> ExperimentConfig:
         "learning_rate": 1.0e-5,
         "warmup_learning_rate": 1.0e-6,
         "epsilon": 0.1,
-        "n_observed_arcs": 3,
+        "n_observed_velocities": 3,
         "first_train_seed": 1000,
         "evaluation_seed_start": 100000,
         "evaluation_seed_count": 2,
@@ -62,7 +63,10 @@ def make_config(**overrides: Any) -> ExperimentConfig:
         "test_action_counts": (2,),
         "test_seeds": (100, 101),
         "test_vehicle_counts": (6, 5),
-        "static_policy_mean_cost": None,
+        "neural_d_model": 128,
+        "neural_n_layers": 3,
+        "neural_n_heads": 4,
+        "device": "cpu",
     }
     values.update(overrides)
     return ExperimentConfig(**values)
@@ -91,6 +95,7 @@ def episode_result(total_cost: float = 100.0) -> EpisodeResult:
         state_count=10,
         delay_clients=3,
         earliness_clients=2,
+        unserved_clients=0,
     )
 
 

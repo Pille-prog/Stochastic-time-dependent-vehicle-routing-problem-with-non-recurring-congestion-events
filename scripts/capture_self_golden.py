@@ -15,7 +15,7 @@ ticket 13):
   the first Episode exactly as the Trainer does. Each Episode records its W vector
   (the "per-episode W trajectory") and all nine ``EPISODE_METRICS``.
 * **Evaluation** — ``EVAL_SEEDS`` run greedily with the *final* trained W (so the
-  eval golden also pins the training outcome). Each records the nine metrics.
+  eval golden also pins the training outcome). Each records the ten metrics.
 
 **Environment sensitivity.** numpy's ``Generator`` guarantees a reproducible
 *integer* stream per seed, but float distribution methods (the per-arc velocity
@@ -33,6 +33,21 @@ re-capturing. ``--check`` re-runs the protocol against the *committed* capture a
 reports the worst relative deviation instead of overwriting it::
 
     uv run python scripts/capture_self_golden.py --check --rtol 1e-9
+
+``--check`` also prints a per-seed, per-metric diff report (simulator-correctness
+ticket 01): every metric that moved, on every seed of every block, not only the
+single worst deviation. The three-outcome rule (spec.md decision 10 — matches,
+explained, or reverts) needs to see *what* changed, not just *how much*.
+
+**Frozen-W block** (simulator-correctness ticket 01, spec.md "Behavior
+contract"). The training and evaluation blocks above both hang off learning: a
+cost-function change moves W from the first affected training episode, so a
+diff against either block conflates the fix's direct effect with everything
+downstream of a different W. This third block runs ``EVAL_SEEDS`` greedily
+against :data:`FROZEN_W` — a literal snapshot of ``final_w``, fixed once and
+never recomputed — so no cost change can move a decision here: the diff is
+the fix's direct effect and nothing else. Written under the ``"frozen_w_eval"``
+key; the two blocks above are untouched by this ticket.
 
 Usage (writes tests/fixtures/self_golden/mini_fixture.json)::
 
@@ -67,6 +82,36 @@ SELF_GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "self_golden" / "mini_fixt
 TRAIN_SEEDS: tuple[int, ...] = (1000, 1001, 1002, 1003, 1004)
 EVAL_SEEDS: tuple[int, ...] = tuple(range(100000, 100010))
 
+# The frozen-W block's literal W (simulator-correctness ticket 01, spec.md
+# "Behavior contract"): a fixed snapshot of this protocol's own ``final_w`` as
+# committed in ``tests/fixtures/self_golden/mini_fixture.json`` on 2026-07-28.
+# Deliberately a literal, not a live read of that file — the whole point of this
+# block is a W that never moves, including when the training block above is
+# re-captured for an unrelated reason. Do not recompute this from a fresh run;
+# update it only if the effort deliberately re-freezes (record why in the ticket
+# that does it).
+FROZEN_W: tuple[float, ...] = (
+    0.20606397239619353,
+    0.6936753052485881,
+    0.6574030403042306,
+    0.0059087832347860594,
+    0.0001757044221968135,
+    0.0001634297971536607,
+    1.0025790590600254e-05,
+    0.06788189945396003,
+    0.10840152110368309,
+    0.11454814031505155,
+    0.0,
+    1.281648973406756,
+    0.00014615139718725904,
+    0.0,
+    0.21336738281676795,
+    0.7759134231437905,
+    0.0007870017157424951,
+    0.0002292898670024438,
+    0.0,
+)
+
 
 def _load_benchmark() -> ModuleType:
     """scripts/benchmark_episodes.py: the single owner of the fixture-world build.
@@ -89,7 +134,7 @@ benchmark = _load_benchmark()
 
 
 def _metrics(episode: EpisodeResult) -> dict[str, float]:
-    """The nine golden-pinned metrics, each coerced to a round-trippable float/int."""
+    """The ten golden-pinned metrics, each coerced to a round-trippable float/int."""
     return {name: _as_number(getattr(episode, name)) for name in EPISODE_METRICS}
 
 
@@ -134,7 +179,25 @@ def run_protocol(world: Any) -> dict[str, Any]:
         "final_w": [float(x) for x in final_w],
         "training": training,
         "evaluation": evaluation,
+        "frozen_w_eval": run_frozen_w_eval(kwargs),
     }
+
+
+def run_frozen_w_eval(kwargs: dict[str, Any]) -> list[dict[str, Any]]:
+    """The third capture block (ticket 01): ``EVAL_SEEDS`` run with the literal :data:`FROZEN_W`.
+
+    Unlike ``evaluation`` above, this W never moves — it does not come from this
+    run's training block, so a cost-function change cannot move it. That makes
+    this the only block where a self-golden diff is attributable purely to a
+    production change: no decision here can shift because *this* W changed, only
+    because the simulator's behavior under a fixed W did.
+    """
+    frozen_w = np.array(FROZEN_W)
+    frozen_w_eval = []
+    for seed in EVAL_SEEDS:
+        episode = run_evaluation_episode(seed=seed, W=frozen_w, **kwargs)
+        frozen_w_eval.append({"seed": seed, "metrics": _metrics(episode)})
+    return frozen_w_eval
 
 
 def environment_fingerprint() -> dict[str, str]:
@@ -177,22 +240,67 @@ def numeric_pairs(expected: Any, produced: Any, path: str = "") -> Iterator[tupl
         yield path, expected, produced
 
 
-def worst_deviation(golden: dict[str, Any], live: dict[str, Any]) -> tuple[float, str]:
-    """The largest relative deviation between two captures, and where it sits.
+def _relative_deviation(expected: Any, produced: Any) -> float:
+    """How far ``produced`` sits from ``expected``, relative to ``expected``.
 
     An expected value of exactly zero admits no relative measure, so a produced
     value that is not also exactly zero counts as infinite deviation — the metrics
     that are structurally zero (an Episode with no earliness cost, the padding
     feature) must stay zero however the float sums are reassociated.
     """
+    return math.inf if expected == 0 else abs(produced - expected) / abs(expected)
+
+
+def worst_deviation(golden: dict[str, Any], live: dict[str, Any]) -> tuple[float, str]:
+    """The largest relative deviation between two captures, and where it sits."""
     worst, where = 0.0, "(identical)"
     for path, expected, produced in numeric_pairs(golden, live):
         if produced == expected:
             continue
-        deviation = math.inf if expected == 0 else abs(produced - expected) / abs(expected)
+        deviation = _relative_deviation(expected, produced)
         if deviation > worst:
             worst, where = deviation, path
     return worst, where
+
+
+def _diff_line(where: str, expected: Any, produced: Any) -> str:
+    deviation = _relative_deviation(expected, produced)
+    return f"  {where}: expected={expected!r} produced={produced!r} rel={deviation:.3e}"
+
+
+def diff_report(golden: dict[str, Any], live: dict[str, Any]) -> list[str]:
+    """Every metric that moved, per seed, per block (ticket 01's diff reporter).
+
+    ``worst_deviation`` answers "how far off is the single worst number"; this
+    answers "what, exactly, changed" — the spec's three-outcome rule (decision
+    10: matches / explained-to-a-mechanism / reverts) needs the second question
+    answered, because a bare "worst rtol 3e-2" cannot be checked against a
+    ticket's written prediction of *which* metrics move and in *which*
+    direction. One line per differing leaf, grouped by block and seed rather
+    than by JSON path, so a ticket's Comments can read it directly.
+    """
+    lines: list[str] = []
+    golden_final_w = golden.get("final_w", [])
+    live_final_w = live.get("final_w", [])
+    for index, (expected, produced) in enumerate(zip(golden_final_w, live_final_w, strict=True)):
+        if produced != expected:
+            lines.append(_diff_line(f"final_w[{index}]", expected, produced))
+
+    for block_name in ("training", "evaluation", "frozen_w_eval"):
+        golden_block = golden.get(block_name, [])
+        live_block = live.get(block_name, [])
+        for golden_entry, live_entry in zip(golden_block, live_block, strict=True):
+            label = f"{block_name} seed={golden_entry['seed']}"
+            if "w" in golden_entry:
+                golden_w, live_w = golden_entry["w"], live_entry["w"]
+                for index, (expected, produced) in enumerate(zip(golden_w, live_w, strict=True)):
+                    if produced != expected:
+                        lines.append(_diff_line(f"{label} w[{index}]", expected, produced))
+            for name, expected in golden_entry["metrics"].items():
+                produced = live_entry["metrics"][name]
+                if produced != expected:
+                    lines.append(_diff_line(f"{label} metrics.{name}", expected, produced))
+    return lines
 
 
 def check(rtol: float) -> int:
@@ -212,6 +320,15 @@ def check(rtol: float) -> int:
     worst, where = worst_deviation(body, live)
     print(f"  worst relative deviation: {worst:.3e} at {where}")
     print(f"  tolerance:                {rtol:.3e}")
+
+    diff_lines = diff_report(body, live)
+    if diff_lines:
+        print(f"  per-seed per-metric diff ({len(diff_lines)} leaves moved):")
+        for line in diff_lines:
+            print(line)
+    else:
+        print("  per-seed per-metric diff: (identical - nothing moved)")
+
     if worst > rtol:
         print("FAIL: the live package is outside the tolerance")
         return 1
@@ -240,10 +357,14 @@ def main() -> None:
     env = document["meta"]["environment"]
     n_train = len(document["training"])
     n_eval = len(document["evaluation"])
+    n_frozen = len(document["frozen_w_eval"])
     fingerprint = f"numpy {env['numpy']}, python {env['python']}, {env['system']}/{env['machine']}"
     print(f"written: {SELF_GOLDEN_PATH}")
     print(f"  environment: {fingerprint}")
-    print(f"  training episodes: {n_train}, evaluation episodes: {n_eval}")
+    print(
+        f"  training episodes: {n_train}, evaluation episodes: {n_eval}, "
+        f"frozen-W episodes: {n_frozen}"
+    )
     sys.stdout.flush()
 
 

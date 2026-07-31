@@ -28,15 +28,28 @@ columns flagged in :attr:`StateFeatures.active`.
   cost +15-25% across every action count — for a ~4% throughput gain. The user
   rejected adoption on that evidence; the quirk stays as the sole, deliberate
   implementation (see the ticket's ``## Comments`` for the full numbers);
-- the permanently-zero state-action feature, which is what pads ``W`` to its
-  legacy 19 components and keeps stored weight vectors valid;
-- every normalization literal (150, 850, 1150, 13, 60, 100, 180, 2500, the
+- the permanently-zero state-action feature (``X[:, 13]``), which is what pads
+  ``W`` to its legacy 19 components and keeps stored weight vectors valid. It
+  is, after simulator-correctness ticket 06 (below), the *only* deliberately
+  dead weight: ``final_w[13] == 0.0`` by design. Before that ticket, ``W[10]``
+  was dead too, but by accident — it never trained because feature 10 was
+  identically zero;
+- every normalization literal (150, 850, 300, 13, 60, 100, 180, 2500, the
   400/500/600 earliness bins, the 310 depot-idle cutoff), which are part of the
-  feature *definition* and stay literal;
+  feature *definition* and stay literal. The one exception is the ``time_left``
+  clock ``1150`` used to hardcode: ticket 02 (simulator-correctness, B12)
+  threads it in as ``episode_end_minute``, the same configurable hard stop
+  :class:`~stdvrp.simulation.model.Model` now uses instead of its own hardcoded
+  constant;
 - ``mean_velocities``, computed by the general-state routine and never appended as
   a feature. Nothing reads it; it is carried on :class:`StateFeatures` rather than
   dropped because deleting legacy computation is a Tier-3 decision, not this
-  ticket's.
+  ticket's. **If a future modeling effort connects it (B4):** it averages
+  ``State.observed_velocity``, a recency window over the last
+  ``n_observed_velocities`` decision epochs, not the last N *distinct* arcs
+  (simulator-correctness ticket 09, B18) — arguably the better congestion proxy
+  of the two, since a congestion event lasts tens of minutes and a time window
+  captures that where a distinct-arc window would not.
 
 **Float reassociation (Tier 2).** The four state-action cost sums are re-associated
 as "the other vehicles' terms, then the decided vehicle's", and the future-delay
@@ -46,6 +59,18 @@ third such site — a BLAS ``gemv`` rather than 19-term dot products.) The
 general-state features stay bit-exact: their only sum is over time-window starts,
 which are integers. See the ticket ``## Comments`` for what this measures out to on
 the committed fixture.
+
+**B10 fixed (simulator-correctness ticket 06).** The legacy's fourth earliness
+bin (``general[10]``) was never assigned, so it was identically zero and
+``W[10]`` never trained. :meth:`FeatureExtractor._general_features` now assigns
+it as *whatever the first three bins leave uncounted* — not redefined as "a
+Client whose window opens at minute 600 or later", because a bin also drops to
+zero once ``tau`` passes its own gate (e.g. bin 0 once ``tau >= 400``) while its
+Clients are still pending. Bin 3 absorbs those too. This keeps the invariant
+the four bins exist to satisfy: they partition pending demand, at every
+``tau`` — the four fractions in ``general[7:11]`` always sum to
+``len(clients_not_visited) / number_clients``. The bin *boundaries*
+(400/500/600) are unchanged; only the bin that was missing is filled in.
 """
 
 from __future__ import annotations
@@ -58,6 +83,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from stdvrp.network.episode_geometry import EpisodeGeometry
+from stdvrp.simulation.state import is_parked_at_depot
 
 if TYPE_CHECKING:
     from stdvrp.simulation.state import State, TrainingSnapshot
@@ -122,7 +148,8 @@ class FeatureExtractor:
         number_vehicles: int,
         number_clients: int,
         depot: int,
-        horizon_end_minute: int,
+        shift_end_minute: int,
+        episode_end_minute: int,
         service_time: float,
         delay_cost_factor: float,
         earliness_cost_factor: float,
@@ -132,7 +159,8 @@ class FeatureExtractor:
         self._number_vehicles = number_vehicles
         self._number_clients = number_clients
         self._depot = depot
-        self._end_of_horizon = horizon_end_minute
+        self._end_of_horizon = shift_end_minute
+        self._episode_end_minute = episode_end_minute
         self._service_time = service_time
         self._delay_cost_factor = delay_cost_factor
         self._earliness_cost_factor = earliness_cost_factor
@@ -165,9 +193,11 @@ class FeatureExtractor:
         active = np.zeros(self._column_count, dtype=np.bool_)
         active[self._geometry.column_positions(remaining)] = True
 
-        positions = state.vehicle_position
+        positions = state.last_node_reached
         vehicle_minutes = self._geometry.average_minutes_rows(positions)
-        counts, delayed = self._classify_closest_clients(tau, active, vehicle_minutes, positions)
+        counts, delayed = self._classify_closest_clients(
+            tau, active, vehicle_minutes, positions, state.vehicle_standing
+        )
 
         return StateFeatures(
             general=self._general_features(tau, len(remaining), active),
@@ -194,7 +224,7 @@ class FeatureExtractor:
         clients_left = remaining_count / 150
 
         if clients_left != 0:
-            time_left = (1150 - tau) / (850)
+            time_left = (self._episode_end_minute - tau) / (850)
             time = (tau - 300) / 850
         else:
             time_left = 0.0
@@ -212,6 +242,13 @@ class FeatureExtractor:
             counts_earliness[1] = int(np.count_nonzero((earliness >= 400) & (earliness < 500)))
         if tau < 600:
             counts_earliness[2] = int(np.count_nonzero((earliness >= 500) & (earliness < 600)))
+        # B10: the fourth bin is whatever the first three leave uncounted — not
+        # redefined as "earliness >= 600", because a bin above also goes to zero
+        # once tau passes its own gate (e.g. bin 0 at tau >= 400) even though its
+        # Clients are still pending. Bin 3 absorbs those too, so the four counts
+        # always partition pending demand: they sum to `remaining_count` at every
+        # tau, which is exactly the invariant this bin exists to satisfy.
+        counts_earliness[3] = remaining_count - sum(counts_earliness[:3])
 
         mean_earliness_diff = 0.0
         if (580 - tau) / (280) > 0 and remaining_count != 0:
@@ -237,6 +274,7 @@ class FeatureExtractor:
         active: NDArray[np.bool_],
         vehicle_minutes: NDArray[np.float64],
         positions: Sequence[float],
+        standing: Sequence[bool],
     ) -> tuple[NDArray[np.int64], tuple[tuple[int, ...], ...]]:
         """Ports ``clasify_delayed_clients`` — duplicate-append quirk and all.
 
@@ -263,10 +301,14 @@ class FeatureExtractor:
         column_count = self._column_count
         empty_delayed = tuple(() for _ in range(vehicle_count))  # type: tuple[tuple[int, ...], ...]
 
+        # Ticket 04 (ADR-0005): idle-at-depot requires ``standing`` too — a
+        # vehicle mid-arc past the depot (an interior waypoint on 6.8% of
+        # cached shortest paths) reads ``position == depot`` but is not idle
+        # and must stay eligible.
         eligible = [
             vehicle
-            for vehicle, position in enumerate(positions)
-            if not (position == self._depot and tau > _DEPOT_IDLE_CUTOFF)
+            for vehicle, (position, is_standing) in enumerate(zip(positions, standing, strict=True))
+            if not (is_parked_at_depot(position, is_standing, self._depot) and tau > _DEPOT_IDLE_CUTOFF)
         ]
         columns = np.flatnonzero(active)
         if not eligible or columns.size == 0:

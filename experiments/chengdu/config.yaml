@@ -15,7 +15,8 @@ traffic_days: [601, 602, 603, 604, 605, 606, 607, 608, 609, 610,
                711, 712, 713, 714]
 
 horizon_start_minute: 300
-horizon_end_minute: 780
+shift_end_minute: 780
+episode_end_minute: 1150
 
 # The legacy ClientGenerator hardcoded gauss stddev 30, a 60-client floor and a
 # vehicle-ratio table (28 clients per vehicle at mean 150, 29 at mean 250).
@@ -37,7 +38,7 @@ test_frequency: 10
 learning_rate: 1.0e-5
 warmup_learning_rate: 1.0e-6
 epsilon: 0.1
-n_observed_arcs: 3
+n_observed_velocities: 3
 first_train_seed: 1000
 evaluation_seed_start: 100000
 evaluation_seed_count: 50
@@ -57,7 +58,9 @@ test_vehicle_counts: [6, 5, 5, 7, 7, 6, 6, 5, 6, 5,
                       4, 4, 5, 4, 5, 6, 8, 5, 5, 7,
                       5, 7, 6, 6, 4, 6, 7, 5, 6, 6]
 
-# Legacy plot baseline for THIS parameter combination (upper bound 0.4, duration
-# 120, 150 mean clients). The legacy's full 16-entry lookup table lives in the
-# `legacy-monolith` tag (lines 6153-6203); each config carries only its own value.
-static_policy_mean_cost: 2490
+# Neural policy (ticket 03): spec.md's "Starting architecture" — a starting
+# point, tuned on the evaluation seeds only, not a frozen constant.
+neural_d_model: 128
+neural_n_layers: 3
+neural_n_heads: 4
+device: cpu

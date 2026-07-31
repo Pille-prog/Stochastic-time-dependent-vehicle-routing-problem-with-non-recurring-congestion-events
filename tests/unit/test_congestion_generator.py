@@ -8,7 +8,12 @@ below the upper bound, ...) are expressed directly instead of by hunting for a
 numpy seed that happens to land in the right region.
 """
 
+import random
+from collections import deque
+
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from stdvrp.congestion import ArcProbabilityCongestionGenerator
 
@@ -106,14 +111,54 @@ class TestEventValues:
 
         assert congested[(2.0, 3.0)] == [0.1, 400.0]
 
-    def test_weaker_existing_event_is_overwritten(self):
+    def test_weaker_existing_event_is_overwritten_but_keeps_the_later_expiry(self):
+        # B7: the new event is more severe (0.2 < 0.9) but shorter-lived (duration
+        # 30 => expiry 330) than the still-active existing one (expiry 400). The
+        # write must take the more severe multiplier *and* the later expiry —
+        # never regress the expiry just because the multiplier improved.
         generator = make_generator({(1, 2): 1.0}, lower=0.2, upper=0.2)
-        congested: dict = {(2.0, 3.0): [0.9, 400.0]}  # weaker (higher multiplier)
+        congested: dict = {(2.0, 3.0): [0.9, 400.0]}  # weaker (higher multiplier), active
         rng = ScriptedRng([0.0, 0.2, 30.0])
 
         generator.generate(300, congested, rng)
 
-        assert congested[(2.0, 3.0)][0] != 0.9
+        assert congested[(2.0, 3.0)] == [0.2, 400.0]
+
+    def test_primary_write_composes_with_a_stronger_active_existing_event(self):
+        # B7 at the direct-write site (not the spread): a pre-existing, more
+        # severe and longer-lived event on the trigger arc itself must survive.
+        generator = make_generator({(1, 2): 1.0}, lower=0.5, upper=0.5)
+        congested: dict = {(1.0, 2.0): [0.1, 400.0]}  # stronger and longer, active
+        rng = ScriptedRng([0.0, 0.5, 30.0])
+
+        generator.generate(300, congested, rng)
+
+        assert congested[(1.0, 2.0)] == [0.1, 400.0]
+
+    def test_primary_write_never_shortens_an_active_expiry(self):
+        # B7's dominant defect, at the direct-write site: the new event is more
+        # severe (0.2) but shorter (duration 30 => expiry 330) than the existing,
+        # still-active one (expiry 400). Composing must keep 0.2 (more severe)
+        # *and* 400.0 (later) — the pre-fix code overwrote both fields, giving
+        # [0.2, 330.0] and ending the congestion 70 minutes early.
+        generator = make_generator({(1, 2): 1.0}, lower=0.2, upper=0.2)
+        congested: dict = {(1.0, 2.0): [0.9, 400.0]}  # weaker but longer-lived, active
+        rng = ScriptedRng([0.0, 0.2, 30.0])
+
+        generator.generate(300, congested, rng)
+
+        assert congested[(1.0, 2.0)] == [0.2, 400.0]
+
+    def test_an_expired_existing_event_is_fully_overwritten(self):
+        # Not "active" (its expiry is exactly minute_start): compose must not
+        # keep an entry that has already lifted, however severe it was.
+        generator = make_generator({(1, 2): 1.0}, lower=0.5, upper=0.5)
+        congested: dict = {(1.0, 2.0): [0.05, 300.0]}  # very severe, but expired
+        rng = ScriptedRng([0.0, 0.5, 30.0])
+
+        generator.generate(300, congested, rng)
+
+        assert congested[(1.0, 2.0)] == [0.5, 330.0]
 
 
 class TestPhase2Fixes:
@@ -153,3 +198,100 @@ class TestPhase2Fixes:
         epicenter = congested[(1.0, 2.0)][0]
         assert (5.0, 6.0) in congested
         assert congested[(5.0, 6.0)][0] == pytest.approx(epicenter / 0.73)
+
+
+def _reference_bfs_depths(
+    successors: dict[int, list[int]], start: int, max_depth: int
+) -> dict[int, int]:
+    """True minimum-depth BFS, independent of any implementation under test."""
+    depths = {start: 0}
+    queue: deque[int] = deque([start])
+    while queue:
+        node = queue.popleft()
+        if depths[node] >= max_depth:
+            continue
+        for neighbor in successors.get(node, []):
+            if neighbor not in depths:
+                depths[neighbor] = depths[node] + 1
+                queue.append(neighbor)
+    return depths
+
+
+class TestBreadthFirstSpread:
+    """Ticket 08 fix (B9): ``_reachable_nodes`` is real BFS, not DFS-by-recursion."""
+
+    def test_a_node_reachable_by_both_a_long_and_a_short_path_keeps_the_short_depth(self):
+        # 0 connects directly to both 1 and 3; 1 also connects to 3, so 3 is
+        # reachable at depth 1 (0->3) and at depth 2 (0->1->3). The old
+        # DFS-by-recursion recursed into "1" first (successors[0]'s first
+        # entry), reached 3 via the *longer* path, marked it visited, and then
+        # skipped the direct 0->3 edge entirely — recording 3 at the wrong,
+        # non-minimal depth. Swapping the list order used to change the
+        # answer; real BFS does not.
+        generator = make_generator({})
+        generator.successors = {0: [1, 3], 1: [3], 3: []}
+
+        _reached, depth = generator._reachable_nodes(0, 0, max_depth=3)
+
+        assert depth[3] == 1, "node 3 must be recorded at its true minimum depth"
+
+        generator.successors = {0: [3, 1], 1: [3], 3: []}
+        _reached_reordered, depth_reordered = generator._reachable_nodes(0, 0, max_depth=3)
+        assert depth_reordered[3] == 1
+
+    def test_a_node_genuinely_within_max_depth_is_never_missed(self):
+        # 0's first branch (1->3->2, all explored before 0's direct edge to 2
+        # is ever tried) reaches node 2 at depth 3 and, having hit max_depth,
+        # stops — so it never tries node 2's own neighbor, node 4. The direct
+        # 0->2 edge (which would reach 2 at depth 1, and 4 at depth 2) is
+        # skipped because DFS already marked 2 visited via the long branch.
+        # Node 4 is genuinely within max_depth=3 of node 0 but the old
+        # DFS-by-recursion never reaches it at all — the review's headline
+        # "~15% of in-range nodes never congested" symptom.
+        successors = {0: [1, 2], 1: [3], 3: [2], 2: [4]}
+        generator = make_generator({})
+        generator.successors = successors
+
+        reached, depth = generator._reachable_nodes(0, 0, max_depth=3)
+
+        expected_depth = _reference_bfs_depths(successors, 0, 3)
+        assert 4 in reached, "node 4 is within max_depth and must not be missed"
+        assert reached == set(expected_depth)
+        assert depth == expected_depth
+
+    @settings(max_examples=200, deadline=None, derandomize=True)
+    @given(
+        successors=st.dictionaries(
+            keys=st.integers(0, 8),
+            values=st.lists(st.integers(0, 8), unique=True, max_size=8),
+            max_size=8,
+        ),
+        start=st.integers(0, 8),
+        max_depth=st.integers(0, 4),
+        shuffle_seed=st.integers(0, 2**32 - 1),
+    )
+    def test_matches_reference_bfs_and_is_independent_of_arc_table_order(
+        self,
+        successors: dict[int, list[int]],
+        start: int,
+        max_depth: int,
+        shuffle_seed: int,
+    ):
+        generator = make_generator({})
+        generator.successors = successors
+
+        reached, depth = generator._reachable_nodes(start, 0, max_depth)
+        expected_depth = _reference_bfs_depths(successors, start, max_depth)
+
+        assert reached == set(expected_depth)
+        assert depth == expected_depth
+
+        shuffled = {node: list(neighbors) for node, neighbors in successors.items()}
+        rng = random.Random(shuffle_seed)
+        for neighbors in shuffled.values():
+            rng.shuffle(neighbors)
+        generator.successors = shuffled
+
+        reached_shuffled, depth_shuffled = generator._reachable_nodes(start, 0, max_depth)
+        assert reached_shuffled == reached
+        assert depth_shuffled == depth

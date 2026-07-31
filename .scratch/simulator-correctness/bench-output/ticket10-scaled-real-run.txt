@@ -1,0 +1,25 @@
+# Ticket 10: scaled real-data run
+# uv run python scripts/benchmark_episodes.py --config experiments/chengdu/baseline_scaled.yaml --project experiments/chengdu/config.yaml --test
+# Real Chengdu dataset (1900 nodes), warm world-cache.
+
+config: experiments\chengdu\baseline_scaled.yaml
+loading world (the full Chengdu archive takes minutes, or seconds warm-cached) ...
+world loaded in 39.1s
+training: 2.442 s/ep over 5 ep
+evaluation: 1.303 s/ep over 5 ep
+test actions=2: 1.319 s/ep over 3 ep
+test actions=50: 1.496 s/ep over 3 ep
+
+scaled real-dataset baseline
+  world load (s)      39.097
+  train  s/ep          2.442
+  eval   s/ep          1.303
+  test s/ep @2         1.319
+  test s/ep @50        1.496
+
+projected full run (config.yaml)
+  world load                   39.1s  (0h00m39s)
+  training (100 ep)           244.2s  (0h04m04s)
+  evaluation (500 ep)         651.4s  (0h10m51s)
+  final test (300 ep)         421.5s  (0h07m01s)
+  TOTAL                      1356.2s  (0h22m36s)

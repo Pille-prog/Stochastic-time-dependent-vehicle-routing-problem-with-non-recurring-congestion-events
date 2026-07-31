@@ -157,8 +157,9 @@ class EpisodeWorld:
             "epsilon": config.epsilon,
             "max_congestion_duration": config.max_congestion_duration,
             "horizon_start_minute": config.horizon_start_minute,
-            "horizon_end_minute": config.horizon_end_minute,
-            "n_observed_arcs": config.n_observed_arcs,
+            "shift_end_minute": config.shift_end_minute,
+            "episode_end_minute": config.episode_end_minute,
+            "n_observed_velocities": config.n_observed_velocities,
         }
 
     def run_episode(self, w: W | None, request: EpisodeRequest) -> EpisodeResult:

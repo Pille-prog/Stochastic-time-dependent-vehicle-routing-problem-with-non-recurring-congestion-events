@@ -8,6 +8,12 @@ is :class:`LoopReference` — the pre-ticket-05 ``MonteCarloPolicy`` bodies
 **including the duplicate-append quirk**. Every test drives both over the same
 randomized worlds and States and asserts they agree.
 
+Simulator-correctness ticket 06 (B10) is the one deliberate exception: the
+loop's fourth earliness bin was never assigned, so ``LoopReference`` carries
+the same one-line fix as :class:`~stdvrp.policies.feature_extraction.FeatureExtractor`
+rather than reproducing that bug. Both sides must move together, or this file
+would stop testing that the vectorization matches the (corrected) definition.
+
 Two tolerances, deliberately:
 
 * ``rtol=0`` (bit-exact) for the general-state features, the delayed-Client
@@ -31,6 +37,9 @@ from stdvrp.simulation.state import State
 
 DEPOT = 0
 HORIZON_END = 780
+# The oracle keeps this literal (it transcribes the pre-ticket-02 code
+# unchanged); FeatureExtractor now takes it as episode_end_minute.
+EPISODE_END = 1150
 
 
 # --- the oracle: the loop bodies this ticket replaces, copied verbatim ----------
@@ -58,8 +67,15 @@ class LoopReference:
         for client in self.state.clients_not_visited:
             assigned_vehicle = None
             min_travel_time = float("inf")
-            for vehicle_idx, vehicle_position in enumerate(self.state.vehicle_position):
-                if vehicle_position == self.depot and self.state.tau_episode > 310:
+            for vehicle_idx, vehicle_position in enumerate(self.state.last_node_reached):
+                # Ticket 04 (ADR-0005): moved in lockstep with the corrected
+                # FeatureExtractor definition (same precedent as B10, ticket 06)
+                # — a vehicle mid-arc past the depot is not idle.
+                if (
+                    vehicle_position == self.depot
+                    and self.state.vehicle_standing[vehicle_idx]
+                    and self.state.tau_episode > 310
+                ):
                     continue
 
                 travel_time = self.geometry.average_minutes(vehicle_position, client)
@@ -118,6 +134,12 @@ class LoopReference:
             elif 500 <= i < 600 and self.state.tau_episode < 600:
                 client_counts_earliness[2] += 1
 
+        # B10 fix: the fourth bin is whatever the first three left uncounted,
+        # so the four bins always partition clients_not_visited.
+        client_counts_earliness[3] = len(self.state.clients_not_visited) - sum(
+            client_counts_earliness[:3]
+        )
+
         for count in client_counts_earliness:
             self.X_general_state.append(count / self.number_clients)
 
@@ -161,7 +183,7 @@ class LoopReference:
         features.append(0)
 
         total_dist = sum(
-            geometry.length(state.vehicle_position[i], action[i]) for i in range(n_veh)
+            geometry.length(state.last_node_reached[i], action[i]) for i in range(n_veh)
         )
         features.append(total_dist / 100.0)
 
@@ -169,7 +191,7 @@ class LoopReference:
         delay_cost = 0.0
         for i, a in enumerate(action):
             if a in clients_all and a != depot:
-                travel_time = geometry.average_minutes(state.vehicle_position[i], a)
+                travel_time = geometry.average_minutes(state.last_node_reached[i], a)
                 est_arrival = tau + travel_time
                 earl_tw, due_tw = cg_clients[a]
 
@@ -185,7 +207,7 @@ class LoopReference:
         for veh in range(n_veh):
             for _, client in vehicle_to_clients[veh]:
                 if client not in action:
-                    t1 = geometry.average_minutes(state.vehicle_position[veh], action[veh])
+                    t1 = geometry.average_minutes(state.last_node_reached[veh], action[veh])
                     t2 = geometry.average_minutes(action[veh], client)
                     est = tau + t1 + t2 + service_time
                     _, due_tw = cg_clients[client]
@@ -197,11 +219,11 @@ class LoopReference:
         overtime_cost = 0.0
         for i, a in enumerate(action):
             if a != depot:
-                t1 = geometry.average_minutes(state.vehicle_position[i], a)
+                t1 = geometry.average_minutes(state.last_node_reached[i], a)
                 t2 = geometry.average_minutes(a, depot)
                 est_ret = tau + t1 + t2 + service_time
             else:
-                est_ret = tau + geometry.average_minutes(state.vehicle_position[i], depot)
+                est_ret = tau + geometry.average_minutes(state.last_node_reached[i], depot)
 
             if est_ret > end_horizon:
                 base = end_horizon if tau < end_horizon else tau
@@ -253,7 +275,7 @@ class Scenario:
             int(self._rng.integers(0, self._node_count))
             for _ in range(self.number_vehicles - depot_vehicles)
         ]
-        state.vehicle_position = [float(p) for p in positions]
+        state.last_node_reached = [float(p) for p in positions]
         return state
 
     def extractor(self) -> FeatureExtractor:
@@ -263,7 +285,8 @@ class Scenario:
             number_vehicles=self.number_vehicles,
             number_clients=self.number_clients,
             depot=DEPOT,
-            horizon_end_minute=HORIZON_END,
+            shift_end_minute=HORIZON_END,
+            episode_end_minute=EPISODE_END,
             service_time=5,
             delay_cost_factor=1,
             earliness_cost_factor=0.1,
@@ -348,6 +371,25 @@ class TestGeneralStateFeatureParity:
 
         assert produced.shape == (12,)
         np.testing.assert_array_equal(produced, np.array(expected, dtype=np.float64))
+
+
+class TestEarlinessBinPartition:
+    """B10: the four earliness bins partition pending demand, at every tau.
+
+    ``general[7:11]`` are ``count / number_clients`` for the four earliness
+    bins; their sum must equal ``len(clients_not_visited) / number_clients``
+    regardless of which of the tau-gated bins is open, so that no pending
+    Client is ever counted by zero bins.
+    """
+
+    @pytest.mark.parametrize("scenario, state", ALL_SCENARIOS)
+    def test_the_four_bins_sum_to_pending_clients(self, scenario, state):
+        features = scenario.extractor().state_features(state)
+
+        produced = float(np.sum(features.general[7:11]))
+        expected = len(state.clients_not_visited) / scenario.number_clients
+
+        assert produced == pytest.approx(expected, abs=1e-9)
 
 
 class TestStateActionFeatureParity:

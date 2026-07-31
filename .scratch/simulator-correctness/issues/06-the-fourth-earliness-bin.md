@@ -26,18 +26,18 @@ where end-of-day pressure and delay penalties start to bite.
 
 **Blocked by:** 01
 
-**Status:** open
+**Status:** resolved
 
-- [ ] Assign the fourth bin so it covers what the other three leave out, and
+- [x] Assign the fourth bin so it covers what the other three leave out, and
       `general[10]` stops being identically zero.
-- [ ] **Do not redesign the cuts.** Where the boundaries should sit — and
+- [x] **Do not redesign the cuts.** Where the boundaries should sit — and
       whether four bins keyed to absolute minutes is the right shape at all — is
       feature design, which belongs to the modeling effort along with B4 and B6.
       This ticket makes the existing design *work*; it does not replace it.
-- [ ] Invariant: the four earliness bins **partition** pending demand — the four
+- [x] Invariant: the four earliness bins **partition** pending demand — the four
       fractions sum to pending Clients over `number_clients`, at every tau. That
       property is what makes "a Client falls in no bin" impossible to reintroduce.
-- [ ] Update the docstrings: they document the other dead weight (the `X[:,13]`
+- [x] Update the docstrings: they document the other dead weight (the `X[:,13]`
       filler) but not this one. Note that `W[13]` remains dead by design and
       `final_w[13] == 0.0` — after this ticket exactly one weight is
       deliberately dead, not two accidentally.
@@ -70,3 +70,97 @@ invariant green. The 60-seed bench before/after, reported without a directional
 claim.
 
 ## Comments
+
+### Resolution (2026-07-30)
+
+**The fix**, `src/stdvrp/policies/feature_extraction.py`, `_general_features`:
+one line after the existing `if tau < 400/500/600` chain (unchanged):
+
+```python
+counts_earliness[3] = remaining_count - sum(counts_earliness[:3])
+```
+
+Bin 3 is *not* redefined as "earliness >= 600" — a bin above also drops to
+zero once `tau` passes its own gate (e.g. bin 0 once `tau >= 400`) while its
+Clients are still pending, and bin 3 must absorb those too or the partition
+invariant breaks the moment any earlier bin is gated shut. This is exactly
+what "covers what the other three leave out" means literally, not just for
+the `earliness >= 600` case. The 400/500/600 cuts themselves are untouched.
+
+**Invariant (spec.md catalogue row 7), `tests/unit/test_feature_extraction.py`,
+`TestEarlinessBinPartition`**: `sum(general[7:11]) == len(clients_not_visited) /
+number_clients`, parametrized over the file's existing 540 scenario/tau/remaining-
+count/depot-occupancy combinations. Red before the fix — **282 of 540 cases
+failed** (every combination with at least one pending Client whose earliness
+either sits at/above 600, or belongs to a bin already gated shut by tau).
+Green after, all 540.
+
+**Parity oracle updated in lockstep.** `tests/unit/test_feature_extraction.py`'s
+`LoopReference` (the verbatim pre-vectorization loop, simulation-performance
+ticket 05's oracle) and `tests/unit/test_monte_carlo_policy.py`'s
+`hand_computed_features()` (a hand-derived 19-feature vector for a fixed toy
+World) both carried the same unassigned-fourth-bin bug and needed the identical
+one-line fix — otherwise the bit-exact parity tests would fail not because the
+vectorization is wrong, but because the oracles still encode the bug the
+production code no longer has. `hand_computed_features`'s World has 2 pending
+Clients at `tau=400`: Client 2 (window start 450) lands in bin 1 as before;
+Client 1 (window start 350, normally bin 0) is now caught by bin 3 instead,
+since `tau == 400` already gates bin 0 shut. `general[10]` changes from `0.0`
+to `1/2`.
+
+### Self-golden (predicted vs. measured)
+
+Verified in an isolated worktree at the pre-ticket commit (checked out clean,
+only this ticket's diff applied) to avoid conflating with concurrent tickets
+also in flight on this branch:
+
+| Block | Predicted | Measured |
+|---|---|---|
+| **Frozen-W** | exactly zero | **Exactly zero.** `final_w`/`training`-w/`evaluation`/`frozen_w_eval` all differ only where predicted (see below) — the `frozen_w_eval` block is bit-identical, entry for entry, seed for seed. |
+| Training | divergence, W trajectory changes shape | `training[*].w` diverges from `TRAIN_SEEDS[0]`'s very first update (`w[10]` goes from a bug-locked `0.0` to nonzero immediately); `training[*].metrics` stayed bit-identical on this capture (the small perturbation never flipped a greedy argmax across these 5 episodes) |
+| Final-eval | divergence, since it runs on the changed final W | `final_w` differs (all 18 previously-trained components shift slightly in addition to `final_w[10]` going nonzero), but `evaluation[*].metrics` came out bit-identical on this capture — same mechanism as training: no eval-seed decision flips under this particular W perturbation |
+
+**`final_w[10] == 0.17189672845126716`** after training (was `0.0` exactly) —
+confirms the weight now trains, closing the ticket's second piece of required
+evidence. Per spec.md decision 10 (three-outcome rule): the strong claim
+(frozen-W exactly zero) **matches** exactly as predicted, unedited above. The
+softer training/eval prediction is explained to a mechanism (argmax decisions
+insensitive to this magnitude of W perturbation on this specific 5+10-episode
+capture) rather than reverted — nothing here contradicts the mechanism, it is
+simply a fact about this small sample, not a claim that decisions can never
+move.
+
+### 60-seed bench (before = ticket 01's baseline at 55f32aa, after = this fix)
+
+Both `--w frozen` and `--w zero` (decision-stable, no training — see ticket
+01): every per-seed metric (`total_cost` and its 4 components, `km_driven`,
+`final_tau`, `decisions`, unserved split, every other invariant counter) is
+**bit-identical across all 60 seeds, in both W configurations** — expected,
+since neither W multiplies feature 10 by anything nonzero. The only column
+that moves is the bench's own B10 counter:
+
+```
+                              before        after
+--w frozen  B10_earliness_bin_partition  episodes=60/60 decisions=3596  ->  episodes=0/60 decisions=0
+--w zero    B10_earliness_bin_partition  episodes=60/60 decisions=3206  ->  episodes=0/60 decisions=0
+```
+
+No directional cost claim is made, per the ticket's own prediction — the bench
+is decision-stable by construction and cannot observe this ticket's effect
+except through that counter; the self-golden training block above is what
+shows the weight now moves.
+
+Evidence files: `.scratch/simulator-correctness/bench-output/ticket06-default-fleet-frozenw-after.txt`,
+`ticket06-default-fleet-zerow-after.txt` (before = `ticket01-default-fleet-frozenw.txt` /
+`ticket01-default-fleet.txt`, already committed).
+
+### Full suite
+
+`ruff check` / `ruff format --check` / `mypy` clean. Full pytest suite green
+in the isolated verification worktree (this branch has several other tickets'
+work in flight in the shared working tree concurrently; verification was done
+in isolation rather than in-place for a clean signal — see
+`git-pathspec-commit-stages-worktree` in project memory for why, and for the
+staging technique used to land only this ticket's hunk in
+`tests/unit/test_monte_carlo_policy.py` without disturbing another session's
+concurrent, uncommitted edits to the same file).

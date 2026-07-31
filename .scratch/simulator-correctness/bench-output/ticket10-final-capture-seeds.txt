@@ -1,0 +1,54 @@
+# capture-seeds bench (frozen-W protocol: 5 train + 10 eval)
+# n_seeds=15
+
+seed	crashed	total_cost	distance_cost	delay_cost	earliness_cost	overtime_cost	km_driven	final_tau	decisions	unserved_in_window	unserved_overdue	mid_arc_park_violations	duplicate_assignment_transitions	earliness_bin_violations	congestion_shorten_violations	congestion_book_size_at_end	congestion_book_expired_at_end	negative_cost_component_violations	money_without_counter_violations
+1000	0	601.961599	206.007950	64.260578	331.693070	0	206.007950	458.364116	69	0	0	0	0	0	0	0	0	0	0
+1001	0	553.727881	281.582942	0	272.144939	0	281.582942	403.555539	70	0	0	0	0	0	0	0	0	0	0
+1002	0	463.531746	275.635124	23.840426	164.056196	0	275.635124	496.657996	79	0	0	0	0	0	0	0	0	0	0
+1003	0	393.646606	142.549624	0	251.096981	0	142.549624	408.662509	53	0	0	0	0	0	0	0	0	0	0
+1004	0	575.219699	201.512253	0	373.707446	0	201.512253	447.777863	71	0	0	0	0	0	0	58	0	0	0
+100000	0	526.740336	206.968777	0	319.771559	0	206.968777	453.084885	72	0	0	0	0	0	0	76	0	0	0
+100001	0	331.772105	103.596199	0	228.175906	0	103.596199	456.505543	57	0	0	0	0	0	0	75	0	0	0
+100002	0	384.759790	122.780570	0	261.979220	0	122.780570	419.629489	55	0	0	0	0	0	0	0	0	0	0
+100003	0	461.553517	216.609840	0	244.943677	0	216.609840	487.501097	80	0	0	0	0	0	0	27	0	0	0
+100004	0	437.599739	145.508890	12.624735	279.466114	0	145.508890	419.642213	66	0	0	0	0	0	0	0	0	0	0
+100005	0	400.113038	127.630994	0	272.482044	0	127.630994	421.346612	64	0	0	0	0	0	0	0	0	0	0
+100006	0	473.465422	144.520139	0	328.945283	0	144.520139	408.666393	64	0	0	0	0	0	0	0	0	0	0
+100007	0	374.487553	117.002060	0	257.485493	0	117.002060	503.558624	62	0	0	0	0	0	0	70	0	0	0
+100008	0	350.734827	112.225571	0	238.509256	0	112.225571	403.894595	45	0	0	0	0	0	0	0	0	0	0
+100009	0	304.539325	102.264219	0	202.275105	0	102.264219	435.264439	54	0	0	0	0	0	0	101	0	0	0
+
+# aggregate (N=15, crashed=0)
+mean_total_cost	442.256879
+mean_distance_cost	167.093010
+mean_delay_cost	6.715049
+mean_earliness_cost	268.448819
+mean_overtime_cost	0.000000
+mean_km_driven	167.093010
+mean_final_tau	441.607461
+mean_decisions	64.066667
+unserved_in_window	episodes=0/15	clients=0
+unserved_overdue	episodes=0/15	clients=0
+B1a_B1b_mid_arc_park	episodes=0/15	events=0	per_episode=0.000
+B11_duplicate_assignment	episodes=0/15	transitions=0
+B10_earliness_bin_partition	episodes=0/15	decisions=0
+B7_congestion_shorten	episodes=0/15	writes=0
+B17_book_purge	final_book_size_total=407	expired_at_end_total=0
+B14_money_without_counter	episodes=0/15	violations=0
+B15_negative_cost_component	episodes=0/15	violations=0
+B3_termination_charge_clock_independence	NOT_DIRECTLY_COUNTABLE	see unserved_in_window above (that demand is what B3 prices at zero pre-fix)
+
+# structural checks (independent of seed)
+B9_spread_wrong_depth	count=0	reached_total=675	pct=0.00
+B9_spread_missed_entirely	count=0	genuinely_reachable_total=675	pct=0.00
+B16_cadence_duration_30	fires_shipped=29	fires_intended=29	match
+B16_cadence_duration_45	fires_shipped=9	fires_intended=9	match
+B16_cadence_duration_50	fires_shipped=1	fires_intended=17	MISMATCH
+B16_cadence_duration_60	fires_shipped=15	fires_intended=15	match
+B16_cadence_duration_70	fires_shipped=2	fires_intended=12	MISMATCH
+B16_cadence_duration_90	fires_shipped=9	fires_intended=9	match
+B16_cadence_duration_120	fires_shipped=8	fires_intended=8	match
+B16_cadence_duration_150	fires_shipped=5	fires_intended=5	match
+B16_cadence_duration_180	fires_shipped=5	fires_intended=5	match
+B16_cadence_duration_200	fires_shipped=1	fires_intended=4	MISMATCH
+B16_cadence_duration_240	fires_shipped=4	fires_intended=4	match

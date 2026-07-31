@@ -265,10 +265,17 @@ def _build_speed_std_lookup(speed_table: pd.DataFrame) -> dict[ArcMinuteKey, flo
     """(node_start, node_end, minute) -> speed std, ports ``get_standard_deviation``.
 
     Preserved legacy behavior (ADR-0001): every endpoint lookup is offset by two
-    minutes (418/542, 658/842, 958/1082 — the last/first observed minutes around
-    each data gap). Phase-2 fix (ticket 12, ADR-0001 change log): the 420-540
-    window stores the blend like the other two — the legacy computed it into a
-    discarded row copy and kept the raw gap-filled value.
+    minutes (418/542, 658/842, 958/1082). The left endpoints (418/658/958) are
+    the last observed minutes before each data gap; the right ones (542/842/1082)
+    are not the first observed minutes after it — those are 540/840/1080, one
+    minute earlier — so the right anchor sits one observation past the edge. This
+    is an off-by-two quirk, not an empirical choice: ADR-0001's phase-2 fix 2
+    addendum decided to preserve it rather than move it, since correcting it
+    would be a modeling change (it alters every stochastic velocity drawn in
+    those windows on real multi-day data), not a documentation fix. Phase-2 fix
+    (ticket 12, ADR-0001 change log): the 420-540 window stores the blend like
+    the other two — the legacy computed it into a discarded row copy and kept the
+    raw gap-filled value.
     """
     std_lookup = speed_table.set_index(["Node_Start", "Node_End", "Minute_start"])[
         "speed_std"

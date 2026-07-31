@@ -80,6 +80,7 @@ class EpisodeResult:
     state_count: int
     delay_clients: int
     earliness_clients: int
+    unserved_clients: int
 
 
 def run_evaluation_episode(
@@ -93,8 +94,9 @@ def run_evaluation_episode(
     epsilon: float,
     max_congestion_duration: int,
     horizon_start_minute: int,
-    horizon_end_minute: int,
-    n_observed_arcs: int,
+    shift_end_minute: int,
+    episode_end_minute: int,
+    n_observed_velocities: int,
     depot: int = 0,
     vehicle_count: int | None = None,
     number_actions_test: int | None = None,
@@ -116,7 +118,7 @@ def run_evaluation_episode(
         client.node: (client.time_window_start, client.time_window_end) for client in demand.clients
     }
 
-    state = State(number_vehicles, clients, n_observed_arcs, horizon_start_minute, depot)
+    state = State(number_vehicles, clients, n_observed_velocities, horizon_start_minute, depot)
     geometry = EpisodeGeometry.build(shortest_path_cache, clients, depot)
     policy = MonteCarloPolicy(
         number_vehicles,
@@ -127,7 +129,8 @@ def run_evaluation_episode(
         epsilon,
         depot,
         number_actions_test,
-        horizon_end_minute,
+        shift_end_minute,
+        episode_end_minute,
         W,
         exploration_rng=exploration_rng,
     )
@@ -139,7 +142,8 @@ def run_evaluation_episode(
         time_windows,
         number_vehicles,
         horizon_start_minute,
-        horizon_end_minute,
+        shift_end_minute,
+        episode_end_minute,
         depot,
         congestion_generator,
         max_congestion_duration,
@@ -164,6 +168,7 @@ def _episode_result(model: Model) -> EpisodeResult:
         state_count=model.total_state_counter,
         delay_clients=costs.late_clients,
         earliness_clients=costs.early_clients,
+        unserved_clients=costs.unserved_clients,
     )
 
 
@@ -193,8 +198,9 @@ def run_training_episode(
     epsilon: float,
     max_congestion_duration: int,
     horizon_start_minute: int,
-    horizon_end_minute: int,
-    n_observed_arcs: int,
+    shift_end_minute: int,
+    episode_end_minute: int,
+    n_observed_velocities: int,
     depot: int = 0,
 ) -> TrainingEpisodeResult:
     """Run one ε-greedy training Episode and return the updated W with its costs.
@@ -215,7 +221,7 @@ def run_training_episode(
         client.node: (client.time_window_start, client.time_window_end) for client in demand.clients
     }
 
-    state = State(number_vehicles, clients, n_observed_arcs, horizon_start_minute, depot)
+    state = State(number_vehicles, clients, n_observed_velocities, horizon_start_minute, depot)
     geometry = EpisodeGeometry.build(shortest_path_cache, clients, depot)
     policy = MonteCarloPolicy(
         number_vehicles,
@@ -226,7 +232,8 @@ def run_training_episode(
         epsilon,
         depot,
         number_actions,
-        horizon_end_minute,
+        shift_end_minute,
+        episode_end_minute,
         W,
         exploration_rng=exploration_rng,
         number_actions_train=number_actions,
@@ -240,7 +247,8 @@ def run_training_episode(
         time_windows,
         number_vehicles,
         horizon_start_minute,
-        horizon_end_minute,
+        shift_end_minute,
+        episode_end_minute,
         depot,
         congestion_generator,
         max_congestion_duration,

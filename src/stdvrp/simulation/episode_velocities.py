@@ -105,6 +105,22 @@ class EpisodeVelocities:
         event = self.congested_arcs.get(arc)
         return None if event is None else event[1]
 
+    def purge_expired(self, tau_episode: float) -> None:
+        """Drop every event that has lifted by ``tau_episode`` (B17).
+
+        Unpurged, an expired event sits in the book until :meth:`release`
+        clears it at Episode end: :attr:`any_congestion` stays permanently
+        ``True`` after the first roll and every later lookup carries dead
+        weight. Semantically inert either way — :meth:`sample` and
+        :meth:`congestion_expiry` already treat ``tau_episode >= event[1]`` as
+        uncongested — so this only shrinks the book, it never changes what an
+        arc samples as.
+        """
+        if not self.congested_arcs:
+            return
+        for arc in [arc for arc, event in self.congested_arcs.items() if tau_episode >= event[1]]:
+            del self.congested_arcs[arc]
+
     def release(self) -> None:
         """Drop this Episode's samples and events once it has terminated.
 

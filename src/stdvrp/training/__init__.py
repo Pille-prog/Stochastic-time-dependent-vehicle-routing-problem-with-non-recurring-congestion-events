@@ -6,6 +6,7 @@ from stdvrp.training.episode_pool import (
     EpisodeWorld,
     default_worker_count,
 )
+from stdvrp.training.reference_card import ReferenceCard
 from stdvrp.training.trainer import (
     ActionCountReport,
     EvaluationBlock,
@@ -22,6 +23,7 @@ __all__ = [
     "EpisodeWorld",
     "EvaluationBlock",
     "ExperimentResult",
+    "ReferenceCard",
     "SeedTestResult",
     "Trainer",
     "TrainingResult",

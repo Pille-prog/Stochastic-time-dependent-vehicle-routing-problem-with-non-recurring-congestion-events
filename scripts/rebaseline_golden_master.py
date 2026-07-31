@@ -6,11 +6,20 @@ the capture protocol stored in ``chengdu_full.json`` through the ported Trainer
 on the full local dataset and writes the outcome to ``chengdu_full_phase2.json``.
 
 Ticket 13 (RNG modernization) repurposed that file as the pre-migration
-statistical baseline: ``tests/test_new_package_vs_golden_master.py`` now compares
+statistical baseline: ``tests/test_new_package_vs_golden_master.py`` compared
 its mean-cost-over-N-seeds against it within a tolerance, instead of asserting
-exact equality (ADR-0001 phase-2 addendum) — this script is unchanged, since it
-still captures exactly the moment right before ticket 13 touched any RNG call
-site.
+exact equality (ADR-0001 phase-2 addendum) — this script was unchanged, since
+it still captures exactly the moment right before ticket 13 touched any RNG
+call site.
+
+**Retired (simulator-correctness ticket 03, spec.md decision 8, ADR-0004):**
+that comparison test is deleted — a baseline computed under the old
+termination-pricing formula (B3) cannot gate a run under the new one, and
+continuity with the legacy is no longer this effort's purpose. Nothing reads
+``chengdu_full_phase2.json`` any more; it stays in the repo as historical
+evidence of the new package's pre-ticket-13 behavior. This script is unused
+by any test or gate; keep it only if that history is ever worth
+regenerating.
 
 The legacy capture is NOT touched: ``chengdu_full.json`` remains the frozen
 evidence of what the monolith computed, and ``tests/test_golden_master.py``
@@ -71,7 +80,11 @@ def config_from_protocol(protocol: dict[str, Any], data_dir: Path) -> Any:
         instance_day=601,
         traffic_days=LEGACY_DAYS,
         horizon_start_minute=protocol["horizon_start_time"],
-        horizon_end_minute=protocol["horizon_end_time"],
+        shift_end_minute=protocol["horizon_end_time"],
+        # The captured protocol predates the two-clocks split (ticket 02,
+        # simulator-correctness): 1150 is the legacy's own hardcoded
+        # EMERGENCY_HORIZON, not a value the protocol carries.
+        episode_end_minute=1150,
         # The legacy ClientGenerator hardcodes.
         mean_number_clients=protocol["mean_number_clients"],
         client_count_stddev=30.0,
@@ -89,7 +102,7 @@ def config_from_protocol(protocol: dict[str, Any], data_dir: Path) -> Any:
         learning_rate=protocol["learning_rate"],
         warmup_learning_rate=protocol["warmup_learning_rate"],
         epsilon=protocol["epsilon"],
-        n_observed_arcs=protocol["n_arcs"],
+        n_observed_velocities=protocol["n_arcs"],
         first_train_seed=train_seeds[0],
         evaluation_seed_start=eval_seeds[0],
         evaluation_seed_count=len(eval_seeds),
@@ -97,7 +110,10 @@ def config_from_protocol(protocol: dict[str, Any], data_dir: Path) -> Any:
         test_action_counts=tuple(protocol["test_actions"]),
         test_seeds=tuple(protocol["test_seeds"]),
         test_vehicle_counts=tuple(protocol["test_vehicles"]),
-        static_policy_mean_cost=None,
+        neural_d_model=128,
+        neural_n_layers=3,
+        neural_n_heads=4,
+        device="cpu",
     )
 
 
@@ -140,7 +156,7 @@ def run_rebaseline() -> None:
             clients_per_vehicle=28,
             time_window_spread=protocol["diff_TW"],
             horizon_start_minute=protocol["horizon_start_time"],
-            horizon_end_minute=protocol["horizon_end_time"],
+            shift_end_minute=protocol["horizon_end_time"],
         ),
         travel_time_model=travel_time_model,
         shortest_path_cache=ShortestPathCache.from_csv(data_dir / "all_shortest_paths.csv"),

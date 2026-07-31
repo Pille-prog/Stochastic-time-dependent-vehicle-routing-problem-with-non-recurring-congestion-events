@@ -3,8 +3,13 @@
 Replaces the legacy comma-separated ``sys.argv`` string plus the values that were
 hardcoded across ``main()``, ``training_and_testing`` and ``model`` (horizon 300-780,
 ``n_arcs=3``, warm-up learning rate 1e-6, evaluation seeds 100000-100049, data file
-paths, the ``mean_static_policy`` plot baseline). One YAML file per experiment,
-versioned next to the experiment.
+paths). One YAML file per experiment, versioned next to the experiment.
+
+The legacy's hardcoded ``mean_static_policy`` plot baseline lived here as
+``static_policy_mean_cost`` through simulator-correctness; ticket 01
+(neural-policy) retired it in favour of ``ReferenceCard``
+(``stdvrp.training.reference_card``) — a frozen per-seed cost vector, which
+supports the paired comparison a single scalar cannot.
 """
 
 from __future__ import annotations
@@ -28,9 +33,15 @@ class ExperimentConfig:
     instance_day: int
     traffic_days: tuple[int, ...]
 
-    # Horizon in minutes since 03:00 (formerly hardcoded 300 and 780).
+    # Horizon in minutes since 03:00 (formerly hardcoded 300 and 780). Two
+    # distinct clocks (ticket 02, simulator-correctness, B12/B15): the shift's
+    # end, past which overtime accrues (formerly the lying ``horizon_end_minute``
+    # name — the code already called it ``shift_end_minute`` internally), and
+    # the episode's hard stop, formerly the model-internal hardcoded
+    # ``EMERGENCY_HORIZON`` and independent of any config.
     horizon_start_minute: int
-    horizon_end_minute: int
+    shift_end_minute: int
+    episode_end_minute: int
 
     # Demand (former argv: mean_number_clients, diff_TW; former ClientGenerator
     # hardcodes: gauss stddev 30, 60-client floor, the {150: 28, 250: 29}
@@ -59,7 +70,7 @@ class ExperimentConfig:
     learning_rate: float
     warmup_learning_rate: float | None
     epsilon: float
-    n_observed_arcs: int
+    n_observed_velocities: int
     first_train_seed: int
     evaluation_seed_start: int
     evaluation_seed_count: int
@@ -77,21 +88,41 @@ class ExperimentConfig:
     test_seeds: tuple[int, ...]
     test_vehicle_counts: tuple[int, ...]
 
-    # Plot baseline (was a hardcoded lookup table keyed by experiment parameters).
-    static_policy_mean_cost: float | None
+    # Neural policy (ticket 03, neural-policy): the transformer approximator's
+    # architecture, tunable on the evaluation seeds only (spec.md's "Starting
+    # architecture" row: d=128, 3 layers, 4 heads — measured 594,945 params at
+    # dim_feedforward=4*d_model, see spec.md's "Compute budget" section). torch
+    # is an optional extra (`stdvrp.policies` stays importable without it), so
+    # these fields are plain ints/strings, never a torch type.
+    neural_d_model: int
+    neural_n_layers: int
+    neural_n_heads: int
+    # "cpu" or "cuda". Defaults to CPU per spec.md decision 7 (a structural
+    # choice, not overturned by measurement): ticket 03 measured CUDA faster on
+    # both the acting and learning paths on the reference hardware (RTX 4060
+    # Laptop, 8 GB), but that measurement is single-process, and EpisodePool
+    # workers each wanting their own CUDA context on an 8 GB GPU is a separate,
+    # untested interaction (see the ticket's Comments) — CPU is the safe
+    # default; pass ``device: cuda`` explicitly once that interaction is known.
+    device: str = "cpu"
 
     def __post_init__(self) -> None:
         if not self.traffic_days:
             raise ValueError("traffic_days must not be empty")
         if self.instance_day not in self.traffic_days:
             raise ValueError(f"instance_day {self.instance_day} must be one of traffic_days")
-        if not 0 <= self.horizon_start_minute < self.horizon_end_minute:
-            raise ValueError("horizon must satisfy 0 <= horizon_start_minute < horizon_end_minute")
+        if not 0 <= self.horizon_start_minute < self.shift_end_minute:
+            raise ValueError("horizon must satisfy 0 <= horizon_start_minute < shift_end_minute")
+        if self.shift_end_minute > self.episode_end_minute:
+            # B15: an unguarded shift end past the episode's hard stop is how the
+            # legacy priced negative overtime — reject the config outright rather
+            # than merely leave it unreached (spec.md decision 5).
+            raise ValueError("shift_end_minute must be <= episode_end_minute")
         if self.mean_number_clients <= 0:
             raise ValueError("mean_number_clients must be positive")
         if self.client_count_stddev < 0:
             raise ValueError("client_count_stddev must be >= 0")
-        if not 0 <= self.time_window_spread <= self.horizon_end_minute - self.horizon_start_minute:
+        if not 0 <= self.time_window_spread <= self.shift_end_minute - self.horizon_start_minute:
             raise ValueError("time_window_spread must fit within the horizon")
         lo, hi = self.client_universe_node_range
         if lo >= hi:
@@ -117,7 +148,7 @@ class ExperimentConfig:
             "test_frequency",
             "test_episodes",
             "evaluation_seed_count",
-            "n_observed_arcs",
+            "n_observed_velocities",
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -137,8 +168,13 @@ class ExperimentConfig:
             )
         if not 0 <= self.epsilon <= 1:
             raise ValueError("epsilon must be in [0, 1]")
-        if self.static_policy_mean_cost is not None and self.static_policy_mean_cost <= 0:
-            raise ValueError("static_policy_mean_cost must be positive or null")
+        for name in ("neural_d_model", "neural_n_layers", "neural_n_heads"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.neural_d_model % self.neural_n_heads != 0:
+            raise ValueError("neural_d_model must be divisible by neural_n_heads")
+        if self.device not in ("cpu", "cuda"):
+            raise ValueError(f"device must be 'cpu' or 'cuda', got {self.device!r}")
 
     @property
     def evaluation_seeds(self) -> tuple[int, ...]:
@@ -189,17 +225,14 @@ class ExperimentConfig:
             values["warmup_learning_rate"] = _require_float(
                 path, "warmup_learning_rate", values["warmup_learning_rate"]
             )
-        if values["static_policy_mean_cost"] is not None:
-            values["static_policy_mean_cost"] = _require_float(
-                path, "static_policy_mean_cost", values["static_policy_mean_cost"]
-            )
-        for name in ("links_file", "shortest_paths_file"):
+        for name in ("links_file", "shortest_paths_file", "device"):
             if not isinstance(values[name], str) or not values[name]:
                 raise ValueError(f"{path}: {name} must be a non-empty string")
         for name in (
             "instance_day",
             "horizon_start_minute",
-            "horizon_end_minute",
+            "shift_end_minute",
+            "episode_end_minute",
             "mean_number_clients",
             "min_number_clients",
             "clients_per_vehicle",
@@ -209,11 +242,14 @@ class ExperimentConfig:
             "max_congestion_duration",
             "total_train_iterations",
             "test_frequency",
-            "n_observed_arcs",
+            "n_observed_velocities",
             "first_train_seed",
             "evaluation_seed_start",
             "evaluation_seed_count",
             "test_episodes",
+            "neural_d_model",
+            "neural_n_layers",
+            "neural_n_heads",
         ):
             values[name] = _require_int(path, name, values[name])
         return cls(**values)

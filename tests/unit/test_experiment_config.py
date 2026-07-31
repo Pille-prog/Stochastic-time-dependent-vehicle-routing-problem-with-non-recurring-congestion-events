@@ -19,7 +19,8 @@ def valid_values() -> dict:
         "instance_day": 601,
         "traffic_days": [601],
         "horizon_start_minute": 300,
-        "horizon_end_minute": 780,
+        "shift_end_minute": 780,
+        "episode_end_minute": 1150,
         "mean_number_clients": 20,
         "client_count_stddev": 4.0,
         "min_number_clients": 8,
@@ -36,7 +37,7 @@ def valid_values() -> dict:
         "learning_rate": 1.0e-5,
         "warmup_learning_rate": 1.0e-6,
         "epsilon": 0.1,
-        "n_observed_arcs": 3,
+        "n_observed_velocities": 3,
         "first_train_seed": 1000,
         "evaluation_seed_start": 100000,
         "evaluation_seed_count": 50,
@@ -44,7 +45,10 @@ def valid_values() -> dict:
         "test_action_counts": [2],
         "test_seeds": [100, 101],
         "test_vehicle_counts": [4, 4],
-        "static_policy_mean_cost": None,
+        "neural_d_model": 128,
+        "neural_n_layers": 3,
+        "neural_n_heads": 4,
+        "device": "cpu",
     }
 
 
@@ -59,8 +63,9 @@ def test_loads_the_committed_fixture_config() -> None:
     assert config.instance_day == 601
     assert config.traffic_days == (601,)
     assert config.horizon_start_minute == 300
-    assert config.horizon_end_minute == 780
-    assert config.n_observed_arcs == 3
+    assert config.shift_end_minute == 780
+    assert config.episode_end_minute == 1150
+    assert config.n_observed_velocities == 3
     assert config.warmup_learning_rate == 1.0e-6
     assert config.data_dir == FIXTURE_CONFIG.parent / "."
     assert (config.data_dir / config.links_file).is_file()
@@ -117,12 +122,27 @@ def test_scientific_notation_without_dot_still_parses_as_float(tmp_path: Path) -
     assert ExperimentConfig.from_yaml(path).warmup_learning_rate == 1.0e-6
 
 
+def test_cuda_device_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"device": "cuda"}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.device == "cuda"
+
+
+def test_shift_end_minute_equal_to_episode_end_minute_is_accepted(tmp_path: Path) -> None:
+    # Ticket 02 (simulator-correctness, B15): the boundary itself is valid —
+    # only shift_end_minute > episode_end_minute is rejected.
+    values = valid_values() | {"shift_end_minute": 1150, "episode_end_minute": 1150}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.shift_end_minute == config.episode_end_minute == 1150
+
+
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [
         ({"traffic_days": []}, "traffic_days"),
         ({"instance_day": 602}, "instance_day"),
         ({"horizon_start_minute": 780}, "horizon"),
+        ({"shift_end_minute": 1200}, "episode_end_minute"),
         ({"epsilon": 1.5}, "epsilon"),
         ({"congestion_lower_bound": 0.5}, "congestion bounds"),
         ({"max_congestion_duration": 29}, "max_congestion_duration"),
@@ -137,12 +157,17 @@ def test_scientific_notation_without_dot_still_parses_as_float(tmp_path: Path) -
         ({"min_number_clients": 0}, "min_number_clients"),
         ({"min_number_clients": 100}, "min_number_clients"),
         ({"clients_per_vehicle": 0}, "clients_per_vehicle"),
-        ({"static_policy_mean_cost": -3.0}, "static_policy_mean_cost"),
         ({"test_action_counts": []}, "test_action_counts"),
         ({"test_action_counts": [2, 0]}, "test_action_counts"),
         ({"test_seeds": []}, "test_seeds"),
         ({"test_vehicle_counts": [4]}, "test_vehicle_counts"),
         ({"test_vehicle_counts": [4, 0]}, "test_vehicle_counts"),
+        ({"neural_d_model": 0}, "neural_d_model"),
+        ({"neural_n_layers": 0}, "neural_n_layers"),
+        ({"neural_n_heads": 0}, "neural_n_heads"),
+        ({"neural_d_model": 130, "neural_n_heads": 4}, "divisible"),
+        ({"device": "tpu"}, "device"),
+        ({"device": ""}, "device"),
     ],
 )
 def test_invalid_values_are_rejected(tmp_path: Path, overrides: dict, match: str) -> None:

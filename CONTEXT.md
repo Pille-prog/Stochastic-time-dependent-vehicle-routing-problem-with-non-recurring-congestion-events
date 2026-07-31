@@ -7,11 +7,11 @@ Simulation and policy-optimization laboratory for the Stochastic Time-Dependent 
 ### Sequential decision core (Powell)
 
 **State**:
-The information available to make a decision at a point in simulated time: vehicle positions, pending clients, current velocities, elapsed time.
-_Avoid_: snapshot, context
+The information available to make a decision at a point in simulated time: vehicle positions, pending clients, current velocities, elapsed time. "Vehicle position" is not one field: `last_node_reached` is only the last node a vehicle reached — it can be strictly mid-arc, having merely driven through that node on the way somewhere else — while `vehicle_standing` is the separate fact of whether the vehicle is actually standing there (parked, serving, or holding) rather than travelling past it (ticket 04, simulator-correctness, B1a/B1b, ADR-0005). The depot is not only the fleet's starting point — it is an interior node on 6.8% of cached shortest paths — so `last_node_reached == depot` is true for vehicles genuinely parked *and* for vehicles merely passing through; only `vehicle_standing` tells them apart.
+_Avoid_: snapshot, context; treating `last_node_reached == depot` as "the vehicle is home" — that also needs `vehicle_standing`
 
 **Policy**:
-A rule that maps a State to a decision (which client each vehicle serves next). The first axis of variation: static, dynamic, Monte Carlo, Q-learning variants implement one interface.
+A rule that maps a State to a decision (which client each vehicle serves next). The first axis of variation: static, dynamic, Monte Carlo, Q-learning variants implement one interface. Every Policy is bound by the observability rule: it may read this Episode's State, its time windows and the static EpisodeGeometry (an offline historical prior, not an observation of this Episode), never the live congestion or velocity field the simulator itself sees (ticket 04, neural-policy, ADR-0006).
 _Avoid_: strategy, agent, algorithm
 
 **Model**:
@@ -63,5 +63,9 @@ One complete simulated run over the time horizon: clients are generated, congest
 _Avoid_: iteration, run
 
 **Horizon**:
-The simulated time interval (start minute, end minute) within which all decisions and events happen.
-_Avoid_: time window (reserved for Clients)
+The simulated time interval an Episode runs within, from `horizon_start_minute` to `episode_end_minute` (the hard stop). Not the same as when overtime starts: `shift_end_minute` is the vehicles' shift end, a separate, earlier clock that decisions and events can and do run past (ticket 02, simulator-correctness, B12) — with `horizon_start_minute` = 300 and `shift_end_minute` = 780, Episodes demonstrably run to 1148.
+_Avoid_: time window (reserved for Clients); using "horizon end" to mean the shift end
+
+**Unserved Client**:
+A Client the Episode ends without ever having assigned a vehicle to. While the Episode is still running this is provisional — the Client is merely pending, and a vehicle could still reach it before its window closes. Once the Episode terminates it is final: the Client is abandoned, a different outcome from one served after its window closed (late, but served — see Client). An abandoned Client is priced at termination against the fixed reference clock `max(episode_end_minute, tau_episode)`, never the live `tau_episode` alone (ticket 03, simulator-correctness, B3, ADR-0004): a pending Client's window might still be met, but an abandoned one's never will be, so its price cannot depend on *when* the Episode happened to stop.
+_Avoid_: late (reserved for a Client actually served past its window); treating "unserved" as one outcome — pending (Episode still running) and abandoned (Episode terminated) are priced by two different formulas for exactly this reason

@@ -111,3 +111,20 @@ def test_evaluation_metrics_are_bit_exact(golden: dict[str, Any], live: dict[str
     assert [e["seed"] for e in produced] == [e["seed"] for e in expected]
     for exp, got in zip(expected, produced, strict=True):
         assert got["metrics"] == exp["metrics"], f"seed {exp['seed']}: evaluation metrics drifted"
+
+
+def test_frozen_w_eval_metrics_are_bit_exact(golden: dict[str, Any], live: dict[str, Any]) -> None:
+    """Ticket 01's third block: EVAL_SEEDS run with the literal, never-recomputed FROZEN_W.
+
+    The only block a diff against is attributable purely to a production
+    change (spec.md "Behavior contract") — no cost-function change can move
+    this W, so nothing here can move except through the simulator's own
+    behavior under a fixed decision.
+    """
+    expected = golden["frozen_w_eval"]
+    produced = live["frozen_w_eval"]
+    assert [e["seed"] for e in produced] == [e["seed"] for e in expected]
+    for exp, got in zip(expected, produced, strict=True):
+        assert got["metrics"] == exp["metrics"], (
+            f"seed {exp['seed']}: frozen-W eval metrics drifted"
+        )

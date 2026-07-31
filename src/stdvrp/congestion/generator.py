@@ -18,11 +18,25 @@ Phase-2 deliberate fixes (ticket 12, ADR-0001 change log): the spread walks the
 full ``max_depth`` (the legacy passed ``max_depth - 1``, leaving the depth-3
 damping dead), and spread multipliers saturate at ``congestion_upper_bound``
 (damping divides by a factor < 1, which let them exceed the configured bound).
+
+Ticket 07 fix (B7, ADR-0001 change log): every write to ``congested_arcs``
+composes with a still-active existing entry instead of replacing it outright —
+see :func:`_compose_congestion`. The legacy (and the phase-1 port) let a later,
+milder or shorter-lived event overwrite an earlier, still-active one wholesale,
+which could silently end an arc's congestion up to ``max_congestion_duration``
+early.
+
+Ticket 08 fix (B9, ADR-0001 change log): :meth:`ArcProbabilityCongestionGenerator._reachable_nodes`
+is a true breadth-first traversal now, not depth-first recursion with a single
+shared ``visited`` set. The old traversal could record a node at a non-minimal
+depth, or fail to reach it at all, depending on ``successors``' row order
+rather than network topology.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -30,6 +44,28 @@ import numpy as np
 ArcKey = tuple[float, float]
 # velocity multiplier applied while congested, minute the event ends.
 CongestedArcs = dict[ArcKey, list[float]]
+
+
+def _compose_congestion(
+    congested_arcs: CongestedArcs,
+    arc: ArcKey,
+    event: list[float],
+    minute_start: float,
+) -> None:
+    """Write one congestion ``event`` to ``arc``, composing with an active existing one.
+
+    B7: a write never shortens an active event's expiry and never makes an
+    active arc faster. ``arc``'s existing entry (if any) is "active" when its
+    expiry is still ahead of ``minute_start`` — the same threshold
+    :meth:`EpisodeVelocities.sample` uses to treat an event as lifted. Against
+    an active entry the write keeps the more severe multiplier (the smaller
+    one) and the later expiry; an absent or already-expired entry is replaced
+    outright, since there is nothing live to preserve.
+    """
+    existing = congested_arcs.get(arc)
+    if existing is not None and existing[1] > minute_start:
+        event = [min(event[0], existing[0]), max(event[1], existing[1])]
+    congested_arcs[arc] = event
 
 
 class CongestionGenerator(ABC):
@@ -51,10 +87,13 @@ class CongestionGenerator(ABC):
 class ArcProbabilityCongestionGenerator(CongestionGenerator):
     """One event roll per arc and epoch, spreading to neighbors with damped intensity.
 
-    ``event_probability`` and ``successors`` come from the TravelTimeModel; both
-    iteration orders are behavior (ADR-0001): one uniform draw is consumed per
-    ``event_probability`` key whether or not an event triggers, and the spread
-    walks ``successors`` lists in arc-table order.
+    ``event_probability`` and ``successors`` come from the TravelTimeModel.
+    ``event_probability``'s iteration order is behavior (ADR-0001): one uniform
+    draw is consumed per key whether or not an event triggers. ``successors``'
+    per-node neighbor order is **not** behavior (ticket 08, B9 fix, ADR-0001
+    change log): the spread is a queue-based breadth-first traversal, so which
+    arcs get congested and at what depth is a function of network topology
+    only, independent of arc-table row order.
     """
 
     event_probability: dict[tuple[int, int], float]
@@ -85,10 +124,15 @@ class ArcProbabilityCongestionGenerator(CongestionGenerator):
                     )
                     state_time_elimination = rng.uniform(30, self.max_congestion_duration)
 
-                    congested_arcs[(float(node_start_congestion), float(node_end_congestion))] = [
-                        float(velocity_penalization),
-                        float(minute_start + state_time_elimination),
-                    ]
+                    _compose_congestion(
+                        congested_arcs,
+                        (float(node_start_congestion), float(node_end_congestion)),
+                        [
+                            float(velocity_penalization),
+                            float(minute_start + state_time_elimination),
+                        ],
+                        minute_start,
+                    )
 
                     for node in congestion_road:
                         # Phase-2 fix (ticket 12, ADR-0001 change log): the legacy
@@ -110,7 +154,7 @@ class ArcProbabilityCongestionGenerator(CongestionGenerator):
                                     factor = 0.78
                                 elif depth[node_start] == 3:
                                     factor = 0.73
-                                else:  # unreachable: recursion depth is capped at 3
+                                else:  # unreachable: BFS depth is capped at max_depth (3)
                                     raise AssertionError(f"depth {depth[node_start]} > 3")
 
                                 # Phase-2 fix (ticket 12): damping divides by a
@@ -121,44 +165,44 @@ class ArcProbabilityCongestionGenerator(CongestionGenerator):
                                     velocity_penalization / factor,
                                     self.congestion_upper_bound,
                                 )
-                                if (node_start, affected_node) in congested_arcs and (
-                                    congested_arcs[(node_start, affected_node)][1] > minute_start
-                                    and congested_arcs[(node_start, affected_node)][0]
-                                    <= velocity_penalization_for_depth
-                                ):
-                                    continue
-
-                                congested_arcs[(float(node_start), float(affected_node))] = [
-                                    float(velocity_penalization_for_depth),
-                                    float(minute_start + state_time_elimination),
-                                ]
+                                _compose_congestion(
+                                    congested_arcs,
+                                    (float(node_start), float(affected_node)),
+                                    [
+                                        float(velocity_penalization_for_depth),
+                                        float(minute_start + state_time_elimination),
+                                    ],
+                                    minute_start,
+                                )
 
     def _reachable_nodes(
-        self,
-        node_start: int,
-        depth: int,
-        max_depth: int,
-        visited: set[int] | None = None,
-        node_depth: dict[int, int] | None = None,
+        self, node_start: int, depth: int, max_depth: int
     ) -> tuple[set[int], dict[int, int]]:
-        """Ports ``get_all_node_starts``: BFS-by-recursion collecting nodes and depths.
+        """Ports ``get_all_node_starts``: true breadth-first traversal, queue-based.
 
-        Returns the *set* of reached nodes; the caller iterates it, so the set's
-        insertion history (and therefore iteration order) is part of the preserved
-        behavior (ADR-0001).
+        Ticket 08 fix (B9, ADR-0001 change log): the prior implementation
+        recursed depth-first with a single ``visited`` set, so a node first
+        discovered down a deep branch kept that (non-minimal) depth and, once
+        its recorded depth reached ``max_depth``, stopped expanding — leaving
+        some nodes genuinely within ``max_depth`` unreached, with the outcome
+        depending on ``successors``' row order rather than network topology.
+
+        A FIFO queue processes nodes in non-decreasing depth order, so the
+        first time a node is dequeued and given a depth, that depth is
+        guaranteed minimal; every node is assigned exactly once. Reached set
+        and depths are therefore a pure function of the graph and
+        ``max_depth`` — independent of the order ``successors`` lists each
+        node's neighbors in.
         """
-        if visited is None:
-            visited = set()
-            node_depth = {}
-        assert node_depth is not None
+        node_depth = {node_start: depth}
+        queue: deque[int] = deque([node_start])
+        while queue:
+            node = queue.popleft()
+            if node_depth[node] >= max_depth:
+                continue
+            for neighbor in self.successors.get(node, []):
+                if neighbor not in node_depth:
+                    node_depth[neighbor] = node_depth[node] + 1
+                    queue.append(neighbor)
 
-        visited.add(node_start)
-        node_depth[node_start] = depth
-
-        if depth < max_depth:
-            connected_nodes = self.successors.get(node_start, [])
-            for node in connected_nodes:
-                if node not in visited:
-                    self._reachable_nodes(node, depth + 1, max_depth, visited, node_depth)
-
-        return visited, node_depth
+        return set(node_depth), node_depth
