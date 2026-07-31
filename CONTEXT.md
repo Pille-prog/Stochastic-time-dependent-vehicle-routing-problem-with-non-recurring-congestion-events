@@ -11,7 +11,7 @@ The information available to make a decision at a point in simulated time: vehic
 _Avoid_: snapshot, context; treating `last_node_reached == depot` as "the vehicle is home" — that also needs `vehicle_standing`
 
 **Policy**:
-A rule that maps a State to a decision (which client each vehicle serves next). The first axis of variation: static, dynamic, Monte Carlo, Q-learning variants implement one interface.
+A rule that maps a State to a decision (which client each vehicle serves next). The first axis of variation: static, dynamic, Monte Carlo, Q-learning variants implement one interface. Every Policy is bound by the observability rule: it may read this Episode's State, its time windows and the static EpisodeGeometry (an offline historical prior, not an observation of this Episode), never the live congestion or velocity field the simulator itself sees (ticket 04, neural-policy, ADR-0006).
 _Avoid_: strategy, agent, algorithm
 
 **Model**:
