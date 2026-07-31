@@ -51,6 +51,18 @@ def benchmark_module() -> ModuleType:
 
 
 @pytest.fixture(scope="session")
+def neural_stub_module() -> ModuleType:
+    """scripts/benchmark_neural_stub.py — the stub network cost measurement (ticket 03).
+
+    ``importorskip`` runs *before* the module load, so a test requesting this
+    fixture skips cleanly when torch is absent instead of erroring (the script
+    itself exits the process if imported without torch).
+    """
+    pytest.importorskip("torch")
+    return _load_script_module("benchmark_neural_stub")
+
+
+@pytest.fixture(scope="session")
 def measurement_bench_module() -> ModuleType:
     """scripts/measurement_bench.py — the invariant-violation counters (ticket 01).
 

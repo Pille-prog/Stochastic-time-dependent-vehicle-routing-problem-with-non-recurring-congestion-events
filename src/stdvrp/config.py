@@ -86,6 +86,24 @@ class ExperimentConfig:
     # Plot baseline (was a hardcoded lookup table keyed by experiment parameters).
     static_policy_mean_cost: float | None
 
+    # Neural policy (ticket 03, neural-policy): the transformer approximator's
+    # architecture, tunable on the evaluation seeds only (spec.md's "Starting
+    # architecture" row: d=128, 3 layers, 4 heads — measured 594,945 params at
+    # dim_feedforward=4*d_model, see spec.md's "Compute budget" section). torch
+    # is an optional extra (`stdvrp.policies` stays importable without it), so
+    # these fields are plain ints/strings, never a torch type.
+    neural_d_model: int
+    neural_n_layers: int
+    neural_n_heads: int
+    # "cpu" or "cuda". Defaults to CPU per spec.md decision 7 (a structural
+    # choice, not overturned by measurement): ticket 03 measured CUDA faster on
+    # both the acting and learning paths on the reference hardware (RTX 4060
+    # Laptop, 8 GB), but that measurement is single-process, and EpisodePool
+    # workers each wanting their own CUDA context on an 8 GB GPU is a separate,
+    # untested interaction (see the ticket's Comments) — CPU is the safe
+    # default; pass ``device: cuda`` explicitly once that interaction is known.
+    device: str = "cpu"
+
     def __post_init__(self) -> None:
         if not self.traffic_days:
             raise ValueError("traffic_days must not be empty")
@@ -150,6 +168,13 @@ class ExperimentConfig:
             raise ValueError("epsilon must be in [0, 1]")
         if self.static_policy_mean_cost is not None and self.static_policy_mean_cost <= 0:
             raise ValueError("static_policy_mean_cost must be positive or null")
+        for name in ("neural_d_model", "neural_n_layers", "neural_n_heads"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.neural_d_model % self.neural_n_heads != 0:
+            raise ValueError("neural_d_model must be divisible by neural_n_heads")
+        if self.device not in ("cpu", "cuda"):
+            raise ValueError(f"device must be 'cpu' or 'cuda', got {self.device!r}")
 
     @property
     def evaluation_seeds(self) -> tuple[int, ...]:
@@ -204,7 +229,7 @@ class ExperimentConfig:
             values["static_policy_mean_cost"] = _require_float(
                 path, "static_policy_mean_cost", values["static_policy_mean_cost"]
             )
-        for name in ("links_file", "shortest_paths_file"):
+        for name in ("links_file", "shortest_paths_file", "device"):
             if not isinstance(values[name], str) or not values[name]:
                 raise ValueError(f"{path}: {name} must be a non-empty string")
         for name in (
@@ -226,6 +251,9 @@ class ExperimentConfig:
             "evaluation_seed_start",
             "evaluation_seed_count",
             "test_episodes",
+            "neural_d_model",
+            "neural_n_layers",
+            "neural_n_heads",
         ):
             values[name] = _require_int(path, name, values[name])
         return cls(**values)

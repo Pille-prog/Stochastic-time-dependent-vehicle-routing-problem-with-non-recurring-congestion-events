@@ -59,3 +59,9 @@ test_seeds: [100, 101, 102, 103, 104, 105, 106, 107]
 test_vehicle_counts: [6, 5, 5, 7, 7, 6, 6, 5]
 
 static_policy_mean_cost: 2490
+
+# Neural policy (ticket 03): see experiments/chengdu/config.yaml's comment.
+neural_d_model: 128
+neural_n_layers: 3
+neural_n_heads: 4
+device: cpu

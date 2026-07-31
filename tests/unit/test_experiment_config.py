@@ -46,6 +46,10 @@ def valid_values() -> dict:
         "test_seeds": [100, 101],
         "test_vehicle_counts": [4, 4],
         "static_policy_mean_cost": None,
+        "neural_d_model": 128,
+        "neural_n_layers": 3,
+        "neural_n_heads": 4,
+        "device": "cpu",
     }
 
 
@@ -119,6 +123,12 @@ def test_scientific_notation_without_dot_still_parses_as_float(tmp_path: Path) -
     assert ExperimentConfig.from_yaml(path).warmup_learning_rate == 1.0e-6
 
 
+def test_cuda_device_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"device": "cuda"}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.device == "cuda"
+
+
 def test_shift_end_minute_equal_to_episode_end_minute_is_accepted(tmp_path: Path) -> None:
     # Ticket 02 (simulator-correctness, B15): the boundary itself is valid —
     # only shift_end_minute > episode_end_minute is rejected.
@@ -154,6 +164,12 @@ def test_shift_end_minute_equal_to_episode_end_minute_is_accepted(tmp_path: Path
         ({"test_seeds": []}, "test_seeds"),
         ({"test_vehicle_counts": [4]}, "test_vehicle_counts"),
         ({"test_vehicle_counts": [4, 0]}, "test_vehicle_counts"),
+        ({"neural_d_model": 0}, "neural_d_model"),
+        ({"neural_n_layers": 0}, "neural_n_layers"),
+        ({"neural_n_heads": 0}, "neural_n_heads"),
+        ({"neural_d_model": 130, "neural_n_heads": 4}, "divisible"),
+        ({"device": "tpu"}, "device"),
+        ({"device": ""}, "device"),
     ],
 )
 def test_invalid_values_are_rejected(tmp_path: Path, overrides: dict, match: str) -> None:

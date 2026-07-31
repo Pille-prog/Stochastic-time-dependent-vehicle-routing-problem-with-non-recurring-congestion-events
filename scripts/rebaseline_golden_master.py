@@ -111,6 +111,10 @@ def config_from_protocol(protocol: dict[str, Any], data_dir: Path) -> Any:
         test_seeds=tuple(protocol["test_seeds"]),
         test_vehicle_counts=tuple(protocol["test_vehicles"]),
         static_policy_mean_cost=None,
+        neural_d_model=128,
+        neural_n_layers=3,
+        neural_n_heads=4,
+        device="cpu",
     )
 
 

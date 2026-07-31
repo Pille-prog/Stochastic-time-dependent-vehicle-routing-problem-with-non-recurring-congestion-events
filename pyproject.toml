@@ -16,6 +16,12 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+# Ticket 03 (neural-policy): the transformer Policy's only extra dependency. Not
+# installed by default — `stdvrp.policies` stays importable without it, and the
+# 4000+-test suite never touches a network. `uv sync --extra neural` to opt in.
+[project.optional-dependencies]
+neural = ["torch>=2.4"]
+
 [dependency-groups]
 dev = [
     "hypothesis>=6.100",
@@ -54,6 +60,12 @@ disallow_incomplete_defs = true
 module = ["networkx.*", "matplotlib.*"]
 ignore_missing_imports = true
 
+# torch is an optional extra (ticket 03, neural-policy): mypy must stay clean
+# whether or not it is installed in the checking environment.
+[[tool.mypy.overrides]]
+module = ["torch.*"]
+ignore_missing_imports = true
+
 # Strict on the new core interfaces (ADR-0002 seams and the experiment config).
 # mypy does not accept `strict` per-module, so its component flags are set instead.
 [[tool.mypy.overrides]]
@@ -67,8 +79,11 @@ warn_unreachable = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # The golden-master test needs the full local Chengdu dataset and takes minutes;
-# opt in with `uv run pytest -m golden`.
+# opt in with `uv run pytest -m golden`. `neural` tests skip themselves (via
+# pytest.importorskip) when torch is not installed, so they need no addopts
+# exclusion — the suite is green either way.
 addopts = "-m 'not golden'"
 markers = [
     "golden: exact legacy golden-master equality; needs the full local dataset",
+    "neural: exercises the optional torch dependency; skips cleanly if absent",
 ]
