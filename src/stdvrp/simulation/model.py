@@ -95,12 +95,14 @@ regardless of which clock each one actually stopped at. See
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 
 from stdvrp.congestion import CongestionGenerator
 from stdvrp.network.shortest_path_cache import ShortestPathCache
-from stdvrp.policies.base import Policy
-from stdvrp.policies.monte_carlo import MonteCarloPolicy, TimeWindows
+from stdvrp.policies.base import Policy, TrainablePolicy
+from stdvrp.policies.monte_carlo import TimeWindows
 from stdvrp.simulation.cost_ledger import CostLedger
 from stdvrp.simulation.episode_velocities import EpisodeVelocities
 from stdvrp.simulation.fleet_routes import PARKED, FleetRoutes
@@ -213,11 +215,12 @@ class Model:
         """Ports ``create_monte_carlo_episode_train``: ε-greedy Episode, then one W update.
 
         Snapshots the State and decision before every transition, replays them
-        through ``MonteCarloPolicy.update_W`` when the Episode terminates.
+        through :meth:`~stdvrp.policies.base.TrainablePolicy.learn` when the
+        Episode terminates. Calls through the ``TrainablePolicy`` protocol
+        (ticket 02) — any Policy that satisfies it works here, not only
+        ``MonteCarloPolicy``, which this file no longer names.
         """
-        policy = self.policy
-        if not isinstance(policy, MonteCarloPolicy):
-            raise TypeError("training episodes require a MonteCarloPolicy")
+        policy = cast(TrainablePolicy, self.policy)
 
         self.episode_states: list[TrainingSnapshot] = []
         self.episode_actions: list[list[int]] = []
@@ -234,7 +237,7 @@ class Model:
             self.episode_rewards.append(reward)
             self.total_state_counter += 1
 
-        policy.update_W(self.episode_states, self.episode_actions, self.episode_rewards)
+        policy.learn(self.episode_states, self.episode_actions, self.episode_rewards)
         self.velocities.release()
 
     # --- Transition function: the event dispatch loop ----------------------------

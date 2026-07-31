@@ -93,14 +93,14 @@ class State:
 
 @dataclass(frozen=True, slots=True)
 class TrainingSnapshot:
-    """Immutable capture of the State surface ``MonteCarloPolicy.update_W`` replays.
+    """Immutable capture of the State surface training replay reads.
 
     ``Model.run_training_episode`` snapshots the State before every transition;
-    ``update_W`` walks the snapshots backward, handing each in turn to
-    ``MonteCarloPolicy._already_acquired_cost`` and to the ``FeatureExtractor``
-    (``state_features`` / ``action_features``). That replay path reads exactly
-    these five fields and never
-    mutates them — narrower and cheaper to copy than ``copy.deepcopy(state)``,
+    ``MonteCarloPolicy.learn`` (aliased ``update_W``) walks the snapshots
+    backward, handing each in turn to ``MonteCarloPolicy._already_acquired_cost``
+    and to the ``FeatureExtractor`` (``state_features`` / ``action_features``).
+    That replay path reads the first five fields below and never mutates
+    them — narrower and cheaper to copy than ``copy.deepcopy(state)``,
     which also duplicated fields the replay never touches (``clients_arrival``,
     ``total_vehicle_distance_travelled``, ...). ``State`` mutates
     ``clients_not_visited``, ``last_node_reached``, ``vehicle_standing`` and
@@ -111,6 +111,12 @@ class TrainingSnapshot:
     ``_already_acquired_cost``'s overtime term reads it alongside
     ``last_node_reached`` to tell a vehicle genuinely parked at the depot from
     one merely last seen there mid-arc.
+
+    ``vehicle_completing_service`` joined the other five in ticket 02
+    (neural-policy): no read site inside ``update_W``/``learn``'s replay path
+    reads it (hence the previous five being "exactly right"), but ticket 04's
+    tokenizer will, replaying off the same snapshots. Copied, like the rest —
+    ``State`` mutates this list in place too.
     """
 
     tau_episode: float
@@ -118,14 +124,16 @@ class TrainingSnapshot:
     last_node_reached: tuple[float, ...]
     vehicle_standing: tuple[bool, ...]
     observed_velocity: tuple[tuple[float, ...], ...]
+    vehicle_completing_service: tuple[float, ...]
 
     @classmethod
     def capture(cls, state: State) -> TrainingSnapshot:
-        """Copy the five fields ``update_W``'s replay path reads off ``state``."""
+        """Copy the fields the replay path (``learn``) and the tokenizer read off ``state``."""
         return cls(
             tau_episode=state.tau_episode,
             clients_not_visited=tuple(state.clients_not_visited),
             last_node_reached=tuple(state.last_node_reached),
             vehicle_standing=tuple(state.vehicle_standing),
             observed_velocity=tuple(tuple(v) for v in state.observed_velocity),
+            vehicle_completing_service=tuple(state.vehicle_completing_service),
         )

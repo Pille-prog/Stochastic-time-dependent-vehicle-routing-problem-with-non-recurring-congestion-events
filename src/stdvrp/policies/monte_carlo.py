@@ -7,7 +7,8 @@ definition (the per-vehicle one; every other definition in the monolith sits ins
 string literal) → ``generate_best_Q_pred_for_1_vehicle`` with the live feature
 extractors ``extract_general_state_features`` / ``extract_state_action_features``.
 Training (ticket 08): ``monte_carlo_policy_train`` → ``select_epsilon_greedy_action_train``
-plus the Monte Carlo weight update ``actualize_W`` → ``update_W``.
+plus the Monte Carlo weight update ``actualize_W`` → ``update_W`` → ``learn`` (ticket 02,
+the ``TrainablePolicy`` protocol's name for it; ``update_W`` lives on as an alias).
 
 Ticket 13 (RNG modernization, ADR-0001 phase 2): the caller injects one
 ``exploration_rng: np.random.Generator`` — the policy's single stochastic
@@ -214,8 +215,11 @@ class MonteCarloPolicy(Policy):
                 self.action[vehicle] = self._best_q_action(features, vehicle, candidates)
         return self.action
 
-    def update_W(
-        self, states: list[TrainingSnapshot], actions: list[list[int]], rewards: list[float]
+    def learn(
+        self,
+        snapshots: list[TrainingSnapshot],
+        actions: list[list[int]],
+        rewards: list[float],
     ) -> None:
         """Ports ``actualize_W``: backward Monte Carlo return, one SGD step per epoch.
 
@@ -227,13 +231,17 @@ class MonteCarloPolicy(Policy):
         ``self.state`` that used to smuggle it in. The legacy's dead diagnostics
         (``self.rewards``, ``self.Q_preds``, ``self.error``) are not ported —
         nothing live reads them and they do not touch W.
+
+        Ticket 02: this is ``TrainablePolicy.learn``, the protocol-facing name.
+        ``update_W`` — the name ADR-0001's change log and tickets 06/08/09 use —
+        is kept below as a plain alias to the same function, not a wrapper.
         """
         T = len(actions)
         U_t: float = 0
         lr = self.learning_rate
         for t in range(T - 1, -1, -1):
             U_t += rewards[t + 1]
-            snapshot = states[t]
+            snapshot = snapshots[t]
             acquired_cost = self._already_acquired_cost(snapshot)
             X = self.feature_extractor.action_features(
                 self.feature_extractor.state_features(snapshot), actions[t]
@@ -243,6 +251,8 @@ class MonteCarloPolicy(Policy):
             Q_pred = np.dot(X, self.W)
             gradient = lr * ((U_t - acquired_cost - Q_pred) * X)
             self.W = self.W + gradient
+
+    update_W = learn
 
     def _already_acquired_cost(self, state: State | TrainingSnapshot) -> float:
         """Ports ``calculate_already_acquired_cost``: sunk delay and overtime at tau."""
