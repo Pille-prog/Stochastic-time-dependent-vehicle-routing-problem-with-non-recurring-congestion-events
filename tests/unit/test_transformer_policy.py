@@ -298,10 +298,12 @@ class TestLearn:
         before = [p.clone() for p in policy.encoder.parameters()] + [
             p.clone() for p in policy.head.parameters()
         ]
+        assert policy.last_loss == 0.0
         policy.learn(snapshots, actions, rewards)
         after = list(policy.encoder.parameters()) + list(policy.head.parameters())
 
         assert any(not torch.equal(b, a) for b, a in zip(before, after, strict=True))
+        assert policy.last_loss > 0.0
         for param in after:
             assert torch.isfinite(param).all()
 

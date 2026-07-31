@@ -54,11 +54,12 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from matplotlib import ticker
@@ -68,6 +69,16 @@ from stdvrp.config import ExperimentConfig
 from stdvrp.simulation import EpisodeResult, run_training_episode
 from stdvrp.training.episode_pool import EpisodePool, EpisodeRequest, EpisodeWorld, W
 from stdvrp.training.reference_card import ReferenceCard
+
+if TYPE_CHECKING:
+    # Ticket 07: torch is an optional extra (ticket 03) -- Trainer itself must
+    # stay importable without it, so every neural-policy import that reaches
+    # torch (transitively, via network.py) is deferred into the method bodies
+    # that actually need it (train_neural, _run_neural_evaluation_block). Only
+    # type hints reach these names, resolved lazily by ``from __future__ import
+    # annotations`` above, never at import time.
+    from stdvrp.training.neural_episode import NeuralPolicyState
+    from stdvrp.training.neural_report import EvaluationReport
 
 EPISODE_METRICS = (
     "total_cost",
@@ -144,6 +155,25 @@ class ExperimentResult:
     training: TrainingResult
     test: tuple[ActionCountReport, ...]
     tested_w: W
+
+
+@dataclass(frozen=True, slots=True)
+class NeuralTrainingResult:
+    """Ticket 07: the neural training loop's outcome.
+
+    Unlike :class:`ExperimentResult`, there is no final test here: the blocks
+    below are paired against ``evaluation_seeds`` only, which select
+    checkpoints and hyperparameters and are therefore contaminated for a
+    verdict by construction (spec.md). ``test_seeds`` are touched only by
+    tickets 08/09 — reading a verdict off ``evaluations`` here would be
+    exactly the p-hacking spec.md's anti-p-hacking clause forbids.
+    """
+
+    episodes_completed: int
+    converged: bool
+    evaluations: tuple[EvaluationReport, ...]
+    elapsed_seconds: float
+    policy_state: NeuralPolicyState
 
 
 class Trainer:
@@ -387,6 +417,250 @@ class Trainer:
             return self.episode_pool.run(w, requests, on_progress=on_progress)
         return self.world.run_episodes(w, requests, on_progress=on_progress)
 
+    # --- Ticket 07: the neural Policy's training loop ----------------------------
+    #
+    # Deliberately not built on ``self.episode_pool``/``_run_evaluation_batch``
+    # above: those batch a fixed ``W`` array across worker processes (ticket 08,
+    # simulation-performance), and the transformer's weights change every
+    # episode. Broadcasting fresh weights to a worker pool every evaluation
+    # block is a real, unsolved parallelism question of its own -- out of this
+    # ticket's scope, so evaluation blocks run serially here, exactly like the
+    # ``worker_count=1`` default everywhere else in this codebase.
+
+    def train_neural(
+        self,
+        *,
+        reference_card: ReferenceCard,
+        checkpoint_path: Path,
+        resume: bool = False,
+        max_episodes: int | None = None,
+        max_hours: float | None = None,
+        evaluation_cadence_minimum: int | None = None,
+    ) -> NeuralTrainingResult:
+        """Ticket 07: train the transformer Policy to convergence, watchably and resumably.
+
+        Every evaluation block prints a **paired** report against
+        ``reference_card`` (seed-by-seed, never a difference of means) and is
+        checkpointed atomically. Stops on convergence (patience -> lr cuts ->
+        three cuts with no further improvement) or the hard safety cap (10 000
+        episodes or 24 h — "not the budget"; if it fires, the run did not
+        converge). ``resume=True`` continues an interrupted run from
+        ``checkpoint_path`` — same trajectory, because every stochastic stream
+        is re-derived from each episode's own seed (see
+        ``neural_episode.py``'s module docstring), so nothing but the episode
+        count needs restoring.
+
+        The blocks read only ``evaluation_seeds`` (via ``reference_card`` and
+        this run's own evaluation episodes) — never ``test_seeds``, which
+        select nothing here and are reserved for tickets 08/09's verdict.
+
+        ``max_episodes``/``max_hours``/``evaluation_cadence_minimum`` default
+        to spec.md's frozen values (``None``) — the only reason to pass them
+        is to make a test's safety cap or evaluation cadence reachable in a
+        few episodes instead of thousands; a real training run should never
+        set them.
+        """
+        # Deferred imports: torch is an optional extra (ticket 03); only
+        # calling this method should ever require it (see the TYPE_CHECKING
+        # block at the top of this module).
+        from stdvrp.training.neural_checkpoint import (
+            TrainingCheckpoint,
+            load_checkpoint,
+            save_checkpoint,
+        )
+        from stdvrp.training.neural_episode import build_neural_policy_state
+        from stdvrp.training.neural_report import (
+            MAX_EPISODES,
+            MAX_HOURS,
+            MIN_EVALUATION_CADENCE,
+            ConvergenceAction,
+            ConvergenceState,
+            EvaluationReport,
+            evaluation_cadence,
+            format_episode_line,
+            format_evaluation_block,
+            format_lr,
+            hit_safety_cap,
+            update_convergence,
+        )
+
+        max_episodes = max_episodes if max_episodes is not None else MAX_EPISODES
+        max_hours = max_hours if max_hours is not None else MAX_HOURS
+        cadence_minimum = (
+            evaluation_cadence_minimum
+            if evaluation_cadence_minimum is not None
+            else MIN_EVALUATION_CADENCE
+        )
+
+        config = self.config
+        reference_by_seed = reference_card.evaluation_cost_by_seed()
+        reference_seed_costs = tuple(reference_by_seed[seed] for seed in config.evaluation_seeds)
+
+        # A fixed, documented, reproducible seed for the network's own weight
+        # init -- distinct from every per-episode stream, which spawns from
+        # *that episode's own* seed, never from this one (ticket 13 discipline).
+        # Entropy is a two-element sequence, not the bare ``first_train_seed``
+        # int every episode seed is (``first_train_seed + index``): a bare-int
+        # SeedSequence's first spawned child is identical regardless of how
+        # many children the call asks for, so ``SeedSequence(first_train_seed
+        # + 0).spawn(4)[0]`` (episode 0's congestion stream) would otherwise be
+        # bit-identical to this seed -- confirmed by measurement, not assumed.
+        # The salt makes this entropy structurally unreachable from any plain
+        # per-episode seed (verified over the safety cap's full 10 000-episode
+        # range, all four spawned streams, zero collisions).
+        _INIT_SEED_SALT = 0x4E4554494E49  # arbitrary, distinguishing only
+        (init_seed,) = np.random.SeedSequence([config.first_train_seed, _INIT_SEED_SALT]).spawn(1)
+        policy_state = build_neural_policy_state(config, np.random.default_rng(init_seed))
+        convergence = ConvergenceState(current_lr=config.neural_learning_rate)
+        evaluations: list[EvaluationReport] = []
+        episodes_completed = 0
+        elapsed_seconds = 0.0
+
+        if resume and checkpoint_path.exists():
+            checkpoint = load_checkpoint(checkpoint_path, policy_state)
+            episodes_completed = checkpoint.episodes_completed
+            elapsed_seconds = checkpoint.elapsed_seconds
+            convergence = checkpoint.convergence
+            evaluations = list(checkpoint.evaluations)
+            self._log(
+                f"resumed from {checkpoint_path}: {episodes_completed} episodes completed, "
+                f"lr={format_lr(convergence.current_lr)}"
+            )
+
+        session_start = time.monotonic()
+
+        def total_elapsed() -> float:
+            return elapsed_seconds + (time.monotonic() - session_start)
+
+        next_eval_at = episodes_completed + evaluation_cadence(
+            episodes_completed, minimum=cadence_minimum
+        )
+        converged = False
+
+        try:
+            while not hit_safety_cap(
+                episodes_completed=episodes_completed,
+                elapsed_seconds=total_elapsed(),
+                max_episodes=max_episodes,
+                max_hours=max_hours,
+            ):
+                seed = config.first_train_seed + episodes_completed
+                episode_start = time.monotonic()
+                result, loss = self._run_neural_training_episode(seed, policy_state)
+                episode_wall = time.monotonic() - episode_start
+                episodes_completed += 1
+                self._log(
+                    format_episode_line(
+                        episode=episodes_completed,
+                        seed=seed,
+                        cost=result.total_cost,
+                        loss=loss,
+                        lr=policy_state.current_lr,
+                        wall_clock_seconds=episode_wall,
+                    )
+                )
+
+                if episodes_completed < next_eval_at:
+                    continue
+
+                seed_costs = self._run_neural_evaluation_block(policy_state)
+                report = EvaluationReport(
+                    episodes_completed=episodes_completed,
+                    seed_costs=seed_costs,
+                    reference_seed_costs=reference_seed_costs,
+                )
+                evaluations.append(report)
+                action = update_convergence(convergence, report)
+                self._log(format_evaluation_block(report, convergence))
+
+                if action == ConvergenceAction.REDUCE_LR:
+                    policy_state.current_lr = convergence.current_lr
+                    self._log(
+                        f"PATIENCE EXCEEDED at episode {episodes_completed}: lr -> "
+                        f"{format_lr(convergence.current_lr)} (reduction "
+                        f"{convergence.reductions_applied}/3)"
+                    )
+                elif action == ConvergenceAction.CONVERGED:
+                    converged = True
+                    self._log(
+                        f"CONVERGED at episode {episodes_completed}: no improvement since "
+                        f"episode {convergence.best_episode} ({convergence.best_delta_pct:+.1f}%) "
+                        "after 3 lr reductions"
+                    )
+
+                elapsed_seconds = total_elapsed()
+                session_start = time.monotonic()
+                save_checkpoint(
+                    checkpoint_path,
+                    TrainingCheckpoint(
+                        episodes_completed=episodes_completed,
+                        elapsed_seconds=elapsed_seconds,
+                        convergence=convergence,
+                        evaluations=tuple(evaluations),
+                    ),
+                    policy_state,
+                )
+
+                if converged:
+                    break
+                next_eval_at = episodes_completed + evaluation_cadence(
+                    episodes_completed, minimum=cadence_minimum
+                )
+            else:
+                self._log(
+                    f"SAFETY CAP REACHED at episode {episodes_completed} "
+                    f"({total_elapsed() / 3600:.1f}h) -- run did NOT converge"
+                )
+        except KeyboardInterrupt:
+            last_checkpoint_episode = evaluations[-1].episodes_completed if evaluations else 0
+            self._log(
+                f"INTERRUPTED at episode {episodes_completed}; {checkpoint_path} holds the "
+                f"last complete checkpoint (episode {last_checkpoint_episode}) and is safe "
+                "to resume"
+            )
+            raise
+
+        return NeuralTrainingResult(
+            episodes_completed=episodes_completed,
+            converged=converged,
+            evaluations=tuple(evaluations),
+            elapsed_seconds=total_elapsed(),
+            policy_state=policy_state,
+        )
+
+    def _run_neural_training_episode(
+        self, seed: int, policy_state: NeuralPolicyState
+    ) -> tuple[EpisodeResult, float]:
+        from stdvrp.training.neural_episode import run_neural_training_episode
+
+        return run_neural_training_episode(
+            seed=seed,
+            client_generator=self.world.client_generator,
+            travel_time_model=self.world.travel_time_model,
+            shortest_path_cache=self.world.shortest_path_cache,
+            congestion_generator=self.world.congestion_generator,
+            policy_state=policy_state,
+            config=self.config,
+        )
+
+    def _run_neural_evaluation_block(self, policy_state: NeuralPolicyState) -> tuple[float, ...]:
+        """Greedy evaluation over every ``evaluation_seeds`` seed, in that order."""
+        from stdvrp.training.neural_episode import run_neural_evaluation_episode
+
+        costs = []
+        for seed in self.config.evaluation_seeds:
+            result = run_neural_evaluation_episode(
+                seed=seed,
+                client_generator=self.world.client_generator,
+                travel_time_model=self.world.travel_time_model,
+                shortest_path_cache=self.world.shortest_path_cache,
+                congestion_generator=self.world.congestion_generator,
+                policy_state=policy_state,
+                config=self.config,
+            )
+            costs.append(result.total_cost)
+        return tuple(costs)
+
 
 def _copy_w(w: W) -> W:
     return np.array(w, dtype=np.float64, copy=True)
@@ -455,6 +729,10 @@ def write_training_plot(
     ``static_policy_mean_cost`` scalar: the red line is now the frozen linear
     ``MonteCarloPolicy``'s mean cost over ``evaluation_seeds`` — the same seeds
     this plot's own evaluation blocks use — rather than an unpaired constant.
+    A shaded band one population standard deviation either side of that mean
+    (ticket 07) draws the reference's per-seed **spread**, not only its mean —
+    this cost distribution's variance is wide enough that a bare mean line
+    understates how much a block's own mean can move by chance alone.
     """
     figure = Figure(figsize=(20, 5))
     axes = figure.subplots()
@@ -466,12 +744,22 @@ def write_training_plot(
         label="Cost",
     )
     if reference_card is not None:
+        reference_mean = reference_card.evaluation_mean_cost
+        reference_std = float(np.std(reference_card.evaluation_seed_costs))
         axes.axhline(
-            y=reference_card.evaluation_mean_cost,
+            y=reference_mean,
             color="red",
             linestyle=":",
             label="Linear baseline (reference card)",
         )
+        if reference_std > 0:
+            axes.axhspan(
+                reference_mean - reference_std,
+                reference_mean + reference_std,
+                color="red",
+                alpha=0.1,
+                label="_nolegend_",
+            )
     axes.set_title("Objective Function under Greedy Policy during Training")
     axes.set_xlabel("Number of Episodes")
     axes.set_ylabel("Objective Function")

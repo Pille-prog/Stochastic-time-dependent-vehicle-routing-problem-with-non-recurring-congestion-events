@@ -179,6 +179,13 @@ class TransformerMonteCarloPolicy(Policy):
         self._episode_length = float(episode_end_minute - horizon_start_minute)
         self._return_scale = float(number_clients) * self._episode_length
 
+        # Ticket 07: the mean (standardized) Huber loss over every minibatch of
+        # the most recent learn() call -- not part of the TrainablePolicy
+        # protocol (learn returns None, matching MonteCarloPolicy), read
+        # separately by the Trainer's live per-episode report. 0.0 before the
+        # first learn() call.
+        self.last_loss = 0.0
+
     # --- Acting ------------------------------------------------------------
 
     def decide(self, state: State) -> list[int]:
@@ -285,6 +292,7 @@ class TransformerMonteCarloPolicy(Policy):
         targets = self._backward_returns(snapshots, actions, rewards)
         samples = [(t, vehicle) for t in range(T) for vehicle in range(self.number_vehicles)]
 
+        minibatch_losses: list[float] = []
         for _ in range(self.learn_passes):
             order = self.learn_rng.permutation(len(samples))
             for start in range(0, len(order), self.batch_size):
@@ -299,6 +307,10 @@ class TransformerMonteCarloPolicy(Policy):
                 loss = torch.stack(losses).mean()
                 loss.backward()
                 self.optimizer.step()
+                minibatch_losses.append(float(loss.item()))
+
+        if minibatch_losses:
+            self.last_loss = sum(minibatch_losses) / len(minibatch_losses)
 
     def _replay_q(
         self, snapshot: TrainingSnapshot, action_row: list[int], vehicle: int

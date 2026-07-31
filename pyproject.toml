@@ -62,7 +62,7 @@ disallow_untyped_defs = true
 disallow_incomplete_defs = true
 
 [[tool.mypy.overrides]]
-module = ["networkx.*", "matplotlib.*"]
+module = ["networkx.*", "matplotlib.*", "scipy.*"]
 ignore_missing_imports = true
 
 # torch is an optional extra (ticket 03, neural-policy): mypy must stay clean

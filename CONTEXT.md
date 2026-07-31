@@ -22,6 +22,10 @@ _Avoid_: environment (reserved by RL literature for this very concept — never 
 Runs training and evaluation episodes over the Model to fit and compare Policies.
 _Avoid_: training_and_testing, runner
 
+**Reference card**:
+A completed Policy's frozen per-seed costs — the fixed opponent every later run in an effort is compared against, seed by seed (ticket 01, neural-policy). Never recomputed once frozen: a moving comparison target would make "did it improve" unanswerable. Carries two disjoint seed sets for two disjoint purposes — `evaluation_seeds` (what a training run's live report reads from, ticket 07) select checkpoints and hyperparameters and are therefore contaminated for a verdict by construction; `test_seeds` are the held-out verdict set, touched only when an effort is ready to answer "does it win".
+_Avoid_: baseline (ambiguous with the Policy it was captured from — the card is the frozen *measurement*, not the Policy itself); benchmark
+
 ### Problem data
 
 **RoadNetwork**:
