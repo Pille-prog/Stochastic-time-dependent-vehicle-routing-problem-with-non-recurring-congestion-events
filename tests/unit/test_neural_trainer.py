@@ -371,6 +371,103 @@ class TestCheckpointAndResume:
             torch.testing.assert_close(pa, pb, atol=0.0, rtol=0.0)
 
 
+class TestInitSeedOverride:
+    """``init_seed`` (ticket 08, Gate A) varies only the network's weight init,
+    holding ``first_train_seed``/the training episode sequence fixed -- the one
+    real (non-stubbed) network in this file, kept to a single training episode
+    for speed against the mini fixture."""
+
+    def test_omitting_init_seed_reports_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = make_config()
+        n_seeds = len(config.evaluation_seeds)
+        patch_runners(monkeypatch, ConstantTrainingStub(), ScriptedEvaluationStub(n_seeds, [400.0]))
+        trainer = Trainer(make_world(config), log=lambda _m: None)
+
+        result = trainer.train_neural(
+            reference_card=make_reference_card(config),
+            checkpoint_path=tmp_path / "ckpt.pt",
+            max_episodes=4,
+            evaluation_cadence_minimum=4,
+        )
+
+        assert result.init_seed is None
+
+    def test_an_explicit_init_seed_is_reported_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = make_config()
+        n_seeds = len(config.evaluation_seeds)
+        patch_runners(monkeypatch, ConstantTrainingStub(), ScriptedEvaluationStub(n_seeds, [400.0]))
+        trainer = Trainer(make_world(config), log=lambda _m: None)
+
+        result = trainer.train_neural(
+            reference_card=make_reference_card(config),
+            checkpoint_path=tmp_path / "ckpt.pt",
+            max_episodes=4,
+            evaluation_cadence_minimum=4,
+            init_seed=7,
+        )
+
+        assert result.init_seed == 7
+
+    def test_different_init_seeds_give_different_weights_after_one_real_episode(
+        self, tmp_path: Path
+    ) -> None:
+        config = dataclasses.replace(
+            ExperimentConfig.from_yaml(FIXTURE_CONFIG),
+            neural_d_model=8,
+            neural_n_layers=1,
+            neural_n_heads=2,
+            evaluation_seed_count=2,
+        )
+        world = EpisodeWorld.load(config)
+
+        def train_one_episode(init_seed: int) -> list[torch.Tensor]:
+            trainer = Trainer(world, log=lambda _m: None)
+            result = trainer.train_neural(
+                reference_card=make_reference_card(config),
+                checkpoint_path=tmp_path / f"ckpt_{init_seed}.pt",
+                max_episodes=1,
+                evaluation_cadence_minimum=1,
+                init_seed=init_seed,
+            )
+            return [p.clone() for p in result.policy_state.encoder.parameters()]
+
+        params_a = train_one_episode(0)
+        params_b = train_one_episode(1)
+
+        assert any(not torch.equal(a, b) for a, b in zip(params_a, params_b, strict=True))
+
+    def test_same_init_seed_gives_a_bit_identical_run(self, tmp_path: Path) -> None:
+        config = dataclasses.replace(
+            ExperimentConfig.from_yaml(FIXTURE_CONFIG),
+            neural_d_model=8,
+            neural_n_layers=1,
+            neural_n_heads=2,
+            evaluation_seed_count=2,
+        )
+        world = EpisodeWorld.load(config)
+
+        def train_one_episode(run: int) -> list[torch.Tensor]:
+            trainer = Trainer(world, log=lambda _m: None)
+            result = trainer.train_neural(
+                reference_card=make_reference_card(config),
+                checkpoint_path=tmp_path / f"ckpt_{run}.pt",
+                max_episodes=1,
+                evaluation_cadence_minimum=1,
+                init_seed=3,
+            )
+            return [p.clone() for p in result.policy_state.encoder.parameters()]
+
+        params_a = train_one_episode(1)
+        params_b = train_one_episode(2)
+
+        for a, b in zip(params_a, params_b, strict=True):
+            torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
+
+
 class TestInterrupt:
     def test_keyboard_interrupt_leaves_a_valid_checkpoint_and_reraises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

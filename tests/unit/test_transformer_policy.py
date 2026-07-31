@@ -335,6 +335,73 @@ class TestLearn:
             torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
 
 
+# --- calibration_pairs() (ticket 08, Gate A) ------------------------------------
+
+
+class TestCalibrationPairs:
+    """(Q_predicted, U_t) per (epoch, vehicle) -- Gate A's calibration primitive."""
+
+    def test_pairs_length_matches_epochs_times_vehicles(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=31)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=6)
+
+        pairs = policy.calibration_pairs(snapshots, actions, rewards)
+
+        assert len(pairs) == 6 * 2
+
+    def test_empty_episode_returns_no_pairs(self) -> None:
+        geometry, time_windows, clients = make_world(4, seed=32)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+
+        assert policy.calibration_pairs([], [], [0.0]) == []
+
+    def test_realised_half_matches_backward_returns(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=33)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=4)
+        targets = policy._backward_returns(snapshots, actions, rewards)
+
+        pairs = policy.calibration_pairs(snapshots, actions, rewards)
+
+        for t in range(4):
+            for vehicle in range(2):
+                _, u = pairs[t * 2 + vehicle]
+                assert u == pytest.approx(targets[t])
+
+    def test_predicted_half_matches_replay_q(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=34)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=3)
+
+        pairs = policy.calibration_pairs(snapshots, actions, rewards)
+
+        for t in range(3):
+            for vehicle in range(2):
+                q_pred, _ = pairs[t * 2 + vehicle]
+                with torch.no_grad():
+                    expected = policy._replay_q(snapshots[t], actions[t], vehicle).item()
+                assert q_pred == pytest.approx(expected)
+
+    def test_does_not_mutate_the_network(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=35)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=4)
+        before = [p.clone() for p in policy.encoder.parameters()] + [
+            p.clone() for p in policy.head.parameters()
+        ]
+
+        policy.calibration_pairs(snapshots, actions, rewards)
+
+        after = list(policy.encoder.parameters()) + list(policy.head.parameters())
+        assert all(torch.equal(b, a) for b, a in zip(before, after, strict=True))
+        assert policy.last_loss == 0.0
+
+
 # --- monte_carlo.py stays untouched ---------------------------------------------
 
 

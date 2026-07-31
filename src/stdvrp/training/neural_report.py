@@ -89,6 +89,22 @@ def evaluation_cadence(
     return max(minimum, episodes_completed // target_blocks)
 
 
+def paired_wilcoxon_p(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+    """Two-sided Wilcoxon signed-rank p-value over two paired sequences.
+
+    ``NaN`` when every pair is exactly tied (``scipy`` has nothing to rank) —
+    reported as such rather than raising. Shared by :attr:`EvaluationReport.wilcoxon_p`
+    (paired against the reference card) and Gate A's own trained-vs-untrained
+    comparison (``stdvrp.training.gate_a``, ticket 08) — the same idiom, two
+    different pairs of things being compared.
+    """
+    differences = [x - y for x, y in zip(a, b, strict=True)]
+    if all(difference == 0 for difference in differences):
+        return float("nan")
+    result = stats.wilcoxon(a, b)
+    return float(result.pvalue)
+
+
 @dataclass(frozen=True, slots=True)
 class EvaluationReport:
     """One evaluation block, paired seed-by-seed against the reference card."""
@@ -150,14 +166,7 @@ class EvaluationReport:
         — reported as such rather than raising, since a live report must never
         crash a training run over a degenerate block.
         """
-        differences = [
-            cost - reference
-            for cost, reference in zip(self.seed_costs, self.reference_seed_costs, strict=True)
-        ]
-        if all(difference == 0 for difference in differences):
-            return float("nan")
-        result = stats.wilcoxon(self.seed_costs, self.reference_seed_costs)
-        return float(result.pvalue)
+        return paired_wilcoxon_p(self.seed_costs, self.reference_seed_costs)
 
 
 class ConvergenceAction(Enum):

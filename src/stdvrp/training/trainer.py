@@ -174,6 +174,11 @@ class NeuralTrainingResult:
     evaluations: tuple[EvaluationReport, ...]
     elapsed_seconds: float
     policy_state: NeuralPolicyState
+    # ``None`` when the default salted first_train_seed derivation was used
+    # (see train_neural's own docstring); the explicit value the caller passed
+    # otherwise. Ticket 08 (Gate A) reads this back to confirm which of its
+    # three reproducibility runs produced which trained network.
+    init_seed: int | None = None
 
 
 class Trainer:
@@ -436,6 +441,7 @@ class Trainer:
         max_episodes: int | None = None,
         max_hours: float | None = None,
         evaluation_cadence_minimum: int | None = None,
+        init_seed: int | None = None,
     ) -> NeuralTrainingResult:
         """Ticket 07: train the transformer Policy to convergence, watchably and resumably.
 
@@ -459,6 +465,17 @@ class Trainer:
         is to make a test's safety cap or evaluation cadence reachable in a
         few episodes instead of thousands; a real training run should never
         set them.
+
+        ``init_seed`` (ticket 08, Gate A): ``None`` (the default) keeps the
+        existing salted derivation from ``config.first_train_seed`` below —
+        every other call site's unchanged behavior. An explicit value seeds
+        *only* the network's initial weights, holding ``first_train_seed``
+        (and therefore the whole training episode sequence) fixed — the lever
+        Gate A's reproducibility check needs to vary just the one thing "three
+        independent network-init seeds" names, without also reshuffling which
+        Episodes get trained on between runs. Reported back on the result
+        (``NeuralTrainingResult.init_seed``) so a caller running several arms
+        can tell which trained network came from which seed.
         """
         # Deferred imports: torch is an optional extra (ticket 03); only
         # calling this method should ever require it (see the TYPE_CHECKING
@@ -509,8 +526,15 @@ class Trainer:
         # per-episode seed (verified over the safety cap's full 10 000-episode
         # range, all four spawned streams, zero collisions).
         _INIT_SEED_SALT = 0x4E4554494E49  # arbitrary, distinguishing only
-        (init_seed,) = np.random.SeedSequence([config.first_train_seed, _INIT_SEED_SALT]).spawn(1)
-        policy_state = build_neural_policy_state(config, np.random.default_rng(init_seed))
+        if init_seed is None:
+            (default_init_seed,) = np.random.SeedSequence(
+                [config.first_train_seed, _INIT_SEED_SALT]
+            ).spawn(1)
+            policy_state = build_neural_policy_state(
+                config, np.random.default_rng(default_init_seed)
+            )
+        else:
+            policy_state = build_neural_policy_state(config, np.random.default_rng(init_seed))
         convergence = ConvergenceState(current_lr=config.neural_learning_rate)
         evaluations: list[EvaluationReport] = []
         episodes_completed = 0
@@ -626,6 +650,7 @@ class Trainer:
             evaluations=tuple(evaluations),
             elapsed_seconds=total_elapsed(),
             policy_state=policy_state,
+            init_seed=init_seed,
         )
 
     def _run_neural_training_episode(

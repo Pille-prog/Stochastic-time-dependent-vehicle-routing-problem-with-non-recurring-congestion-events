@@ -28,8 +28,25 @@ from stdvrp.training.neural_report import (
     format_lr,
     hit_safety_cap,
     open_training_log,
+    paired_wilcoxon_p,
     update_convergence,
 )
+
+
+class TestPairedWilcoxonP:
+    """The standalone helper ``EvaluationReport.wilcoxon_p`` and Gate A both use."""
+
+    def test_small_p_for_a_consistent_large_effect(self) -> None:
+        a = tuple(float(i) for i in range(1, 21))
+        b = tuple(float(i) + 1000.0 for i in range(1, 21))
+        assert paired_wilcoxon_p(a, b) < 0.05
+
+    def test_nan_when_every_pair_ties_exactly(self) -> None:
+        assert math.isnan(paired_wilcoxon_p((10.0, 20.0, 30.0), (10.0, 20.0, 30.0)))
+
+    def test_mismatched_lengths_raise(self) -> None:
+        with pytest.raises(ValueError):
+            paired_wilcoxon_p((1.0, 2.0), (1.0,))
 
 
 def make_report(

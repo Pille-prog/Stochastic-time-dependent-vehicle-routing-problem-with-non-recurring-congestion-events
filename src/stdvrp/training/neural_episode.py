@@ -36,15 +36,16 @@ from stdvrp.demand.client_generator import ClientGenerator
 from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPathCache
 from stdvrp.policies.network import QHead, TokenEncoder
-from stdvrp.policies.transformer_policy import TransformerMonteCarloPolicy
+from stdvrp.policies.transformer_policy import CalibrationPair, TransformerMonteCarloPolicy
 from stdvrp.simulation.episode import EpisodeResult
 from stdvrp.simulation.model import Model
-from stdvrp.simulation.state import State
+from stdvrp.simulation.state import State, TrainingSnapshot
 from stdvrp.traffic.travel_time_model import TravelTimeModel
 
 __all__ = [
     "NeuralPolicyState",
     "build_neural_policy_state",
+    "run_neural_calibration_episode",
     "run_neural_evaluation_episode",
     "run_neural_training_episode",
     "spawn_neural_episode_rngs",
@@ -135,32 +136,46 @@ def build_neural_policy_state(
     return NeuralPolicyState(encoder=encoder, head=head, optimizer=optimizer)
 
 
-def _build_policy(
-    policy_state: NeuralPolicyState,
+def _build_episode(
     *,
-    number_vehicles: int,
-    geometry: EpisodeGeometry,
-    time_windows: dict[int, tuple[int, int]],
-    number_clients: int,
-    epsilon: float,
-    depot: int,
-    shift_end_minute: int,
-    episode_end_minute: int,
-    horizon_start_minute: int,
+    seed: int,
+    client_generator: ClientGenerator,
+    travel_time_model: TravelTimeModel,
+    shortest_path_cache: ShortestPathCache,
+    congestion_generator: CongestionGenerator,
+    policy_state: NeuralPolicyState,
     config: ExperimentConfig,
-    exploration_rng: np.random.Generator,
-    learn_rng: np.random.Generator,
-) -> TransformerMonteCarloPolicy:
-    return TransformerMonteCarloPolicy(
+    depot: int,
+) -> tuple[Model, TransformerMonteCarloPolicy]:
+    """Everything the three episode runners below share: demand -> Model, ready to run.
+
+    ``depot`` and ``config.epsilon`` reach the built ``TransformerMonteCarloPolicy``
+    unconditionally (harmless for the two read-only runners: greedy ``decide``
+    never consults ``epsilon``, only ``decide_train`` does).
+    """
+    demand = client_generator.generate(seed)
+    congestion_rng, velocity_rng, exploration_rng, learn_rng = spawn_neural_episode_rngs(seed)
+
+    number_vehicles = demand.vehicle_count
+    clients = [client.node for client in demand.clients]
+    time_windows = {
+        client.node: (client.time_window_start, client.time_window_end) for client in demand.clients
+    }
+
+    state = State(
+        number_vehicles, clients, config.n_observed_velocities, config.horizon_start_minute, depot
+    )
+    geometry = EpisodeGeometry.build(shortest_path_cache, clients, depot)
+    policy = TransformerMonteCarloPolicy(
         number_vehicles,
         geometry,
         time_windows,
-        number_clients,
-        epsilon,
+        len(clients),
+        config.epsilon,
         depot,
-        shift_end_minute,
-        episode_end_minute,
-        horizon_start_minute,
+        config.shift_end_minute,
+        config.episode_end_minute,
+        config.horizon_start_minute,
         policy_state.encoder,
         policy_state.head,
         policy_state.optimizer,
@@ -169,6 +184,23 @@ def _build_policy(
         learn_passes=config.neural_learn_passes,
         batch_size=config.neural_batch_size,
     )
+    model = Model(
+        state,
+        policy,
+        travel_time_model,
+        shortest_path_cache,
+        time_windows,
+        number_vehicles,
+        config.horizon_start_minute,
+        config.shift_end_minute,
+        config.episode_end_minute,
+        depot,
+        congestion_generator,
+        config.max_congestion_duration,
+        velocity_rng=velocity_rng,
+        congestion_rng=congestion_rng,
+    )
+    return model, policy
 
 
 def _episode_result(model: Model) -> EpisodeResult:
@@ -205,49 +237,15 @@ def run_neural_training_episode(
     computed (``TransformerMonteCarloPolicy.last_loss`` — not part of the
     ``TrainablePolicy`` protocol, read here for the live per-episode report).
     """
-    demand = client_generator.generate(seed)
-    congestion_rng, velocity_rng, exploration_rng, learn_rng = spawn_neural_episode_rngs(seed)
-
-    number_vehicles = demand.vehicle_count
-    clients = [client.node for client in demand.clients]
-    time_windows = {
-        client.node: (client.time_window_start, client.time_window_end) for client in demand.clients
-    }
-
-    state = State(
-        number_vehicles, clients, config.n_observed_velocities, config.horizon_start_minute, depot
-    )
-    geometry = EpisodeGeometry.build(shortest_path_cache, clients, depot)
-    policy = _build_policy(
-        policy_state,
-        number_vehicles=number_vehicles,
-        geometry=geometry,
-        time_windows=time_windows,
-        number_clients=len(clients),
-        epsilon=config.epsilon,
-        depot=depot,
-        shift_end_minute=config.shift_end_minute,
-        episode_end_minute=config.episode_end_minute,
-        horizon_start_minute=config.horizon_start_minute,
+    model, policy = _build_episode(
+        seed=seed,
+        client_generator=client_generator,
+        travel_time_model=travel_time_model,
+        shortest_path_cache=shortest_path_cache,
+        congestion_generator=congestion_generator,
+        policy_state=policy_state,
         config=config,
-        exploration_rng=exploration_rng,
-        learn_rng=learn_rng,
-    )
-    model = Model(
-        state,
-        policy,
-        travel_time_model,
-        shortest_path_cache,
-        time_windows,
-        number_vehicles,
-        config.horizon_start_minute,
-        config.shift_end_minute,
-        config.episode_end_minute,
-        depot,
-        congestion_generator,
-        config.max_congestion_duration,
-        velocity_rng=velocity_rng,
-        congestion_rng=congestion_rng,
+        depot=depot,
     )
     model.run_training_episode()
 
@@ -266,50 +264,68 @@ def run_neural_evaluation_episode(
     depot: int = 0,
 ) -> EpisodeResult:
     """Run one greedy evaluation Episode; reads ``policy_state``, never mutates it."""
-    demand = client_generator.generate(seed)
-    congestion_rng, velocity_rng, exploration_rng, learn_rng = spawn_neural_episode_rngs(seed)
-
-    number_vehicles = demand.vehicle_count
-    clients = [client.node for client in demand.clients]
-    time_windows = {
-        client.node: (client.time_window_start, client.time_window_end) for client in demand.clients
-    }
-
-    state = State(
-        number_vehicles, clients, config.n_observed_velocities, config.horizon_start_minute, depot
-    )
-    geometry = EpisodeGeometry.build(shortest_path_cache, clients, depot)
-    policy = _build_policy(
-        policy_state,
-        number_vehicles=number_vehicles,
-        geometry=geometry,
-        time_windows=time_windows,
-        number_clients=len(clients),
-        epsilon=config.epsilon,
-        depot=depot,
-        shift_end_minute=config.shift_end_minute,
-        episode_end_minute=config.episode_end_minute,
-        horizon_start_minute=config.horizon_start_minute,
+    model, policy = _build_episode(
+        seed=seed,
+        client_generator=client_generator,
+        travel_time_model=travel_time_model,
+        shortest_path_cache=shortest_path_cache,
+        congestion_generator=congestion_generator,
+        policy_state=policy_state,
         config=config,
-        exploration_rng=exploration_rng,
-        learn_rng=learn_rng,
-    )
-    model = Model(
-        state,
-        policy,
-        travel_time_model,
-        shortest_path_cache,
-        time_windows,
-        number_vehicles,
-        config.horizon_start_minute,
-        config.shift_end_minute,
-        config.episode_end_minute,
-        depot,
-        congestion_generator,
-        config.max_congestion_duration,
-        velocity_rng=velocity_rng,
-        congestion_rng=congestion_rng,
+        depot=depot,
     )
     model.run_evaluation_episode()
 
     return _episode_result(model)
+
+
+def run_neural_calibration_episode(
+    *,
+    seed: int,
+    client_generator: ClientGenerator,
+    travel_time_model: TravelTimeModel,
+    shortest_path_cache: ShortestPathCache,
+    congestion_generator: CongestionGenerator,
+    policy_state: NeuralPolicyState,
+    config: ExperimentConfig,
+    depot: int = 0,
+) -> tuple[EpisodeResult, list[CalibrationPair]]:
+    """Run one greedy Episode, capturing calibration pairs; never mutates ``policy_state``.
+
+    Gate A's (ticket 08) source of ``(Q_predicted, U_t)`` pairs (spec.md's
+    calibration check): mirrors :func:`run_neural_training_episode`'s
+    snapshot/action/reward capture around :meth:`Model.transition_function`,
+    but decides greedily (``policy.decide``, not ``decide_train`` --
+    epsilon-exploration has no place in a held-out measurement) and calls
+    :meth:`~stdvrp.policies.transformer_policy.TransformerMonteCarloPolicy.calibration_pairs`
+    instead of ``learn`` at the end, so no gradient is built and no parameter
+    moves. Its cost outcome is bit-identical to :func:`run_neural_evaluation_episode`
+    for the same ``seed``/``policy_state`` -- both decide the same way -- it
+    additionally captures the trace :func:`run_neural_evaluation_episode`
+    (via ``Model.run_evaluation_episode``) never builds.
+    """
+    model, policy = _build_episode(
+        seed=seed,
+        client_generator=client_generator,
+        travel_time_model=travel_time_model,
+        shortest_path_cache=shortest_path_cache,
+        congestion_generator=congestion_generator,
+        policy_state=policy_state,
+        config=config,
+        depot=depot,
+    )
+
+    snapshots: list[TrainingSnapshot] = []
+    actions: list[list[int]] = []
+    rewards: list[float] = [0.0]
+    while not model.state.terminal:
+        action = policy.decide(model.state)
+        snapshots.append(TrainingSnapshot.capture(model.state))
+        actions.append(list(action))
+        reward = model.transition_function(action)
+        rewards.append(reward)
+        model.total_state_counter += 1
+    model.velocities.release()
+
+    pairs = policy.calibration_pairs(snapshots, actions, rewards)
+    return _episode_result(model), pairs

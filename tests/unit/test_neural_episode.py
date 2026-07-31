@@ -22,6 +22,7 @@ from stdvrp.config import ExperimentConfig  # noqa: E402
 from stdvrp.training.episode_pool import EpisodeWorld  # noqa: E402
 from stdvrp.training.neural_episode import (  # noqa: E402
     build_neural_policy_state,
+    run_neural_calibration_episode,
     run_neural_evaluation_episode,
     run_neural_training_episode,
     spawn_neural_episode_rngs,
@@ -151,5 +152,80 @@ class TestEpisodeRunners:
                 policy_state=state,
                 config=config,
             ).total_cost
+
+        assert run() == run()
+
+
+class TestRunNeuralCalibrationEpisode:
+    """Greedy, capturing, read-only -- Gate A's (Q_predicted, U_t) source (ticket 08)."""
+
+    def _world(self, config: ExperimentConfig) -> EpisodeWorld:
+        return EpisodeWorld.load(config)
+
+    def test_does_not_mutate_the_policy_state(self) -> None:
+        config = make_config()
+        world = self._world(config)
+        state = build_neural_policy_state(config, np.random.default_rng(0))
+        before = [p.clone() for p in state.encoder.parameters()]
+
+        result, pairs = run_neural_calibration_episode(
+            seed=100000,
+            client_generator=world.client_generator,
+            travel_time_model=world.travel_time_model,
+            shortest_path_cache=world.shortest_path_cache,
+            congestion_generator=world.congestion_generator,
+            policy_state=state,
+            config=config,
+        )
+
+        assert result.total_cost >= 0
+        assert len(pairs) > 0
+        assert all(
+            torch.equal(b, a) for b, a in zip(before, state.encoder.parameters(), strict=True)
+        )
+
+    def test_cost_matches_the_plain_evaluation_runner(self) -> None:
+        """``decide`` is greedy and deterministic, so both runners must agree."""
+        config = make_config()
+        world = self._world(config)
+        state = build_neural_policy_state(config, np.random.default_rng(4))
+
+        evaluation_cost = run_neural_evaluation_episode(
+            seed=100002,
+            client_generator=world.client_generator,
+            travel_time_model=world.travel_time_model,
+            shortest_path_cache=world.shortest_path_cache,
+            congestion_generator=world.congestion_generator,
+            policy_state=state,
+            config=config,
+        ).total_cost
+        calibration_cost, _ = run_neural_calibration_episode(
+            seed=100002,
+            client_generator=world.client_generator,
+            travel_time_model=world.travel_time_model,
+            shortest_path_cache=world.shortest_path_cache,
+            congestion_generator=world.congestion_generator,
+            policy_state=state,
+            config=config,
+        )
+
+        assert calibration_cost.total_cost == evaluation_cost
+
+    def test_same_seed_gives_bit_identical_pairs(self) -> None:
+        config = make_config()
+        world = self._world(config)
+        state = build_neural_policy_state(config, np.random.default_rng(5))
+
+        def run() -> list[tuple[float, float]]:
+            _, pairs = run_neural_calibration_episode(
+                seed=100003,
+                client_generator=world.client_generator,
+                travel_time_model=world.travel_time_model,
+                shortest_path_cache=world.shortest_path_cache,
+                congestion_generator=world.congestion_generator,
+                policy_state=state,
+                config=config,
+            )
+            return pairs
 
         assert run() == run()

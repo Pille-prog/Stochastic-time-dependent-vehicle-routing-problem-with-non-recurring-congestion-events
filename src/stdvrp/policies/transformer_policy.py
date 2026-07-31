@@ -98,7 +98,7 @@ replay buffer question), not the default.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import torch
@@ -114,7 +114,20 @@ from stdvrp.simulation.state import is_parked_at_depot
 if TYPE_CHECKING:
     from stdvrp.simulation.state import State, TrainingSnapshot
 
-__all__ = ["TransformerMonteCarloPolicy"]
+__all__ = ["CalibrationPair", "TransformerMonteCarloPolicy"]
+
+
+class CalibrationPair(NamedTuple):
+    """One decision epoch/vehicle's calibration sample (ticket 08, Gate A).
+
+    Named rather than a bare ``tuple[float, float]``: three modules
+    (this one, ``neural_episode.py``, ``gate_a.py``) all pass this value
+    around by position, and "which half is predicted vs. realised" is exactly
+    the kind of thing a bare tuple lets a caller silently swap.
+    """
+
+    predicted_q: float
+    realised_u: float
 
 # Legacy cost factors MonteCarloPolicy hardcodes (see this module's docstring,
 # "Why _already_acquired_cost is duplicated, not shared").
@@ -311,6 +324,35 @@ class TransformerMonteCarloPolicy(Policy):
 
         if minibatch_losses:
             self.last_loss = sum(minibatch_losses) / len(minibatch_losses)
+
+    def calibration_pairs(
+        self,
+        snapshots: list[TrainingSnapshot],
+        actions: list[list[int]],
+        rewards: list[float],
+    ) -> list[CalibrationPair]:
+        """``(Q_predicted, U_t)`` per decision epoch per vehicle (ticket 08, Gate A).
+
+        ``Q_predicted`` is what the network assigns the action actually taken
+        (:meth:`_replay_q`); ``U_t`` is the same backward Monte Carlo return
+        :meth:`learn` trains toward (:meth:`_backward_returns`). Correlating
+        the two is Gate A's calibration check (spec.md) -- whether the network
+        learned the value function it was trained to learn, independent of
+        whether the policy it induces improved. Read-only: no gradient is
+        built, no parameter or RNG stream is touched.
+        """
+        T = len(actions)
+        if T == 0:
+            return []
+
+        targets = self._backward_returns(snapshots, actions, rewards)
+        pairs: list[CalibrationPair] = []
+        with torch.no_grad():
+            for t in range(T):
+                for vehicle in range(self.number_vehicles):
+                    q_pred = float(self._replay_q(snapshots[t], actions[t], vehicle).item())
+                    pairs.append(CalibrationPair(predicted_q=q_pred, realised_u=targets[t]))
+        return pairs
 
     def _replay_q(
         self, snapshot: TrainingSnapshot, action_row: list[int], vehicle: int
