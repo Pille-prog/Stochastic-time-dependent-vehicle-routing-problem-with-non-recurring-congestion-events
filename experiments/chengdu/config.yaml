@@ -64,3 +64,11 @@ neural_d_model: 128
 neural_n_layers: 3
 neural_n_heads: 4
 device: cpu
+
+# Ticket 06: the Policy's own learning rule. neural_learning_rate seeds Adam
+# (spec.md's live-report example); neural_learn_passes is K (ticket 03's
+# compute-budget measurement); neural_batch_size is the minibatch size within
+# one episode's ~400 (epoch, vehicle) decision samples.
+neural_learning_rate: 3.0e-4
+neural_learn_passes: 4
+neural_batch_size: 32

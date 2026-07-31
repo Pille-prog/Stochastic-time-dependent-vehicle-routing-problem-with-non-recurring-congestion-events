@@ -48,6 +48,9 @@ def valid_values() -> dict:
         "neural_d_model": 128,
         "neural_n_layers": 3,
         "neural_n_heads": 4,
+        "neural_learning_rate": 3.0e-4,
+        "neural_learn_passes": 4,
+        "neural_batch_size": 8,
         "device": "cpu",
     }
 
@@ -166,6 +169,10 @@ def test_shift_end_minute_equal_to_episode_end_minute_is_accepted(tmp_path: Path
         ({"neural_n_layers": 0}, "neural_n_layers"),
         ({"neural_n_heads": 0}, "neural_n_heads"),
         ({"neural_d_model": 130, "neural_n_heads": 4}, "divisible"),
+        ({"neural_learning_rate": 0}, "neural_learning_rate"),
+        ({"neural_learning_rate": -1.0}, "neural_learning_rate"),
+        ({"neural_learn_passes": 0}, "neural_learn_passes"),
+        ({"neural_batch_size": 0}, "neural_batch_size"),
         ({"device": "tpu"}, "device"),
         ({"device": ""}, "device"),
     ],

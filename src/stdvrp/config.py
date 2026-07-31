@@ -97,6 +97,18 @@ class ExperimentConfig:
     neural_d_model: int
     neural_n_layers: int
     neural_n_heads: int
+    # Ticket 06: the Policy's own learning-rule knobs, separate from the linear
+    # baseline's ``learning_rate`` (a constant-step SGD rate; this one seeds
+    # Adam, an unrelated scale — spec.md's live-report example shows ``3.0e-4``,
+    # nothing like the baseline's ``1e-5``). ``neural_learning_rate`` is what
+    # ticket 07's convergence stopping multiplies by 0.3 on a patience trigger.
+    # ``neural_learn_passes`` is ``learn``'s ``K`` (shuffled minibatch passes
+    # per episode; spec.md's compute-budget measurement used 4).
+    # ``neural_batch_size`` is the minibatch size within one episode's ~400
+    # (epoch, vehicle) decision samples.
+    neural_learning_rate: float
+    neural_learn_passes: int
+    neural_batch_size: int
     # "cpu" or "cuda". Defaults to CPU per spec.md decision 7 (a structural
     # choice, not overturned by measurement): ticket 03 measured CUDA faster on
     # both the acting and learning paths on the reference hardware (RTX 4060
@@ -168,11 +180,19 @@ class ExperimentConfig:
             )
         if not 0 <= self.epsilon <= 1:
             raise ValueError("epsilon must be in [0, 1]")
-        for name in ("neural_d_model", "neural_n_layers", "neural_n_heads"):
+        for name in (
+            "neural_d_model",
+            "neural_n_layers",
+            "neural_n_heads",
+            "neural_learn_passes",
+            "neural_batch_size",
+        ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.neural_d_model % self.neural_n_heads != 0:
             raise ValueError("neural_d_model must be divisible by neural_n_heads")
+        if self.neural_learning_rate <= 0:
+            raise ValueError("neural_learning_rate must be positive")
         if self.device not in ("cpu", "cuda"):
             raise ValueError(f"device must be 'cpu' or 'cuda', got {self.device!r}")
 
@@ -219,6 +239,7 @@ class ExperimentConfig:
             "congestion_upper_bound",
             "learning_rate",
             "epsilon",
+            "neural_learning_rate",
         ):
             values[name] = _require_float(path, name, values[name])
         if values["warmup_learning_rate"] is not None:
@@ -250,6 +271,8 @@ class ExperimentConfig:
             "neural_d_model",
             "neural_n_layers",
             "neural_n_heads",
+            "neural_learn_passes",
+            "neural_batch_size",
         ):
             values[name] = _require_int(path, name, values[name])
         return cls(**values)

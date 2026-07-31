@@ -66,6 +66,9 @@ def make_config(**overrides: Any) -> ExperimentConfig:
         "neural_d_model": 128,
         "neural_n_layers": 3,
         "neural_n_heads": 4,
+        "neural_learning_rate": 3.0e-4,
+        "neural_learn_passes": 4,
+        "neural_batch_size": 8,
         "device": "cpu",
     }
     values.update(overrides)
