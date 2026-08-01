@@ -49,7 +49,10 @@ neural_n_layers: 3
 neural_n_heads: 4
 device: cpu
 
-# Ticket 06: see experiments/chengdu/config.yaml's comment.
-neural_learning_rate: 3.0e-4
+# Ticket 06: see experiments/chengdu/config.yaml's comment (this is the
+# fixture the 3.0e-4-diverges measurement recorded there was taken on).
+neural_learning_rate: 3.0e-5
 neural_learn_passes: 4
 neural_batch_size: 8
+# See experiments/chengdu/config.yaml: null disables gradient clipping.
+neural_grad_clip_norm: null

@@ -200,9 +200,23 @@ class TestFormatting:
         assert "348" in line
         assert "1348" in line
         assert "2691.3" in line
-        assert "0.387" in line
+        assert "3.9e-01" in line  # scientific: a converging loss rounds to 0.000 at %.3f
         assert "lr 3.0e-4" in line  # not Python's default two-digit-exponent 3.0e-04
         assert "8.9s" in line
+
+    def test_a_converging_loss_stays_readable(self) -> None:
+        """The regression ticket 08's log ran into: at ``%.3f`` every loss a
+        healthy run produces prints as ``0.000``, so the one live number that
+        could show the fit collapsing showed nothing for 1 338 episodes."""
+        healthy = format_episode_line(
+            episode=1, seed=1000, cost=2500.0, loss=2.1e-4, lr=3.0e-4, wall_clock_seconds=1.0
+        )
+        collapsed = format_episode_line(
+            episode=2, seed=1001, cost=2500.0, loss=2.1e-8, lr=3.0e-4, wall_clock_seconds=1.0
+        )
+
+        assert "2.1e-04" in healthy
+        assert "2.1e-08" in collapsed
 
     def test_format_lr_matches_spec_mds_single_digit_exponent(self) -> None:
         assert format_lr(3.0e-4) == "3.0e-4"

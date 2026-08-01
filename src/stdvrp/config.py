@@ -109,6 +109,13 @@ class ExperimentConfig:
     neural_learning_rate: float
     neural_learn_passes: int
     neural_batch_size: int
+    # Ticket 08 (Gate A stability): optional max L2 norm for the gradient of
+    # one minibatch step of ``TransformerMonteCarloPolicy.learn`` (clipped over
+    # encoder+head jointly, torch.nn.utils.clip_grad_norm_). ``null`` (the
+    # default) disables clipping -- the exact pre-knob behavior. The lever the
+    # ticket's lr/gradient-clipping stability sweep varies on
+    # ``evaluation_seeds``; not a frozen acceptance parameter.
+    neural_grad_clip_norm: float | None = None
     # "cpu", "cuda", or "auto" (ticket 12; amends spec.md decision 7). "auto"
     # is the default: it resolves once per run (torch_support.resolve_device)
     # to "cuda" if available, else "cpu". The old "cpu by default" choice
@@ -204,6 +211,8 @@ class ExperimentConfig:
             raise ValueError("neural_d_model must be divisible by neural_n_heads")
         if self.neural_learning_rate <= 0:
             raise ValueError("neural_learning_rate must be positive")
+        if self.neural_grad_clip_norm is not None and self.neural_grad_clip_norm <= 0:
+            raise ValueError("neural_grad_clip_norm must be positive or null")
         if self.device not in ("cpu", "cuda", "auto"):
             raise ValueError(f"device must be 'cpu', 'cuda', or 'auto', got {self.device!r}")
 
@@ -227,7 +236,15 @@ class ExperimentConfig:
         unknown = sorted(set(raw) - set(field_names))
         if unknown:
             raise ValueError(f"{path}: unknown config keys {unknown}")
-        missing = sorted(set(field_names) - set(raw))
+        # A field with a dataclass default may be omitted from the YAML (it
+        # takes the default, exactly as direct construction would); every
+        # defaultless field stays required.
+        required = [
+            f.name
+            for f in dataclasses.fields(cls)
+            if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
+        ]
+        missing = sorted(set(required) - set(raw))
         if missing:
             raise ValueError(f"{path}: missing config keys {missing}")
 
@@ -257,8 +274,12 @@ class ExperimentConfig:
             values["warmup_learning_rate"] = _require_float(
                 path, "warmup_learning_rate", values["warmup_learning_rate"]
             )
+        if values.get("neural_grad_clip_norm") is not None:
+            values["neural_grad_clip_norm"] = _require_float(
+                path, "neural_grad_clip_norm", values["neural_grad_clip_norm"]
+            )
         for name in ("links_file", "shortest_paths_file", "device"):
-            if not isinstance(values[name], str) or not values[name]:
+            if name in values and (not isinstance(values[name], str) or not values[name]):
                 raise ValueError(f"{path}: {name} must be a non-empty string")
         for name in (
             "instance_day",

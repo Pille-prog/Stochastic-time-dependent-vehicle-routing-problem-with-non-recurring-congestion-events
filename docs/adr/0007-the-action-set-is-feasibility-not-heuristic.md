@@ -103,3 +103,14 @@ added one more clause — a pending Client equal to the vehicle's own
 ε-exploration branches. The depot keeps its two meanings (park vs. travel,
 ADR-0008) and is never filtered; a pending Client has no such second meaning
 — there is nothing to travel to on the node you are already standing on.
+
+**Updated 2026-08-01 (spec.md decision 1's amendment).** The depot row's *arc
+half* is no longer a hand-built `[minutes_to_depot, length_to_depot]` pair
+assembled by the Policy from its own `EpisodeGeometry` read: the tokenizer now
+emits `Tokens.depot_arc_tokens` (the same six-field arc vector every real
+candidate carries — geometry plus the four projected cost components) and the
+encoder builds the row as `Embeddings.depot`. Everything this ADR decided
+survives unchanged: the vehicle's own context embedding is still the "context"
+half, `is_depot` still prices the warm start, and at init `Q(v, depot)` still
+equals `minutes_to_depot / horizon_length + DEPOT_WARM_START_PENALTY` exactly
+(the cost fields are init-inert — `network.py`, warm-start point 2).

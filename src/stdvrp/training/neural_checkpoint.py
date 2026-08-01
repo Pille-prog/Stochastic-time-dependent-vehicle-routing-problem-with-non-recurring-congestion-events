@@ -52,6 +52,19 @@ class TrainingCheckpoint:
     elapsed_seconds: float
     convergence: ConvergenceState
     evaluations: tuple[EvaluationReport, ...]
+    best_weights: BestWeights | None = None
+    """The encoder/head weights of the best evaluation block so far, carried
+    alongside the *latest* weights rather than instead of them: resuming has to
+    continue the trajectory it interrupted, but what a finished run should hand
+    a measurement is its best network, not whichever one the last training
+    episode happened to leave behind. ``None`` on a checkpoint written before
+    this field existed, and on a run whose first block has not landed yet."""
+
+
+#: One evaluation block's ``encoder``/``head`` ``state_dict``s. The optimizer's
+#: is deliberately not included: it belongs to the trajectory (which resumes
+#: from the latest weights), not to the network being selected.
+BestWeights = dict[str, dict[str, object]]
 
 
 def save_checkpoint(
@@ -66,6 +79,7 @@ def save_checkpoint(
         "encoder_state": policy_state.encoder.state_dict(),
         "head_state": policy_state.head.state_dict(),
         "optimizer_state": policy_state.optimizer.state_dict(),
+        "best_weights": checkpoint.best_weights,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(path.name + ".tmp")
@@ -109,4 +123,7 @@ def load_checkpoint(path: Path, policy_state: NeuralPolicyState) -> TrainingChec
         elapsed_seconds=document["elapsed_seconds"],
         convergence=ConvergenceState(**document["convergence"]),
         evaluations=tuple(document["evaluations"]),
+        # ``.get``: checkpoints written before best-weights selection existed
+        # have no such key, and resuming one should carry on rather than crash.
+        best_weights=document.get("best_weights"),
     )

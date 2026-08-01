@@ -8,7 +8,9 @@ Replace the Policy's **approximator**, not its algorithm: keep every-visit Monte
 Carlo policy evaluation exactly as it is, and swap the 19-feature linear
 `Q = X · W` for a transformer that reads **raw State facts** and produces
 `Q(s, a)` directly. No hand-engineered features, no polynomial cross-terms, no
-earliness bins, no candidate-set heuristic.
+earliness bins, no candidate-set heuristic. *(Amended 2026-08-01, ticket 08:
+the cost function's own per-candidate components are inputs — see decision 1's
+amendment; the state features stay raw.)*
 
 Two acceptance questions, deliberately separated:
 
@@ -75,7 +77,7 @@ difference: the features are not enriched, they are *removed*.
 
 | # | Decision | Choice |
 |---|---|---|
-| 1 | What the network observes | **Raw entity tokens**: one per pending Client, one per vehicle, one global. Hard rule: a token never carries a cost formula, a polynomial, or a bin |
+| 1 | What the network observes | **Raw entity tokens**: one per pending Client, one per vehicle, one global. ~~Hard rule: a token never carries a cost formula, a polynomial, or a bin~~ — **amended 2026-08-01 (ticket 08): the per-(client, vehicle) arc tokens carry the four projected components of the simulator's own cost function**; the baseline's *state* feature engineering (polynomials, bins, normalizers, literals) stays out. See the amendment below |
 | 2 | Congestion awareness | **Out of the blind arm.** The transformer is exactly as congestion-blind as the baseline, so the comparison measures the approximator — not information one side was handed and the other was not |
 | 3 | **The observability rule** | The Policy reads **only** `State` and the static `EpisodeGeometry`. Never `EpisodeVelocities`, never `congested_arcs`, never `TravelTimeModel` at `tau`. The only velocity that exists for the network is `state.observed_velocity` — what its own vehicles measured while traversing real arcs |
 | 4 | Action set | **Every pending Client + the depot**, feasibility mask only. `_select_vehicle_possible_actions`, `_classify_shortest_distance_clients`, `delayed_clients`, the `350`/`310` literals and `number_actions_test` all die for this Policy. The B11 invariant survives *as a mask*, because it is a constraint, not a heuristic |
@@ -154,6 +156,62 @@ and results) has value independent of which device turns out faster. Tickets
 08/09's real runs should not assume CUDA buys episode-cap headroom; budget
 for either device costing close to the frozen safety cap, per the "Compute
 budget" table below.
+
+### Amendment to decision 1 (2026-08-01, ticket 08)
+
+The hard rule "a token never carries a cost formula, a polynomial or a bin"
+mixed two constraints that this effort's own Gate A run showed must be
+separated: **observability** (decision 3, ADR-0006 — what of the *world* the
+Policy may see) and **purity** (decision 1 — how much arithmetic a token may
+carry). The first is untouched by this amendment. The second is amended on
+this evidence:
+
+**The evidence.** Ticket 08's first real-dataset arm (its Comments,
+2026-08-01): the raw-facts network *does* learn — −4.7 % against the null on
+eight `test_seeds` at its best block — and then diverges to 4× worse by
+episode 100, unrecovered through two lr cuts. The diagnosis: `Q(s, a)`
+decomposes as `V(s) + A(s, a)`, the Monte Carlo return's variance is almost
+entirely `V(s)`, so least squares spends the network on fitting `V` while
+`A` — the only quantity the argmin reads — is left as a residual to be
+rediscovered from noisy returns. On the mini fixture's ~16-candidate argmin
+that residual is learnable; on Chengdu's ~151 candidates, the minimum of 151
+noisy, unanchored extrapolations is dominated by the noise (the ticket's
+"likely cause is the candidate count").
+
+**The change.** Each `(client, vehicle)` arc token — the action-conditional
+pathway — now carries, next to `[minutes, path_length]`, the four **projected
+components of the simulator's own cost function** for that assignment:
+`earliness_cost`, `delay_cost`, `future_delay`, `overtime_cost`, as per-pair
+marginals mirroring `FeatureExtractor.candidate_features`' formulas (minus its
+closest-client multiplicity classifier, hand engineering ADR-0007 already
+retired). The synthetic depot candidate gets the same six-field block
+(`Tokens.depot_arc_tokens`), so its row is built by the identical pathway.
+With them, `A(s, a)` is expressible as a near-linear readout of the inputs
+from the first gradient step — and `Q` can no longer be arbitrarily abrupt
+between neighbouring candidates, which is what the 151-candidate argmin was
+amplifying.
+
+**Why this is the literature's own recommendation.** The research note this
+spec cites ranks "neural VFA over **enriched** features" as recommendation #5
+(Chen/Ulmer/Thomas, up to +22 % over a tuned parametric policy), and this spec
+recorded the tension explicitly at the outset: "the features are not enriched,
+they are *removed*". The amendment adopts the enrichment for the **cost half
+only**: the state representation stays raw (no polynomials, no bins, no
+`late_count / 13`, no `350`/`310` literals, no multiplicity classifier — the
+transformer's job is still to learn the state), and what is added is only the
+arithmetic of the objective the run is scored by.
+
+**Why the comparison stays fair.** The linear baseline's seven state-action
+features already carry these exact four costs (`FeatureExtractor`,
+`X[:, 15..18]`); handing them to the network *levels* the two Policies' input
+sets rather than tilting them. Observability is untouched: every cost is
+computed from `tau`, the time windows and `EpisodeGeometry.average_minutes`
+(plus the simulator's hardcoded rate constants, which are configuration, not
+observation — ADR-0006's clarification), `tokenize`'s signature is the same
+five arguments, and the same structural test pins it. The untrained null is
+**bit-identical**: the warm start's `arc_embed` row 0 reads the minutes input
+only, so at init `Q` equals bare `minutes / horizon_length` whatever the cost
+fields hold — Gate A's null model did not move.
 
 ## The observability rule, precisely
 

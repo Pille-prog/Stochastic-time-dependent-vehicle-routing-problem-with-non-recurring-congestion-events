@@ -156,13 +156,24 @@ class TestHandComputedExample:
 
     horizon_length = 780 - 300 = 480; episode_length = 1150 - 300 = 850. One
     vehicle at node 3 (away from the depot and both Clients, so every distance
-    is nonzero and distinguishable), two pending Clients.
+    is nonzero and distinguishable), two pending Clients. The cache also prices
+    every leg out of each Client and out of the depot, because the arc tokens'
+    ``future_delay``/``overtime_cost`` fields price follow-up and homecoming
+    legs (the 2026-08-01 amendment to spec.md decision 1).
     """
 
     def make_world(self) -> tuple[EpisodeGeometry, dict]:
         cache = make_cache(
             {
                 (0, 0): (0.0, 0.0),
+                (0, 1): (9.0, 4.0),
+                (0, 2): (18.0, 7.0),
+                (1, 0): (8.0, 4.0),
+                (1, 1): (0.0, 0.0),
+                (1, 2): (12.0, 6.0),
+                (2, 0): (19.0, 7.5),
+                (2, 1): (12.5, 6.0),
+                (2, 2): (0.0, 0.0),
                 (3, 0): (7.0, 3.5),
                 (3, 1): (10.0, 5.0),
                 (3, 2): (20.0, 8.0),
@@ -190,19 +201,125 @@ class TestHandComputedExample:
                     (350 - 300) / 480,
                     (400 - 300) / 480,
                     (400 - 320) / 480,
-                    10.0 / 480,
-                    5.0 / 480,
                 ],
                 [
                     (500 - 300) / 480,
                     (600 - 300) / 480,
                     (600 - 320) / 480,
-                    20.0 / 480,
-                    8.0 / 480,
                 ],
             ]
         )
         np.testing.assert_array_equal(tokens.client_tokens, expected)
+
+    def test_arc_tokens_before_the_windows_open(self) -> None:
+        """tau=320: both arrivals are early, nothing is late yet, no overtime."""
+        geometry, time_windows = self.make_world()
+        snapshot = make_snapshot(
+            tau=320.0,
+            pending=(1, 2),
+            positions=(3.0,),
+            standing=(True,),
+            completing_service=(0.0,),
+            observed_velocity=((0.5, 0.6),),
+        )
+        tokens = call_tokenize(snapshot, geometry, time_windows)
+
+        # Client 1: arrival 320+10=330 < 350 -> early by 20; follow-up to
+        # Client 2 at 330+5+12=347 <= 600 -> no future delay; homecoming
+        # 330+5+8=343 <= 780 -> no overtime. Client 2: arrival 340 < 500 ->
+        # early by 160; follow-up to Client 1 at 340+5+12.5=357.5 <= 400;
+        # homecoming 340+5+19=364.
+        expected = np.array(
+            [
+                [[10.0 / 480, 5.0 / 480, (350 - 330.0) * 0.1 / 480, 0.0, 0.0, 0.0]],
+                [[20.0 / 480, 8.0 / 480, (500 - 340.0) * 0.1 / 480, 0.0, 0.0, 0.0]],
+            ]
+        )
+        np.testing.assert_array_equal(tokens.arc_tokens, expected)
+
+    def test_arc_tokens_past_the_windows(self) -> None:
+        """tau=760: both arrivals are late, follow-ups breach, one leg overtimes."""
+        geometry, time_windows = self.make_world()
+        snapshot = make_snapshot(
+            tau=760.0,
+            pending=(1, 2),
+            positions=(3.0,),
+            standing=(True,),
+            completing_service=(0.0,),
+            observed_velocity=((0.5, 0.6),),
+        )
+        tokens = call_tokenize(snapshot, geometry, time_windows)
+
+        # Both Clients are already past due (400/600 < 760), so delay is the
+        # marginal past tau (FeatureExtractor's due_or_tau), never the sunk
+        # part. Client 1: arrival 770 -> delay 10; follow-up to Client 2 at
+        # 770+5+12=787 > 600 -> 787-760=27; homecoming 770+5+8=783 > 780 ->
+        # (783-780)*5/6. Client 2: arrival 780 -> delay 20; follow-up to
+        # Client 1 at 780+5+12.5=797.5 -> 37.5; homecoming 780+5+19=804 ->
+        # (804-780)*5/6.
+        expected = np.array(
+            [
+                [
+                    [
+                        10.0 / 480,
+                        5.0 / 480,
+                        0.0,
+                        (770.0 - 760.0) * 1.0 / 480,
+                        (787.0 - 760.0) * 1.0 / (480 * 2),
+                        (783.0 - 780) * (5 / 6) / 480,
+                    ]
+                ],
+                [
+                    [
+                        20.0 / 480,
+                        8.0 / 480,
+                        0.0,
+                        (780.0 - 760.0) * 1.0 / 480,
+                        (797.5 - 760.0) * 1.0 / (480 * 2),
+                        (804.0 - 780) * (5 / 6) / 480,
+                    ]
+                ],
+            ]
+        )
+        np.testing.assert_array_equal(tokens.arc_tokens, expected)
+
+    def test_depot_arc_tokens(self) -> None:
+        """The synthetic depot candidate: no window costs, follow-up legs out of
+        the depot, overtime on the *direct* return leg (no service stop)."""
+        geometry, time_windows = self.make_world()
+        snapshot = make_snapshot(
+            tau=760.0,
+            pending=(1, 2),
+            positions=(3.0,),
+            standing=(True,),
+            completing_service=(0.0,),
+            observed_velocity=((0.5, 0.6),),
+        )
+        tokens = call_tokenize(snapshot, geometry, time_windows)
+
+        # Arrival home 760+7=767 <= 780 -> no overtime. Follow-ups out of the
+        # depot: to Client 1 at 767+5+9=781 > 400 -> 781-760=21; to Client 2 at
+        # 767+5+18=790 > 600 -> 790-760=30; summed 51.
+        expected = np.array(
+            [[7.0 / 480, 3.5 / 480, 0.0, 0.0, (21.0 + 30.0) / (480 * 2), 0.0]]
+        )
+        np.testing.assert_array_equal(tokens.depot_arc_tokens, expected)
+
+    def test_depot_overtime_prices_the_direct_return_leg(self) -> None:
+        """Past the shift end the reference clock is tau, and the depot's
+        homecoming is ``tau + minutes_to_depot`` with no service stop."""
+        geometry, time_windows = self.make_world()
+        snapshot = make_snapshot(
+            tau=790.0,
+            pending=(1, 2),
+            positions=(3.0,),
+            standing=(True,),
+            completing_service=(0.0,),
+            observed_velocity=((0.5, 0.6),),
+        )
+        tokens = call_tokenize(snapshot, geometry, time_windows)
+
+        assert tokens.depot_arc_tokens[0, 5] == (797.0 - 790.0) * (5 / 6) / 480
 
     def test_vehicle_tokens(self) -> None:
         geometry, time_windows = self.make_world()
@@ -322,6 +439,8 @@ class TestPureFunction:
         np.testing.assert_array_equal(first.client_tokens, second.client_tokens)
         np.testing.assert_array_equal(first.vehicle_tokens, second.vehicle_tokens)
         np.testing.assert_array_equal(first.global_token, second.global_token)
+        np.testing.assert_array_equal(first.arc_tokens, second.arc_tokens)
+        np.testing.assert_array_equal(first.depot_arc_tokens, second.depot_arc_tokens)
 
 
 class TestPermutationEquivariance:
@@ -341,8 +460,13 @@ class TestPermutationEquivariance:
         reordered = call_tokenize(reordered_snapshot, geometry, time_windows)
 
         np.testing.assert_array_equal(reordered.client_tokens, base.client_tokens[permutation])
+        # Bit-exact even though future_delay sums over the *other* pending
+        # Clients -- the tokenizer sums in sorted order precisely so this holds
+        # (module docstring, last section).
+        np.testing.assert_array_equal(reordered.arc_tokens, base.arc_tokens[permutation])
         np.testing.assert_array_equal(reordered.vehicle_tokens, base.vehicle_tokens)
         np.testing.assert_array_equal(reordered.global_token, base.global_token)
+        np.testing.assert_array_equal(reordered.depot_arc_tokens, base.depot_arc_tokens)
 
 
 def make_dense_world(
@@ -398,9 +522,15 @@ class TestVariableSetSizes:
         )
         tokens = call_tokenize(snapshot, geometry, time_windows)
 
-        assert tokens.client_tokens.shape == (n_clients, 3 + 2 * n_vehicles)
+        assert tokens.client_tokens.shape == (n_clients, 3)
         assert tokens.vehicle_tokens.shape == (n_vehicles, 3 + n_obs)
         assert tokens.global_token.shape == (5,)
+        assert tokens.arc_tokens.shape == (n_clients, n_vehicles, 6)
+        assert tokens.depot_arc_tokens.shape == (n_vehicles, 6)
         assert np.isfinite(tokens.client_tokens).all()
         assert np.isfinite(tokens.vehicle_tokens).all()
         assert np.isfinite(tokens.global_token).all()
+        assert np.isfinite(tokens.arc_tokens).all()
+        assert np.isfinite(tokens.depot_arc_tokens).all()
+        assert (tokens.arc_tokens[:, :, 2:] >= 0.0).all(), "projected costs are never negative"
+        assert (tokens.depot_arc_tokens[:, 2:] >= 0.0).all()

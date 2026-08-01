@@ -51,6 +51,7 @@ dependency.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 import math
@@ -77,6 +78,7 @@ if TYPE_CHECKING:
     # that actually need it (train_neural, _run_neural_evaluation_block). Only
     # type hints reach these names, resolved lazily by ``from __future__ import
     # annotations`` above, never at import time.
+    from stdvrp.training.neural_checkpoint import BestWeights
     from stdvrp.training.neural_episode import NeuralPolicyState
     from stdvrp.training.neural_report import EvaluationReport
 
@@ -547,6 +549,13 @@ class Trainer:
         evaluations: list[EvaluationReport] = []
         episodes_completed = 0
         elapsed_seconds = 0.0
+        # The weights of the best evaluation block, kept aside so the network
+        # this returns is the one that measured best -- not whichever one the
+        # last training episode left behind. ``update_convergence`` already
+        # tracks *that* a block was the best; nothing used to snapshot the
+        # network at it, so ticket 08's Gate A measured a final network its own
+        # patience machinery had spent 750 episodes declining to improve on.
+        best_weights: BestWeights | None = None
 
         if resume and checkpoint_path.exists():
             checkpoint = load_checkpoint(checkpoint_path, policy_state)
@@ -554,6 +563,7 @@ class Trainer:
             elapsed_seconds = checkpoint.elapsed_seconds
             convergence = checkpoint.convergence
             evaluations = list(checkpoint.evaluations)
+            best_weights = checkpoint.best_weights
             self._log(
                 f"resumed from {checkpoint_path}: {episodes_completed} episodes completed, "
                 f"lr={format_lr(convergence.current_lr)}"
@@ -602,8 +612,15 @@ class Trainer:
                     reference_seed_costs=reference_seed_costs,
                 )
                 evaluations.append(report)
+                improved = report.mean_cost < convergence.best_mean_cost
                 action = update_convergence(convergence, report)
                 self._log(format_evaluation_block(report, convergence))
+
+                if improved:
+                    best_weights = {
+                        "encoder_state": copy.deepcopy(policy_state.encoder.state_dict()),
+                        "head_state": copy.deepcopy(policy_state.head.state_dict()),
+                    }
 
                 if action == ConvergenceAction.REDUCE_LR:
                     policy_state.current_lr = convergence.current_lr
@@ -629,6 +646,7 @@ class Trainer:
                         elapsed_seconds=elapsed_seconds,
                         convergence=convergence,
                         evaluations=tuple(evaluations),
+                        best_weights=best_weights,
                     ),
                     policy_state,
                 )
@@ -651,6 +669,17 @@ class Trainer:
                 "to resume"
             )
             raise
+
+        # Hand back the best-measured network, not the last one trained. The
+        # trajectory's final weights stay in the checkpoint for a resume; what
+        # ticket 08/09 measure is this.
+        if best_weights is not None:
+            policy_state.encoder.load_state_dict(best_weights["encoder_state"])
+            policy_state.head.load_state_dict(best_weights["head_state"])
+            self._log(
+                f"restored the best evaluated network (episode {convergence.best_episode}, "
+                f"{convergence.best_delta_pct:+.1f}% vs the reference card) for measurement"
+            )
 
         return NeuralTrainingResult(
             episodes_completed=episodes_completed,

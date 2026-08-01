@@ -181,6 +181,7 @@ def _build_episode(
         learn_passes=config.neural_learn_passes,
         batch_size=config.neural_batch_size,
         device=policy_state.device,
+        grad_clip_norm=config.neural_grad_clip_norm,
     )
     model = Model(
         state,

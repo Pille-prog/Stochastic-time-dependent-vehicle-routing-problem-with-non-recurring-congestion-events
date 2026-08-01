@@ -31,7 +31,11 @@ from stdvrp.simulation.state import State, TrainingSnapshot
 torch = pytest.importorskip("torch")
 
 from stdvrp.policies import transformer_policy as transformer_policy_module  # noqa: E402
-from stdvrp.policies.network import QHead, TokenEncoder  # noqa: E402
+from stdvrp.policies.network import (  # noqa: E402
+    DEPOT_WARM_START_PENALTY,
+    QHead,
+    TokenEncoder,
+)
 from stdvrp.policies.transformer_policy import TransformerMonteCarloPolicy  # noqa: E402
 
 pytestmark = pytest.mark.neural
@@ -88,6 +92,7 @@ def build_policy(
     learn_passes: int = 1,
     batch_size: int = 4,
     device: torch.device | None = None,
+    grad_clip_norm: float | None = None,
 ) -> TransformerMonteCarloPolicy:
     rng = np.random.default_rng(init_seed)
     encoder = TokenEncoder(
@@ -118,6 +123,7 @@ def build_policy(
         learn_passes=learn_passes,
         batch_size=batch_size,
         device=device,
+        grad_clip_norm=grad_clip_norm,
     )
 
 
@@ -223,8 +229,8 @@ class TestSelfNodeNotACandidate:
 
         original_score = policy._score
 
-        def rigged_score(embeddings, vehicle, vehicle_position, pending, claimed_mask):
-            q = original_score(embeddings, vehicle, vehicle_position, pending, claimed_mask)
+        def rigged_score(embeddings, vehicle, pending, claimed_mask):
+            q = original_score(embeddings, vehicle, pending, claimed_mask)
             q = q.clone()
             q[pending.index(own_node)] = -1e9
             return q
@@ -247,19 +253,75 @@ class TestSelfNodeNotACandidate:
             action = policy.decide_train(state)
             assert action[0] == DEPOT
 
-    def test_the_depot_stays_feasible_even_when_the_vehicle_is_on_it(self) -> None:
-        """Only a pending Client is excluded -- the depot keeps both its meanings."""
+
+class TestHomeIsAnExitNotADestination:
+    """``_depot_is_feasible``: retiring a vehicle is legal only when there is
+    nothing left to travel to, or when the return leg already breaches the
+    shift. See that method's docstring for the Gate A measurement behind it."""
+
+    def test_epsilon_exploration_never_retires_a_vehicle_with_work_left(self) -> None:
+        """The whole ε budget spent on one vehicle that has servable Clients: the
+        depot must never come out of it, or exploration alone can park a fleet."""
         geometry, time_windows, clients = make_world(3, seed=46)
         policy = build_policy(geometry, time_windows, clients, number_vehicles=1, epsilon=1.0)
         state = make_state(1, pending=clients, positions=[DEPOT])
 
         seen = set()
-        for trial in range(30):
+        for trial in range(50):
             policy.exploration_rng = np.random.default_rng(trial)
-            action = policy.decide_train(state)
-            seen.add(action[0])
+            seen.add(policy.decide_train(state)[0])
 
-        assert DEPOT in seen
+        assert DEPOT not in seen
+        assert seen == set(clients), "exploration should still reach every feasible Client"
+
+    def test_the_depot_is_feasible_once_the_return_leg_breaches_the_shift(self) -> None:
+        """``MonteCarloPolicy``'s own depot gate, minus its 350/310 literals."""
+        geometry, time_windows, clients = make_world(3, seed=47)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=1)
+        minutes_home = geometry.average_minutes(clients[0], DEPOT)
+
+        assert not policy._depot_is_feasible(
+            SHIFT_END - minutes_home - 1.0, clients[0], no_client_feasible=False
+        )
+        assert policy._depot_is_feasible(
+            SHIFT_END - minutes_home + 1.0, clients[0], no_client_feasible=False
+        )
+
+    def test_a_retired_vehicle_gets_the_depot_and_claims_nothing(self) -> None:
+        """A parked vehicle's action is discarded by ``Model._reroute_for``, so a
+        Client it "claims" is starved: it cannot go, and the mask locks out
+        everyone who could. Vehicle 0 is home for good; vehicle 1 must still be
+        offered the Client nearest to it, not the runner-up."""
+        geometry, time_windows, clients = make_world(4, seed=49)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        state = make_state(2, pending=clients, positions=[DEPOT, clients[0]])
+        state.vehicle_standing = [True, True]
+        state.tau_episode = HORIZON_START + 2  # past the first decision epoch
+
+        action = policy.decide(state)
+
+        assert action[0] == DEPOT
+        nearest_to_one = min(
+            (client for client in clients if client != clients[0]),
+            key=lambda client: geometry.average_minutes(clients[0], client),
+        )
+        assert action[1] == nearest_to_one, "a retired vehicle's claim starved a Client"
+
+    def test_the_whole_fleet_is_dispatchable_on_the_first_decision_epoch(self) -> None:
+        """At ``tau == horizon_start_minute`` every vehicle stands on the depot
+        un-dispatched — State cannot tell that from retired, so the clock does."""
+        geometry, time_windows, clients = make_world(4, seed=50)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=3)
+        state = make_state(3, pending=clients, positions=[DEPOT, DEPOT, DEPOT])
+
+        assert state.tau_episode == HORIZON_START
+        assert DEPOT not in policy.decide(state)
+
+    def test_the_depot_is_feasible_whenever_no_client_is(self) -> None:
+        geometry, time_windows, clients = make_world(3, seed=48)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=1)
+
+        assert policy._depot_is_feasible(float(HORIZON_START), DEPOT, no_client_feasible=True)
 
 
 # --- One encoder pass per decision epoch --------------------------------------
@@ -305,7 +367,10 @@ class TestOneEncoderPassPerDecisionEpoch:
 
 
 class TestDepotWarmStart:
-    """ADR-0007: at init, Q(v, depot) == minutes_to_depot / horizon_length exactly."""
+    """At init, ``Q(v, depot) == minutes_to_depot / horizon_length +
+    DEPOT_WARM_START_PENALTY`` — one whole horizon above every Client, so the
+    untrained greedy policy is "nearest feasible Client, home only when no
+    Client is feasible" (network.py, "The depot is the last resort at init")."""
 
     @settings(max_examples=30, deadline=None, derandomize=True)
     @given(
@@ -313,7 +378,7 @@ class TestDepotWarmStart:
         n_vehicles=st.integers(1, 3),
         seed=st.integers(0, 1_000_000),
     )
-    def test_depot_q_matches_minutes_to_depot(
+    def test_depot_q_matches_minutes_to_depot_plus_one_horizon(
         self, n_clients: int, n_vehicles: int, seed: int
     ) -> None:
         geometry, time_windows, clients = make_world(n_clients, seed)
@@ -336,14 +401,26 @@ class TestDepotWarmStart:
             for vehicle in range(n_vehicles):
                 pending = list(state.clients_not_visited)
                 claimed = np.zeros(len(pending), dtype=bool)
-                q = policy._score(
-                    embeddings, vehicle, state.last_node_reached[vehicle], pending, claimed
-                )
+                q = policy._score(embeddings, vehicle, pending, claimed)
                 expected = (
                     geometry.average_minutes(state.last_node_reached[vehicle], DEPOT)
                     / horizon_length
-                )
+                ) + DEPOT_WARM_START_PENALTY
                 np.testing.assert_allclose(q[len(pending)].item(), expected, atol=1e-4, rtol=1e-4)
+
+    def test_a_vehicle_standing_on_the_depot_still_goes_to_the_nearest_client(self) -> None:
+        """The Gate A regression: ``minutes(depot, depot) == 0`` used to make the
+        depot the global argmin for every vehicle at decision epoch 1, which
+        parked the whole fleet and ended the Episode after one transition."""
+        geometry, time_windows, clients = make_world(5, seed=808)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=3, epsilon=0.0)
+        state = make_state(3, pending=clients, positions=[DEPOT, DEPOT, DEPOT])
+
+        action = policy.decide(state)
+
+        assert DEPOT not in action, "the untrained fleet retired at the depot instead of working"
+        nearest = min(clients, key=lambda client: geometry.average_minutes(DEPOT, client))
+        assert action[0] == nearest
 
 
 # --- learn() -------------------------------------------------------------------
@@ -444,13 +521,53 @@ class TestLearn:
             torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
 
 
+class TestGradClip:
+    """``neural_grad_clip_norm`` (ticket 08's stability-sweep lever): ``None``
+    and a never-binding bound are bit-identical to the pre-knob behavior; a
+    tight bound changes the step and stays deterministic."""
+
+    def run_learn(self, clip: float | None) -> list[torch.Tensor]:
+        geometry, time_windows, clients = make_world(5, seed=71)
+        policy = build_policy(
+            geometry,
+            time_windows,
+            clients,
+            number_vehicles=2,
+            epsilon=0.0,
+            learn_seed=7,
+            grad_clip_norm=clip,
+        )
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=5)
+        policy.learn(snapshots, actions, rewards)
+        return [p.clone() for p in policy.encoder.parameters()] + [
+            p.clone() for p in policy.head.parameters()
+        ]
+
+    def test_a_never_binding_bound_is_bit_identical_to_none(self) -> None:
+        unclipped = self.run_learn(None)
+        loose = self.run_learn(1.0e9)
+        for a, b in zip(unclipped, loose, strict=True):
+            torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
+
+    def test_a_tight_bound_changes_the_step_and_is_deterministic(self) -> None:
+        unclipped = self.run_learn(None)
+        tight_1 = self.run_learn(1.0e-6)
+        tight_2 = self.run_learn(1.0e-6)
+        assert any(
+            not torch.equal(a, b) for a, b in zip(unclipped, tight_1, strict=True)
+        ), "a 1e-6 clip should visibly change the optimizer step"
+        for a, b in zip(tight_1, tight_2, strict=True):
+            torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
+
+
 # --- calibration_pairs() (ticket 08, Gate A) ------------------------------------
 
 
 class TestCalibrationPairs:
-    """(Q_predicted, U_t) per (epoch, vehicle) -- Gate A's calibration primitive."""
+    """(Q_joint, U_t) once per decision epoch -- Gate A's calibration primitive."""
 
-    def test_pairs_length_matches_epochs_times_vehicles(self) -> None:
+    def test_one_pair_per_decision_epoch(self) -> None:
         geometry, time_windows, clients = make_world(5, seed=31)
         policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
         state = make_state(2, pending=clients)
@@ -458,7 +575,7 @@ class TestCalibrationPairs:
 
         pairs = policy.calibration_pairs(snapshots, actions, rewards)
 
-        assert len(pairs) == 6 * 2
+        assert len(pairs) == 6
 
     def test_empty_episode_returns_no_pairs(self) -> None:
         geometry, time_windows, clients = make_world(4, seed=32)
@@ -476,11 +593,9 @@ class TestCalibrationPairs:
         pairs = policy.calibration_pairs(snapshots, actions, rewards)
 
         for t in range(4):
-            for vehicle in range(2):
-                _, u = pairs[t * 2 + vehicle]
-                assert u == pytest.approx(targets[t])
+            assert pairs[t].realised_u == pytest.approx(targets[t])
 
-    def test_predicted_half_matches_replay_q(self) -> None:
+    def test_predicted_half_matches_the_joint_replay(self) -> None:
         geometry, time_windows, clients = make_world(5, seed=34)
         policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
         state = make_state(2, pending=clients)
@@ -489,11 +604,49 @@ class TestCalibrationPairs:
         pairs = policy.calibration_pairs(snapshots, actions, rewards)
 
         for t in range(3):
-            for vehicle in range(2):
-                q_pred, _ = pairs[t * 2 + vehicle]
-                with torch.no_grad():
-                    expected = policy._replay_q(snapshots[t], actions[t], vehicle).item()
-                assert q_pred == pytest.approx(expected)
+            with torch.no_grad():
+                expected = policy._replay_joint_q(snapshots[t], actions[t]).item()
+            assert pairs[t].predicted_q == pytest.approx(expected)
+
+
+class TestJointQIsAdditiveOverVehicles:
+    """``learn`` regresses ``sum_v Q(s, v, a_v)`` — the same additive-over-vehicles
+    shape ``MonteCarloPolicy``'s single joint feature vector already has, and what
+    makes the coordinate-wise argmin in ``_sweep`` the matching decision rule."""
+
+    def test_joint_q_is_the_sum_of_the_realized_per_vehicle_scores(self) -> None:
+        geometry, time_windows, clients = make_world(6, seed=36)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=3)
+        state = make_state(3, pending=clients)
+        snapshot = TrainingSnapshot.capture(state)
+        action_row = policy.decide(state)
+
+        with torch.no_grad():
+            joint = policy._replay_joint_q(snapshot, action_row).item()
+
+            from stdvrp.policies.tokenizer import tokenize
+
+            tokens = tokenize(
+                snapshot,
+                geometry,
+                time_windows,
+                horizon_start_minute=HORIZON_START,
+                shift_end_minute=SHIFT_END,
+                episode_end_minute=EPISODE_END,
+            )
+            embeddings = policy.encoder(tokens)
+            pending = list(snapshot.clients_not_visited)
+            claimed = np.zeros(len(pending), dtype=bool)
+            expected = 0.0
+            for vehicle in range(3):
+                q = policy._score(embeddings, vehicle, pending, claimed)
+                chosen = action_row[vehicle]
+                index = len(pending) if chosen == DEPOT else pending.index(chosen)
+                expected += float(q[index].item())
+                if chosen != DEPOT:
+                    claimed[index] = True
+
+        assert joint == pytest.approx(expected, rel=1e-5)
 
     def test_does_not_mutate_the_network(self) -> None:
         geometry, time_windows, clients = make_world(5, seed=35)

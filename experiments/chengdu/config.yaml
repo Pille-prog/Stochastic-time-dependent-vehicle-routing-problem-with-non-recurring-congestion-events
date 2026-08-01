@@ -73,7 +73,25 @@ device: auto
 # Ticket 06: the Policy's own learning rule. neural_learning_rate seeds Adam
 # (spec.md's live-report example); neural_learn_passes is K (ticket 03's
 # compute-budget measurement); neural_batch_size is the minibatch size within
-# one episode's ~400 (epoch, vehicle) decision samples.
-neural_learning_rate: 3.0e-4
+# one episode's ~400 decision epochs.
+#
+# 3.0e-4 (spec.md's illustrative value) was measured to diverge. On the mini
+# fixture, paired against the untrained null over ten held-out seeds, it
+# improves to -6.3% by episode 30 and then blows up -- +17% at ep 90, +91% at
+# ep 100, +255% at ep 130 -- while 3.0e-5 stays in the -2%..-5.7% band for the
+# full 200 episodes. Adam's steps are the same size whatever the gradient
+# magnitude, and what separates one candidate from another in Q is ~0.03 in
+# normalized units, so too large a step is pure noise on exactly the quantity
+# the argmin reads.
+#
+# Tuned on the MINI FIXTURE, not on evaluation_seeds: it is a default that
+# does not diverge, not a tuned optimum. spec.md puts hyperparameter search on
+# evaluation_seeds (never on test_seeds) -- that search has not been run.
+neural_learning_rate: 3.0e-5
 neural_learn_passes: 4
 neural_batch_size: 32
+# Ticket 08 (Gate A stability): optional max L2 gradient norm per minibatch
+# step, over encoder+head jointly; null disables clipping. The other lever of
+# the lr/clipping stability sweep (evaluation_seeds only) -- not a frozen
+# acceptance parameter.
+neural_grad_clip_norm: null

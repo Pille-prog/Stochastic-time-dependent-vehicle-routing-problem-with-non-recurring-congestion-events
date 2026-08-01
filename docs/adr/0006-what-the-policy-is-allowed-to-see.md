@@ -66,6 +66,25 @@ would not make the comparison fairer, since both Policies already share it
 equally; it would only leave the network with no notion of distance at all,
 which is not congestion-blindness, it is geometry-blindness.
 
+### The cost constants are configuration, not observation (2026-08-01)
+
+The 2026-08-01 amendment to spec.md decision 1 (ticket 08) put the four
+projected components of the simulator's cost function on the `(client,
+vehicle)` arc tokens. That amendment lives in decision 1 — the *purity* rule —
+and changes nothing here, but it leans on one clarification this ADR should
+state explicitly: the cost **rate constants** (`EARLINESS_COST_RATE`,
+`DELAY_COST_RATE`, `OVERTIME_COST_RATE`, `SERVICE_MINUTES` — the values
+`cost_ledger.py` and `Model` hardcode) are in the same class as the
+configuration clocks already on the allow-list. They are fixed problem
+definition, known before any Episode runs, identical for both Policies — not
+an observation of this Episode's world. Every projected cost is arithmetic
+over `tau`, the time windows and `EpisodeGeometry.average_minutes` (all
+already permitted) times those constants; `tokenize`'s five-argument
+signature is unchanged and the structural test still pins it. Nothing from
+the forbidden list — `EpisodeVelocities`, `congested_arcs`,
+`TravelTimeModel` at `tau`, `FleetRoutes` — is any closer to the Policy than
+before.
+
 ### The only admissible congestion-aware arm
 
 If Gate B fails on the congestion-blind Policy (ticket 09), ticket 10's

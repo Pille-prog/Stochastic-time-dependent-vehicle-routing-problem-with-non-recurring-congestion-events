@@ -51,6 +51,7 @@ def valid_values() -> dict:
         "neural_learning_rate": 3.0e-4,
         "neural_learn_passes": 4,
         "neural_batch_size": 8,
+        "neural_grad_clip_norm": None,
         "device": "cpu",
     }
 
@@ -141,10 +142,36 @@ def test_auto_device_is_accepted(tmp_path: Path) -> None:
 
 def test_auto_is_the_dataclass_default() -> None:
     """Ticket 12 amends spec.md decision 7: "auto", not "cpu", is now the default --
-    every shipped YAML still pins an explicit value (from_yaml requires every known
-    key), so this only matters for direct ExperimentConfig(...) construction."""
+    every shipped YAML still pins an explicit value (a defaulted key *may* be
+    omitted since ticket 08's neural_grad_clip_norm, but the shipped configs
+    stay explicit), so this mostly matters for direct ExperimentConfig(...)
+    construction."""
     device_field = next(f for f in dataclasses.fields(ExperimentConfig) if f.name == "device")
     assert device_field.default == "auto"
+
+
+def test_omitted_defaulted_keys_take_their_defaults(tmp_path: Path) -> None:
+    """A field with a dataclass default may be left out of the YAML (ticket 08:
+    a new optional knob must not invalidate every existing config file);
+    defaultless fields stay required (test_missing_key_is_rejected)."""
+    values = valid_values()
+    del values["device"]
+    del values["neural_grad_clip_norm"]
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.device == "auto"
+    assert config.neural_grad_clip_norm is None
+
+
+def test_grad_clip_norm_value_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_grad_clip_norm": 0.5}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_grad_clip_norm == 0.5
+
+
+def test_nonpositive_grad_clip_norm_is_rejected(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_grad_clip_norm": 0}
+    with pytest.raises(ValueError, match=r"neural_grad_clip_norm must be positive or null"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
 
 
 def test_shift_end_minute_equal_to_episode_end_minute_is_accepted(tmp_path: Path) -> None:

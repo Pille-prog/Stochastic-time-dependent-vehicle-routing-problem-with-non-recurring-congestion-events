@@ -252,10 +252,21 @@ def format_lr(lr: float) -> str:
 def format_episode_line(
     *, episode: int, seed: int, cost: float, loss: float, lr: float, wall_clock_seconds: float
 ) -> str:
-    """``[ep  348] train seed 1348   cost 2691.3   loss 0.387   lr 3.0e-4   8.9s``."""
+    """``[ep  348] train seed 1348   cost 2691.3   loss 3.9e-3   lr 3.0e-4   8.9s``.
+
+    ``loss`` is printed in scientific notation, not spec.md's illustrative
+    ``%.3f``. The quantity is a Huber over ``targets[t] / _return_scale``
+    (``transformer_policy.py``), which for a healthy Chengdu episode lands
+    around ``2500 / 127500 ~ 0.02`` — squared, that is ``2e-4``, and every
+    value a converging run produces rounds to ``0.000`` at three decimals.
+    Ticket 08's Gate A log printed exactly that for 1 338 consecutive
+    episodes, so the one number in the live report that could have shown the
+    fit collapsing showed nothing at all. Scientific notation costs the same
+    column width and distinguishes ``2e-4`` from ``2e-8``.
+    """
     return (
         f"[ep {episode:4d}] train seed {seed}   cost {cost:.1f}   "
-        f"loss {loss:.3f}   lr {format_lr(lr)}   {wall_clock_seconds:.1f}s"
+        f"loss {loss:.1e}   lr {format_lr(lr)}   {wall_clock_seconds:.1f}s"
     )
 
 
