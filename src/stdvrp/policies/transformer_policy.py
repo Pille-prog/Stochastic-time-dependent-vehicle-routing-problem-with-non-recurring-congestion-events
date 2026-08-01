@@ -132,6 +132,7 @@ class CalibrationPair(NamedTuple):
     predicted_q: float
     realised_u: float
 
+
 # Legacy cost factors MonteCarloPolicy hardcodes (see this module's docstring,
 # "Why _already_acquired_cost is duplicated, not shared").
 _DELAY_COST_FACTOR = 1.0
@@ -168,6 +169,7 @@ class TransformerMonteCarloPolicy(Policy):
         learn_rng: np.random.Generator,
         learn_passes: int,
         batch_size: int,
+        device: torch.device | None = None,
     ) -> None:
         self.number_vehicles = number_vehicles
         self.geometry = geometry
@@ -183,6 +185,14 @@ class TransformerMonteCarloPolicy(Policy):
         self.optimizer = optimizer
         self.learn_passes = learn_passes
         self.batch_size = batch_size
+        # Ticket 12: this class builds several ad hoc tensors of its own (the
+        # infeasible mask, claimed, the depot arc pair, learn's target) that
+        # are never part of encoder/head's parameters, so `.to(device)` at
+        # their construction does not cover these -- they must be built on the
+        # same device as encoder/head, or every op below errors on a device
+        # mismatch. Defaults to CPU so every existing direct-construction call
+        # site (the unit tests among them) keeps working unchanged.
+        self.device = device if device is not None else torch.device("cpu")
 
         # Ticket 13 discipline (ADR-0001 phase 2): one injected Generator per
         # stochastic concern, never a global. ``exploration_rng`` is
@@ -254,7 +264,8 @@ class TransformerMonteCarloPolicy(Policy):
                 q = self._score(embeddings, vehicle, vehicle_position, pending, claimed_mask)
                 masked = q.clone()
                 if n_pending:
-                    masked[:n_pending][torch.from_numpy(infeasible_mask)] = float("inf")
+                    infeasible = torch.from_numpy(infeasible_mask).to(self.device)
+                    masked[:n_pending][infeasible] = float("inf")
                 chosen = int(torch.argmin(masked).item())
 
             if chosen == n_pending:
@@ -279,9 +290,9 @@ class TransformerMonteCarloPolicy(Policy):
         depot_row = self._depot_row(embeddings, vehicle, vehicle_position)
         augmented = torch.cat([client_embeddings, depot_row.unsqueeze(0)], dim=0)
 
-        claimed = torch.zeros(n_pending + 1, dtype=torch.float32)
+        claimed = torch.zeros(n_pending + 1, dtype=torch.float32, device=self.device)
         if n_pending:
-            claimed[:n_pending] = torch.from_numpy(claimed_mask.astype(np.float32))
+            claimed[:n_pending] = torch.from_numpy(claimed_mask.astype(np.float32)).to(self.device)
 
         q: torch.Tensor = self.head(embeddings.vehicles[vehicle], augmented, claimed)
         return q
@@ -293,7 +304,9 @@ class TransformerMonteCarloPolicy(Policy):
         minutes = self.geometry.average_minutes(vehicle_position, self.depot)
         length = self.geometry.length(vehicle_position, self.depot)
         pair = torch.tensor(
-            [minutes / self._horizon_length, length / self._horizon_length], dtype=torch.float32
+            [minutes / self._horizon_length, length / self._horizon_length],
+            dtype=torch.float32,
+            device=self.device,
         )
         depot_arc = self.encoder.arc_embed(pair)
         return torch.cat([embeddings.vehicles[vehicle], depot_arc])
@@ -324,7 +337,9 @@ class TransformerMonteCarloPolicy(Policy):
                 for index in batch:
                     t, vehicle = samples[int(index)]
                     q_pred = self._replay_q(snapshots[t], actions[t], vehicle)
-                    target = torch.tensor(targets[t] / self._return_scale, dtype=torch.float32)
+                    target = torch.tensor(
+                        targets[t] / self._return_scale, dtype=torch.float32, device=self.device
+                    )
                     losses.append(functional.huber_loss(q_pred / self._return_scale, target))
                 loss = torch.stack(losses).mean()
                 loss.backward()

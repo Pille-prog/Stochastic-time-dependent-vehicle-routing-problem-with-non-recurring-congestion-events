@@ -4,7 +4,9 @@
 Chengdu dataset and answer the effort's objective question against the frozen
 protocol.
 
-**Blocked by:** 08
+**Blocked by:** 08, 12 (the trained Policy this ticket judges comes from the
+same runs Gate A grades — one compute budget, not two, and on CPU it does not
+fit inside the frozen safety cap)
 
 **Status:** open
 

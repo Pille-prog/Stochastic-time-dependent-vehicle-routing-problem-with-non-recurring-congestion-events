@@ -36,6 +36,7 @@ from stdvrp.demand.client_generator import ClientGenerator
 from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPathCache
 from stdvrp.policies.network import QHead, TokenEncoder
+from stdvrp.policies.torch_support import resolve_device
 from stdvrp.policies.transformer_policy import CalibrationPair, TransformerMonteCarloPolicy
 from stdvrp.simulation.episode import EpisodeResult
 from stdvrp.simulation.model import Model
@@ -91,6 +92,7 @@ class NeuralPolicyState:
     encoder: TokenEncoder
     head: QHead
     optimizer: torch.optim.Optimizer
+    device: torch.device
 
     @property
     def current_lr(self) -> float:
@@ -108,32 +110,27 @@ def build_neural_policy_state(
 ) -> NeuralPolicyState:
     """Fresh network + optimizer from ``config``'s architecture fields.
 
-    ``config.device`` other than ``"cpu"`` is rejected outright rather than
-    silently accepted: ``TokenEncoder.forward`` builds its input tensors via
-    ``torch.from_numpy`` with no ``.to(device)`` anywhere (see
-    ``network.py``), so a non-CPU device is not wired end-to-end yet — the
-    same gap ``torch_support.py`` and spec.md's compute-budget section
-    already document as untested, not silently claimed here either.
+    ``config.device`` (``"cpu"``, ``"cuda"``, or ``"auto"``) is resolved
+    **once** here, via :func:`~stdvrp.policies.torch_support.resolve_device`
+    (ticket 12) — never re-resolved later, since ``"auto"`` is not guaranteed
+    to agree between calls. The resolved device is carried on the returned
+    :class:`NeuralPolicyState` for every later caller (the Trainer's log line,
+    the checkpoint, the results record) to read back rather than re-derive.
     """
-    if config.device != "cpu":
-        raise NotImplementedError(
-            f"device={config.device!r} is not supported yet: TokenEncoder/QHead's forward "
-            "pass always builds CPU tensors (see network.py's module docstring). "
-            "Use device: cpu."
-        )
-
+    device = resolve_device(config.device)
     encoder = TokenEncoder(
         d_model=config.neural_d_model,
         n_layers=config.neural_n_layers,
         n_heads=config.neural_n_heads,
         n_observed_velocities=config.n_observed_velocities,
         init_rng=init_rng,
+        device=device,
     )
-    head = QHead(d_model=config.neural_d_model, init_rng=init_rng)
+    head = QHead(d_model=config.neural_d_model, init_rng=init_rng, device=device)
     optimizer = torch.optim.Adam(
         chain(encoder.parameters(), head.parameters()), lr=config.neural_learning_rate
     )
-    return NeuralPolicyState(encoder=encoder, head=head, optimizer=optimizer)
+    return NeuralPolicyState(encoder=encoder, head=head, optimizer=optimizer, device=device)
 
 
 def _build_episode(
@@ -183,6 +180,7 @@ def _build_episode(
         learn_rng=learn_rng,
         learn_passes=config.neural_learn_passes,
         batch_size=config.neural_batch_size,
+        device=policy_state.device,
     )
     model = Model(
         state,
@@ -264,7 +262,7 @@ def run_neural_evaluation_episode(
     depot: int = 0,
 ) -> EpisodeResult:
     """Run one greedy evaluation Episode; reads ``policy_state``, never mutates it."""
-    model, policy = _build_episode(
+    model, _policy = _build_episode(
         seed=seed,
         client_generator=client_generator,
         travel_time_model=travel_time_model,

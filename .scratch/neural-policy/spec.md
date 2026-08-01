@@ -81,7 +81,7 @@ difference: the features are not enriched, they are *removed*.
 | 4 | Action set | **Every pending Client + the depot**, feasibility mask only. `_select_vehicle_possible_actions`, `_classify_shortest_distance_clients`, `delayed_clients`, the `350`/`310` literals and `number_actions_test` all die for this Policy. The B11 invariant survives *as a mask*, because it is a constraint, not a heuristic |
 | 5 | Learning rule | **`Q(s,a)` + Monte Carlo return.** Same target `U_t − acquired_cost`, undiscounted, same statistical object. Only `X · W` → `net(tokens)` and constant-step SGD → Adam |
 | 6 | Multi-vehicle structure | **Sequential one-agent-at-a-time**: one encoder pass per decision epoch, then `m` cheap head passes. `claimed` enters at the head, not the encoder, so one encode serves the whole sweep |
-| 7 | torch | **Optional extra `neural`**, lazily imported, `device` in config, **CPU by default**. A ticket measures CPU vs CUDA rather than assuming |
+| 7 | torch | **Optional extra `neural`**, lazily imported, `device` in config. A ticket measures CPU vs CUDA rather than assuming. ~~CPU by default~~ — **amended 2026-07-31 (ticket 12): the default is `"auto"`**, resolved once per run and pinned in that run's record. See below |
 | 8 | Training seam | **`TrainablePolicy` protocol**; the loop stays in `Model`. `TrainingSnapshot` gains `vehicle_completing_service` |
 | 9 | Learning unit | **One batch per episode**, K shuffled minibatch passes, then discarded. Strictly on-policy — which is what "Monte Carlo policy evaluation" means and what keeps the comparison interpretable |
 | 10 | "It learns" gate | **Three parts**: null model, ≥3 init seeds, calibration |
@@ -89,6 +89,71 @@ difference: the features are not enriched, they are *removed*.
 | 12 | Stopping | **Train to convergence**: patience → `lr × 0.3` → three reductions → stop. The hard cap is a safety net, not the budget; if it fires the run is reported as **"did not converge"** |
 | 13 | Live comparison | **Reference card + paired live prints.** The scalar `static_policy_mean_cost` retires in favour of the baseline's **per-seed** cost vector |
 | 14 | If it loses | **Pre-committed two-arm escalation**, protocol frozen before measuring, closing ADR with the negative result. The Policy ships available but not default |
+
+### Amendment to decision 7 (2026-07-31, ticket 12)
+
+"CPU by default" rested on one stated risk: `EpisodePool` workers each opening
+their own CUDA context on an 8 GB laptop GPU (ticket 03). **The neural path
+never opens a worker** — ticket 07 runs its evaluation blocks serially and
+`EpisodePool` appears nowhere in `trainer.py` — so the risk does not apply to
+this effort, and the default was resting on an excluded interaction.
+
+Measured, the device is not a preference but a **precondition**: at ~11.4 s per
+training episode on CPU (derived: ~9.6 s network + 1.82 s simulator), 24 h buys
+~6 600 episodes, so the frozen 10 000-episode cap is unreachable, the clock cap
+always fires first, and every run is recorded *"did not converge"* — three init
+seeds, three days, nothing concluded. At ~3.4 s/ep on CUDA the episode cap is
+reachable in ~11 h.
+
+`device` therefore defaults to **`"auto"`** (`cuda` if available, else `cpu`).
+Because CPU and CUDA do not agree bit for bit, `auto` moves the pinning of a
+result out of the config and into the run's own record: it resolves **once**,
+is printed, is written into the checkpoint and the results, and a cross-device
+resume is an error. An explicit `device: cuda` with no GPU fails loudly rather
+than degrading silently. The test suite pins `"cpu"` explicitly so it stays
+identical on CI and on GPU machines.
+
+**No frozen acceptance number changes.** Seeds, metric, test, minimum effect
+size and stopping rule are untouched; the safety cap keeps both its halves. The
+only difference is *which half binds*: the clock on CPU, the episode count on
+CUDA.
+
+### Correction to the amendment above (2026-07-31, ticket 12's own measurement)
+
+The "~11.4 s CPU / ~3.4 s CUDA" figures above were a **derivation** from
+ticket 03's stub network (no tokenizer, no real per-sample `learn()` loop, no
+`torch.use_deterministic_algorithms`), not a measurement of the real thing.
+Ticket 12 wired the device end to end and measured the real network against
+the real Chengdu dataset for the first time — see "Compute budget" below for
+the full table. The result does not match the projection: **CUDA is not
+faster than CPU on the reference laptop**, measured against the real
+tokenizer/network, on either the acting or the learning path. A likely major
+cause, isolated by ablation: `resolve_device("cuda")` correctly enables
+`torch.use_deterministic_algorithms(True)` (required by ticket 05's
+bit-identical contract) — a cost ticket 03's stub never paid, measured here at
+~33% on this hardware. A second likely contributor: the real `learn()` step
+re-tokenizes and re-encodes every sample individually rather than as one
+batched op (documented as "not maximally efficient" in
+`transformer_policy.py`'s own module docstring), favouring CPU's lack of
+per-call transfer/launch overhead over CUDA's. Not conclusively separated
+from this laptop's own known run-to-run timing drift (ticket 03's Comments)
+— this measurement followed roughly 15 minutes of sustained CUDA test
+activity in the same process, so thermal/power throttling cannot be ruled
+out; recorded as found rather than re-measured under controlled conditions.
+
+**This means the reachability argument above does not hold as stated**: the
+measurement does not show CUDA reaching the 10 000-episode cap any faster
+than CPU. `device` stays `"auto"` anyway — not because it is faster here (it
+measurably is not), but because an `"auto"` that resolves to whichever device
+is genuinely faster locally costs nothing, the answer is machine-specific (a
+different GPU, a batched `learn()`, or the mixed-precision/TF32 work this
+effort declined to do could change it), and the correctness machinery this
+ticket built (loud failure on an explicit `cuda` request with no GPU,
+cross-device resume refusal, the resolved device recorded in the checkpoint
+and results) has value independent of which device turns out faster. Tickets
+08/09's real runs should not assume CUDA buys episode-cap headroom; budget
+for either device costing close to the frozen safety cap, per the "Compute
+budget" table below.
 
 ## The observability rule, precisely
 
@@ -185,7 +250,7 @@ Copied deliberately from `simulator-correctness` decision 10:
 > can be rewritten after seeing the result was never a criterion.
 
 If Gate B fails on arm 1, arm 2 (fleet shared observation memory) runs. If arm 2
-also fails, the effort closes with **ADR-0008 recording the negative result**,
+also fails, the effort closes with **ADR-0009 recording the negative result**,
 the Policy ships available-but-not-default, and the research note's central
 claim — that the observation set is the binding constraint — is recorded as
 supported by measurement.
@@ -201,11 +266,11 @@ supported by measurement.
 | Gate B effect | ≥ 3% vs. baseline best cell, p < 0.05 | |
 | Init seeds | 3 | |
 | Patience | 5 evaluation blocks without improvement → `lr × 0.3`; 3 reductions → converged | |
-| Safety cap | 10 000 episodes **or** 24 h per run | Not the budget. If it fires, the run is reported **"did not converge"** and never presented as a clean result |
+| Safety cap | 10 000 episodes **or** 24 h per run | Not the budget. If it fires, the run is reported **"did not converge"** and never presented as a clean result. Unchanged by ticket 12. Ticket 12's own projection that CUDA moves *which half binds* did not survive its own real-network measurement (see "Compute budget" below) — budget for the clock binding on **either** device, not just CPU |
 | Evaluation cadence | scales with run length (~every 50 episodes) | At `test_frequency: 10`, a 2000-episode run costs 10 000 evaluation episodes — more than the training itself |
 | Starting architecture | d=128, 3 layers, 4 heads (measured 594,945 params at `dim_feedforward=4*d_model` — see "Compute budget" below, not the ~200k first guessed here) | A starting point, tuned on the evaluation seeds only |
 
-## Compute budget (ticket 03, measured — corrects the napkin estimate below)
+## Compute budget (ticket 03's stub measurement, corrected by ticket 12's real one below)
 
 This effort's planning used a napkin calculation of ~10 s/ep training,
 ~3.3 s/ep evaluation for PyTorch dispatch overhead. Ticket 03 replaced that
@@ -228,16 +293,53 @@ roughly 3x too high** (~1.0 s/ep measured, acting path only, no learning
 step). **The napkin's own qualitative prediction did not hold**: it expected
 CUDA to help only the learning step (kernel-launch overhead dominating the
 latency-bound acting path); measured, CUDA won *both* paths on this hardware.
-`device` still defaults to `"cpu"` (decision 7 is structural, not overturned
+~~`device` still defaults to `"cpu"` (decision 7 is structural, not overturned
 by a single-process measurement) — `EpisodePool` worker processes each
 wanting their own CUDA context on one 8 GB GPU is a real, untested
-interaction the ticket documents but does not measure.
+interaction the ticket documents but does not measure.~~ **Superseded
+2026-07-31 (ticket 12):** the default is `"auto"`. The `EpisodePool`
+interaction is not untested-and-risky but *absent* — ticket 07's neural path
+is single-process, so no worker ever asks for a CUDA context. See the
+amendment to decision 7 above.
 
-These are stub-network numbers, not the real tokenizer/network (tickets
+These were stub-network numbers, not the real tokenizer/network (tickets
 04-05) or the real per-episode simulator cost this effort's other efforts
 already measured (`simulation-performance`: ~2.4 s/ep train, ~1.3 s/ep eval on
-the real dataset) — the two costs are additive once the real Policy exists,
-not substitutes for one another.
+the real dataset; its closing ticket 10 measured 1.817 s/ep train and
+0.802 s/ep eval on the real Chengdu world) — the two costs are additive once
+the real Policy exists, not substitutes for one another.
+
+### The real measurement (ticket 12, 2026-07-31)
+
+`scripts/benchmark_neural_real.py` replaces the stub above with the real
+thing: `run_neural_training_episode` / `run_neural_evaluation_episode`
+(tickets 04-07, the committed d=128/3-layer/4-head architecture) against the
+real Chengdu dataset, on the reference hardware. 12 timed episodes per
+path per device, one untimed warmup episode first.
+
+Per-episode cost varies far more than the stub anticipated, because it tracks
+each episode's **decision-epoch count** — itself highly variable at this
+early, largely-untrained stage of the myopic warm start (1 to 409 decisions
+across the 12 training episodes sampled; the stub assumed a fixed ~400). The
+decision-weighted **ms/decision** figure below is therefore the more
+comparable unit against the stub's own per-decision numbers; s/ep is also
+given because it is what the safety cap actually counts against.
+
+| | CPU | CUDA |
+|---|---|---|
+| Training (acting + learning), decision-weighted | ~173 ms/decision | ~191 ms/decision |
+| Training (acting + learning), per-episode mean over the 12 sampled (min–max) | 25.8 s/ep (0.16–58.2) | 35.9 s/ep (0.18–76.6) |
+| Evaluation (acting only), decision-weighted | ~5.2 ms/decision | ~6.6 ms/decision |
+| Evaluation (acting only), per-episode mean over the 12 sampled (min–max) | 1.43 s/ep (0.75–2.06) | 1.97 s/ep (1.35–2.70) |
+
+**CUDA is not faster than CPU here — mildly slower on both paths, the
+opposite of the stub's finding above.** See the correction appended to the
+decision-7 amendment for the likely causes (the `use_deterministic_algorithms`
+cost the stub never paid, verified by ablation at ~33%; `learn()`'s per-sample
+non-batched re-tokenize-and-re-encode loop) and the caveat about this
+machine's own timing drift. Recorded as found, per this effort's own
+discipline (ticket 03's Comments: "not forced into the anticipated shape") —
+not smoothed over because it contradicts the ticket that measured it.
 
 ## The live report
 
@@ -264,8 +366,10 @@ nothing is happening — instead of finding out after six hours.
 
 ## Tickets
 
-Critical path: 01 → 02 → 03 → 04 → 05 → 06 → 07 → 08 → 09. Ticket 10 is
-conditional on 09's verdict; 11 closes.
+Critical path: 01 → 02 → 03 → 04 → 05 → 06 → 07 → **12** → 08 → 09. Ticket 10
+is conditional on 09's verdict; 11 closes. Ticket 12 carries the highest
+number but runs before 08: it was opened after 08-11 existed, and renumbering
+would orphan the ticket numbers already in the commit history.
 
 | # | Ticket | Blocked by | Predicted self-golden diff |
 |---|---|---|---|
@@ -276,10 +380,11 @@ conditional on 09's verdict; 11 closes.
 | 05 | The network, the Q head and the myopic warm start | 04 | **zero** |
 | 06 | The Policy: decide, decide_train, learn | 02, 05 | **zero** |
 | 07 | Trainer: live paired report, convergence stopping, checkpoints | 01, 06 | **zero** |
-| 08 | Gate A — does it learn | 07 | **zero** |
-| 09 | Arm 1 — the real run and the verdict | 08 | **zero** |
+| 08 | Gate A — does it learn | 07, **12**, `simulator-correctness`/11 | **zero** |
+| 09 | Arm 1 — the real run and the verdict | 08, **12** | **zero** |
 | 10 | Arm 2 — fleet shared observation memory (conditional) | 09 | **zero** |
 | 11 | Close: ADRs, CONTEXT.md, results | 09 or 10 | **zero** |
+| 12 | `device: cuda` end to end (runs before 08 — see the critical path) | 07 | **zero** |
 
 ## ADRs this effort writes
 
@@ -293,9 +398,14 @@ Each inside its ticket, when the decision is executed — never up front.
   Why `_select_vehicle_possible_actions` and its `350`/`310` literals do not
   apply to this Policy, why the B11 no-double-booking invariant survives as a
   mask, and why `number_actions_test` has no meaning here.
-- **ADR-0008** (ticket 11) — *The reference card and the paired protocol.*
+- **ADR-0009** (ticket 11) — *The reference card and the paired protocol.*
   Retires `static_policy_mean_cost`; records the verified independence argument
-  above; records the verdict, including a negative one.
+  above; records the verdict, including a negative one. Also records, in one
+  clause, that a run's device is resolved once and pinned in the run's own
+  record (ticket 12) — the device gets no ADR of its own, being operational
+  rather than architectural.
+  **Renumbered 2026-07-31 from ADR-0008**, which `simulator-correctness`/11
+  took first (`docs/adr/0008-an-action-must-be-executable.md`).
 
 ## CONTEXT.md terms
 

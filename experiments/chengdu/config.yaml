@@ -63,7 +63,12 @@ test_vehicle_counts: [6, 5, 5, 7, 7, 6, 6, 5, 6, 5,
 neural_d_model: 128
 neural_n_layers: 3
 neural_n_heads: 4
-device: cpu
+# Ticket 12: "auto" resolves once per run to whichever device is faster
+# locally -- measured against the real network, CUDA was *not* faster than
+# CPU on the reference laptop (see spec.md's compute-budget section), so this
+# does not assume CUDA; it just avoids hardcoding a choice that is
+# machine-specific and may differ on whatever machine actually runs this.
+device: auto
 
 # Ticket 06: the Policy's own learning rule. neural_learning_rate seeds Adam
 # (spec.md's live-report example); neural_learn_passes is K (ticket 03's

@@ -59,7 +59,7 @@ has not experienced.
 1. **Wins**: the effort's objective is met, and the research note's claim is
    confirmed with a number attached. Ticket 11 records both.
 2. **Loses**: the effort closes with an honest negative result. Ticket 11 writes
-   **ADR-0008** recording it; the Policy ships available-but-not-default; and
+   **ADR-0009** recording it; the Policy ships available-but-not-default; and
    the finding — *a transformer over raw State, with and without fleet
    observation memory, did not beat a 19-feature linear VFA on this problem* —
    is a real contribution to the lab, not a failure to hide. There is precedent:

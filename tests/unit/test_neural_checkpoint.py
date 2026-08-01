@@ -130,3 +130,49 @@ class TestAtomicWrite:
 
         assert path.exists()
         assert not (tmp_path / "checkpoint.pt.tmp").exists()
+
+
+class TestDeviceGuard:
+    """Ticket 12: a checkpoint records the device its weights were written on;
+    resuming on a different device is refused, never silently allowed (CPU and
+    CUDA do not agree bit for bit, so loading anyway would silently break
+    ticket 07's bit-identical resume guarantee). Tampers with the saved
+    document's "device" field directly, so this is real hardware-independent
+    coverage of the guard itself -- no second GPU needed to prove it fires."""
+
+    def test_save_records_the_device(self, tmp_path: Path) -> None:
+        config = make_config()
+        state = build_neural_policy_state(config, np.random.default_rng(0))
+        path = tmp_path / "checkpoint.pt"
+
+        save_checkpoint(path, make_checkpoint(), state)
+
+        document = torch.load(path, weights_only=False)
+        assert document["device"] == str(state.device) == "cpu"
+
+    def test_a_mismatched_device_refuses_to_load(self, tmp_path: Path) -> None:
+        config = make_config()
+        state = build_neural_policy_state(config, np.random.default_rng(0))
+        path = tmp_path / "checkpoint.pt"
+        save_checkpoint(path, make_checkpoint(), state)
+
+        # Tamper with the saved document to simulate a checkpoint written on a
+        # different device than this run resolved -- the scenario the guard
+        # exists for, reproduced without needing a second physical device.
+        document = torch.load(path, weights_only=False)
+        document["device"] = "cuda"
+        torch.save(document, path)
+
+        with pytest.raises(RuntimeError, match="cross-device"):
+            load_checkpoint(path, state)
+
+    def test_a_matching_device_loads_normally(self, tmp_path: Path) -> None:
+        config = make_config()
+        state = build_neural_policy_state(config, np.random.default_rng(0))
+        path = tmp_path / "checkpoint.pt"
+        checkpoint = make_checkpoint(episodes_completed=7)
+        save_checkpoint(path, checkpoint, state)
+
+        loaded = load_checkpoint(path, state)
+
+        assert loaded.episodes_completed == 7

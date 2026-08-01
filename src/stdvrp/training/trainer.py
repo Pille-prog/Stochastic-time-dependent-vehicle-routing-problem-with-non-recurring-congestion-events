@@ -174,6 +174,10 @@ class NeuralTrainingResult:
     evaluations: tuple[EvaluationReport, ...]
     elapsed_seconds: float
     policy_state: NeuralPolicyState
+    # The device this run's weights live on and every episode ran on (ticket
+    # 12) -- resolved once (policy_state.device) and carried into the results
+    # record, since "auto" means the config alone no longer pins it.
+    device: str
     # ``None`` when the default salted first_train_seed derivation was used
     # (see train_neural's own docstring); the explicit value the caller passed
     # otherwise. Ticket 08 (Gate A) reads this back to confirm which of its
@@ -535,6 +539,10 @@ class Trainer:
             )
         else:
             policy_state = build_neural_policy_state(config, np.random.default_rng(init_seed))
+        # Ticket 12: config.device may be "auto", so the config alone no
+        # longer pins which device this run actually used -- print the
+        # resolved device once, up front, so the run's own log records it.
+        self._log(f"device: {policy_state.device}")
         convergence = ConvergenceState(current_lr=config.neural_learning_rate)
         evaluations: list[EvaluationReport] = []
         episodes_completed = 0
@@ -650,6 +658,7 @@ class Trainer:
             evaluations=tuple(evaluations),
             elapsed_seconds=total_elapsed(),
             policy_state=policy_state,
+            device=str(policy_state.device),
             init_seed=init_seed,
         )
 

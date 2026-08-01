@@ -371,6 +371,80 @@ class TestCheckpointAndResume:
             torch.testing.assert_close(pa, pb, atol=0.0, rtol=0.0)
 
 
+class TestCudaResume:
+    """Ticket 12: ticket 07's own interrupt/resume test (above), re-run with
+    device=cuda -- same device throughout, never cross-device
+    (neural_checkpoint.py refuses that; test_neural_checkpoint.py::TestDeviceGuard
+    covers the refusal itself). Episode *runners* are stubbed here exactly as
+    ticket 07's original test stubs them, so this exercises real network
+    construction and real checkpoint state-dict I/O on CUDA, and confirms
+    init-seed reproducibility holds on real hardware -- it does not exercise a
+    real backward pass (see test_transformer_policy.py::TestLearn::
+    test_learn_is_deterministic_on_cuda_with_the_same_seed for
+    use_deterministic_algorithms(True) proven against a real backward pass on
+    real CUDA hardware, tested for the first time; ticket 05 had no GPU
+    available to test it against)."""
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA GPU on this machine")
+    def test_interrupting_then_resuming_produces_an_identical_trajectory_on_cuda(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = make_config(device="cuda")
+        was_enabled = torch.are_deterministic_algorithms_enabled()
+        try:
+            # Uninterrupted reference run.
+            patch_runners(
+                monkeypatch, SeedDeterministicTrainingStub(), SeedDeterministicEvaluationStub()
+            )
+            trainer_a = Trainer(make_world(config), log=lambda _m: None)
+            result_a = trainer_a.train_neural(
+                reference_card=make_reference_card(config),
+                checkpoint_path=tmp_path / "a.pt",
+                max_episodes=8,
+                evaluation_cadence_minimum=2,
+            )
+
+            # Interrupted after the first block, then resumed to the same cap.
+            checkpoint_b = tmp_path / "b.pt"
+            patch_runners(
+                monkeypatch, SeedDeterministicTrainingStub(), SeedDeterministicEvaluationStub()
+            )
+            trainer_b1 = Trainer(make_world(config), log=lambda _m: None)
+            interrupted = trainer_b1.train_neural(
+                reference_card=make_reference_card(config),
+                checkpoint_path=checkpoint_b,
+                max_episodes=2,
+                evaluation_cadence_minimum=2,
+            )
+            assert interrupted.episodes_completed == 2
+
+            patch_runners(
+                monkeypatch, SeedDeterministicTrainingStub(), SeedDeterministicEvaluationStub()
+            )
+            trainer_b2 = Trainer(make_world(config), log=lambda _m: None)
+            result_b = trainer_b2.train_neural(
+                reference_card=make_reference_card(config),
+                checkpoint_path=checkpoint_b,
+                resume=True,
+                max_episodes=8,
+                evaluation_cadence_minimum=2,
+            )
+
+            assert result_a.device == result_b.device == "cuda"
+            assert result_a.episodes_completed == result_b.episodes_completed == 8
+            assert len(result_a.evaluations) == len(result_b.evaluations)
+            for ra, rb in zip(result_a.evaluations, result_b.evaluations, strict=True):
+                assert ra.episodes_completed == rb.episodes_completed
+                assert ra.seed_costs == rb.seed_costs
+
+            params_a = list(result_a.policy_state.encoder.parameters())
+            params_b = list(result_b.policy_state.encoder.parameters())
+            for pa, pb in zip(params_a, params_b, strict=True):
+                torch.testing.assert_close(pa, pb, atol=0.0, rtol=0.0)
+        finally:
+            torch.use_deterministic_algorithms(was_enabled)
+
+
 class TestInitSeedOverride:
     """``init_seed`` (ticket 08, Gate A) varies only the network's weight init,
     holding ``first_train_seed``/the training episode sequence fixed -- the one

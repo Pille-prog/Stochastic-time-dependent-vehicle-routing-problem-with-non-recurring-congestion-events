@@ -1,6 +1,6 @@
 # 11 — Close: ADRs, CONTEXT.md, results
 
-**What to build:** Close the effort. Write **ADR-0008**, finish the CONTEXT.md
+**What to build:** Close the effort. Write **ADR-0009**, finish the CONTEXT.md
 terms, and write the closing status into `spec.md` — with whatever the verdict
 turned out to be.
 
@@ -8,7 +8,10 @@ turned out to be.
 
 **Status:** open
 
-## ADR-0008 — The reference card and the paired protocol
+## ADR-0009 — The reference card and the paired protocol
+
+**Renumbered 2026-07-31 from ADR-0008**, taken first by
+`simulator-correctness`/11 (`docs/adr/0008-an-action-must-be-executable.md`).
 
 - Retires `static_policy_mean_cost`: one hardcoded scalar supported only
   comparing means; the per-seed vector supports the paired test the acceptance
@@ -24,6 +27,12 @@ turned out to be.
   frozen in spec.md is the protocol that was executed. If anything deviated,
   say what and why — an unrecorded deviation makes every number in the effort
   unciteable.
+- **One clause on the device** (ticket 12): with `device: "auto"` the config no
+  longer pins a result — CPU and CUDA do not agree bit for bit — so the run's
+  own record does, resolved once and written into the checkpoint and the
+  results. The device itself gets no ADR: where a tensor runs is operational,
+  not architectural. What is permanent is that every reported number names the
+  device it was produced on.
 
 ## CONTEXT.md
 
@@ -71,7 +80,7 @@ model:
 
 ## Acceptance
 
-- [ ] ADR-0008 written, CONTEXT.md updated, spec.md closed.
+- [ ] ADR-0009 written, CONTEXT.md updated, spec.md closed.
 - [ ] Predicted self-golden diff: **zero.**
 
 ## Comments

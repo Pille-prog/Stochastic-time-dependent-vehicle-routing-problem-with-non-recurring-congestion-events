@@ -37,6 +37,28 @@ dev = [
     "types-pyyaml>=6.0",
 ]
 
+# PyPI serves the CPU-only torch build, which silently wastes any local GPU: the
+# `neural` extra would install and import fine while `torch.cuda.is_available()`
+# stays False. Pinning the extra to PyTorch's CUDA 12.8 index makes GPU training
+# the default for anyone who opts into `neural`.
+#
+# `explicit = true` keeps this index out of general resolution — only packages
+# routed here by [tool.uv.sources] use it, everything else stays on PyPI.
+#
+# CI is unaffected: `.github/workflows/ci.yml` runs a plain `uv sync`, so the
+# extra is never installed there and the neural tests skip via importorskip.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+# The CUDA index publishes Linux and Windows wheels only; macOS falls back to
+# PyPI, where torch is CPU-only anyway (no CUDA on macOS).
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/stdvrp"]
 

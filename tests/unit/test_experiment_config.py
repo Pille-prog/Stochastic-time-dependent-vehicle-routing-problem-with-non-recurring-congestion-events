@@ -131,6 +131,22 @@ def test_cuda_device_is_accepted(tmp_path: Path) -> None:
     assert config.device == "cuda"
 
 
+def test_auto_device_is_accepted(tmp_path: Path) -> None:
+    """Ticket 12: "auto" resolves once at run start (torch_support.resolve_device),
+    not here -- ExperimentConfig only has to accept the string."""
+    values = valid_values() | {"device": "auto"}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.device == "auto"
+
+
+def test_auto_is_the_dataclass_default() -> None:
+    """Ticket 12 amends spec.md decision 7: "auto", not "cpu", is now the default --
+    every shipped YAML still pins an explicit value (from_yaml requires every known
+    key), so this only matters for direct ExperimentConfig(...) construction."""
+    device_field = next(f for f in dataclasses.fields(ExperimentConfig) if f.name == "device")
+    assert device_field.default == "auto"
+
+
 def test_shift_end_minute_equal_to_episode_end_minute_is_accepted(tmp_path: Path) -> None:
     # Ticket 02 (simulator-correctness, B15): the boundary itself is valid —
     # only shift_end_minute > episode_end_minute is rejected.

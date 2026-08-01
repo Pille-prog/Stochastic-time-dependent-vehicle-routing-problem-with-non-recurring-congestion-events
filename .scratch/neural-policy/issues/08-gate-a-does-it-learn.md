@@ -4,7 +4,10 @@
 network learned anything at all. This is the **hard landing gate** of the
 effort — independent of whether it beats the baseline.
 
-**Blocked by:** 07, and `simulator-correctness`/11 (B20 — a crash in the shared
+**Blocked by:** 07; **12** (`device: cuda` end to end — the three runs this
+gate needs cost ~11.4 s/ep on CPU, so all three would hit the 24 h cap and be
+recorded *"did not converge"*, which is not a Gate A result); and
+`simulator-correctness`/11 (B20 — a crash in the shared
 `Model._reroute_for` reached by this Policy's action set; it blocks the real
 run, and its Client filter changes every decision, so any Gate A number
 gathered before it lands is void)

@@ -10,6 +10,7 @@ actually running it once.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,16 @@ def make_config(**overrides: object) -> ExperimentConfig:
     return dataclasses.replace(config, **values)
 
 
+@pytest.fixture(autouse=True)
+def _restore_deterministic_algorithms() -> Iterator[None]:
+    """Ticket 12: resolving "cuda" (explicitly or via "auto" on this machine's real
+    GPU) flips a process-wide torch setting as a side effect -- never leak it into
+    later tests in the same session, the same discipline test_torch_support.py uses."""
+    was_enabled = torch.are_deterministic_algorithms_enabled()
+    yield
+    torch.use_deterministic_algorithms(was_enabled)
+
+
 class TestSpawnNeuralEpisodeRngs:
     def test_same_seed_gives_bit_identical_streams(self) -> None:
         a = spawn_neural_episode_rngs(1000)
@@ -65,10 +76,36 @@ class TestSpawnNeuralEpisodeRngs:
 
 
 class TestBuildNeuralPolicyState:
-    def test_rejects_a_non_cpu_device(self) -> None:
+    def test_cpu_device_places_parameters_on_cpu(self) -> None:
+        config = make_config(device="cpu")
+        state = build_neural_policy_state(config, np.random.default_rng(0))
+        assert state.device == torch.device("cpu")
+        assert next(state.encoder.parameters()).device == torch.device("cpu")
+        assert next(state.head.parameters()).device == torch.device("cpu")
+
+    def test_explicit_cuda_without_a_gpu_fails_loudly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ticket 12: no NotImplementedError anymore -- an explicit "cuda" with no
+        GPU available now raises the same loud RuntimeError resolve_device does."""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         config = make_config(device="cuda")
-        with pytest.raises(NotImplementedError, match="cuda"):
+        with pytest.raises(RuntimeError, match="cuda"):
             build_neural_policy_state(config, np.random.default_rng(0))
+
+    def test_auto_matches_whatever_this_machine_has(self) -> None:
+        config = make_config(device="auto")
+        state = build_neural_policy_state(config, np.random.default_rng(0))
+        expected = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        assert state.device == expected
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA GPU on this machine")
+    def test_cuda_device_places_parameters_on_cuda(self) -> None:
+        config = make_config(device="cuda")
+        state = build_neural_policy_state(config, np.random.default_rng(0))
+        assert state.device == torch.device("cuda")
+        assert next(state.encoder.parameters()).device.type == "cuda"
+        assert next(state.head.parameters()).device.type == "cuda"
 
     def test_architecture_matches_config(self) -> None:
         config = make_config(neural_d_model=16, neural_n_layers=2, neural_n_heads=4)

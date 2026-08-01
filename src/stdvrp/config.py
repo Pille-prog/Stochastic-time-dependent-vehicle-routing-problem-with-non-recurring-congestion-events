@@ -109,14 +109,25 @@ class ExperimentConfig:
     neural_learning_rate: float
     neural_learn_passes: int
     neural_batch_size: int
-    # "cpu" or "cuda". Defaults to CPU per spec.md decision 7 (a structural
-    # choice, not overturned by measurement): ticket 03 measured CUDA faster on
-    # both the acting and learning paths on the reference hardware (RTX 4060
-    # Laptop, 8 GB), but that measurement is single-process, and EpisodePool
-    # workers each wanting their own CUDA context on an 8 GB GPU is a separate,
-    # untested interaction (see the ticket's Comments) — CPU is the safe
-    # default; pass ``device: cuda`` explicitly once that interaction is known.
-    device: str = "cpu"
+    # "cpu", "cuda", or "auto" (ticket 12; amends spec.md decision 7). "auto"
+    # is the default: it resolves once per run (torch_support.resolve_device)
+    # to "cuda" if available, else "cpu". The old "cpu by default" choice
+    # rested on EpisodePool workers each wanting their own CUDA context on an
+    # 8 GB laptop GPU (ticket 03) -- a risk that never became live, because
+    # the neural training path is single-process (ticket 07 runs its
+    # evaluation blocks serially; EpisodePool appears nowhere in trainer.py's
+    # neural path). "auto" is kept as the default despite ticket 12's own
+    # measurement finding CUDA is *not* faster than CPU on the real network on
+    # the reference hardware (contrary to ticket 03's stub-based estimate --
+    # see spec.md's compute-budget section) -- an "auto" that resolves to the
+    # genuinely better local device costs nothing, and the choice is
+    # machine-specific, not something to hardcode. Because CPU and CUDA do not
+    # agree bit for bit, "auto" moves the pinning of a result out of the
+    # config and into the run's own record (the resolved device is printed,
+    # checkpointed, and written into the results); an explicit "cuda" with no
+    # GPU available fails loudly rather than silently downgrading
+    # (resolve_device).
+    device: str = "auto"
 
     def __post_init__(self) -> None:
         if not self.traffic_days:
@@ -193,8 +204,8 @@ class ExperimentConfig:
             raise ValueError("neural_d_model must be divisible by neural_n_heads")
         if self.neural_learning_rate <= 0:
             raise ValueError("neural_learning_rate must be positive")
-        if self.device not in ("cpu", "cuda"):
-            raise ValueError(f"device must be 'cpu' or 'cuda', got {self.device!r}")
+        if self.device not in ("cpu", "cuda", "auto"):
+            raise ValueError(f"device must be 'cpu', 'cuda', or 'auto', got {self.device!r}")
 
     @property
     def evaluation_seeds(self) -> tuple[int, ...]:

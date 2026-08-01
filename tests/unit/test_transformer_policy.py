@@ -87,12 +87,18 @@ def build_policy(
     learn_seed: int = 2,
     learn_passes: int = 1,
     batch_size: int = 4,
+    device: torch.device | None = None,
 ) -> TransformerMonteCarloPolicy:
     rng = np.random.default_rng(init_seed)
     encoder = TokenEncoder(
-        d_model=D_MODEL, n_layers=2, n_heads=4, n_observed_velocities=N_OBS, init_rng=rng
+        d_model=D_MODEL,
+        n_layers=2,
+        n_heads=4,
+        n_observed_velocities=N_OBS,
+        init_rng=rng,
+        device=device,
     )
-    head = QHead(d_model=D_MODEL, init_rng=rng)
+    head = QHead(d_model=D_MODEL, init_rng=rng, device=device)
     optimizer = torch.optim.Adam(list(encoder.parameters()) + list(head.parameters()), lr=1e-3)
     return TransformerMonteCarloPolicy(
         number_vehicles=number_vehicles,
@@ -111,6 +117,7 @@ def build_policy(
         learn_rng=np.random.default_rng(learn_seed),
         learn_passes=learn_passes,
         batch_size=batch_size,
+        device=device,
     )
 
 
@@ -397,6 +404,42 @@ class TestLearn:
 
         first = run()
         second = run()
+        for a, b in zip(first, second, strict=True):
+            torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA GPU on this machine")
+    def test_learn_is_deterministic_on_cuda_with_the_same_seed(self) -> None:
+        """Ticket 12: same-device determinism through a real backward pass on
+        real CUDA hardware -- ticket 05's `use_deterministic_algorithms(True)`
+        requirement (torch_support.resolve_device enables it for any CUDA use),
+        tested against actual hardware for the first time (ticket 05 had none
+        available). Enables it directly here since this test builds the network
+        without going through resolve_device."""
+        geometry, time_windows, clients = make_world(5, seed=23)
+        was_enabled = torch.are_deterministic_algorithms_enabled()
+
+        def run() -> list[torch.Tensor]:
+            policy = build_policy(
+                geometry,
+                time_windows,
+                clients,
+                number_vehicles=2,
+                epsilon=0.0,
+                learn_seed=99,
+                device=torch.device("cuda"),
+            )
+            state = make_state(2, pending=clients)
+            snapshots, actions, rewards = make_episode(policy, state, length=5)
+            policy.learn(snapshots, actions, rewards)
+            return [p.clone() for p in policy.encoder.parameters()]
+
+        try:
+            torch.use_deterministic_algorithms(True)
+            first = run()
+            second = run()
+        finally:
+            torch.use_deterministic_algorithms(was_enabled)
+
         for a, b in zip(first, second, strict=True):
             torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
 

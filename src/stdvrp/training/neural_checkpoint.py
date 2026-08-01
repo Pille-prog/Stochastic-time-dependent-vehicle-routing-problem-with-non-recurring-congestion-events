@@ -13,6 +13,14 @@ Deliberately does **not** persist any RNG generator state — see
 stochastic stream is spawned fresh from each Episode's own seed, so resuming
 correctly needs only :attr:`TrainingCheckpoint.episodes_completed`, which
 determines every subsequent Episode's seed.
+
+**The device the weights were written on is part of the document (ticket
+12).** CPU and CUDA do not agree bit for bit, so ticket 07's bit-identical
+resume guarantee only holds when resuming on the *same* device the checkpoint
+was written on. :func:`load_checkpoint` refuses a cross-device resume with a
+loud error rather than silently loading anyway (which would produce a
+trajectory that *looks* resumed but quietly diverges from the interrupted
+run).
 """
 
 from __future__ import annotations
@@ -54,6 +62,7 @@ def save_checkpoint(
         "elapsed_seconds": checkpoint.elapsed_seconds,
         "convergence": dataclasses.asdict(checkpoint.convergence),
         "evaluations": checkpoint.evaluations,
+        "device": str(policy_state.device),
         "encoder_state": policy_state.encoder.state_dict(),
         "head_state": policy_state.head.state_dict(),
         "optimizer_state": policy_state.optimizer.state_dict(),
@@ -73,8 +82,25 @@ def load_checkpoint(path: Path, policy_state: NeuralPolicyState) -> TrainingChec
     downloaded, untrusted checkpoints) refuses to unpickle. Every checkpoint
     this module writes is produced by :func:`save_checkpoint` from a run on
     this machine, not loaded from an untrusted source.
+
+    ``policy_state`` must already be built for *this* run's resolved device
+    (:func:`~stdvrp.training.neural_episode.build_neural_policy_state` runs
+    before this is ever called) -- a mismatch against the device the
+    checkpoint was saved on (ticket 12) raises rather than loading anyway,
+    since CPU and CUDA do not agree bit for bit and a cross-device resume
+    would silently break ticket 07's bit-identical resume guarantee.
     """
-    document = torch.load(path, weights_only=False)
+    document = torch.load(path, weights_only=False, map_location=policy_state.device)
+    checkpoint_device = document["device"]
+    resumed_device = str(policy_state.device)
+    if checkpoint_device != resumed_device:
+        raise RuntimeError(
+            f"{path} was written on device={checkpoint_device!r} but this run resolved "
+            f"device={resumed_device!r} -- refusing a cross-device resume. CPU and CUDA "
+            "do not agree bit for bit, so loading anyway would silently break the "
+            "bit-identical resume guarantee. Resume on the original device, or start a "
+            "fresh run on this one."
+        )
     policy_state.encoder.load_state_dict(document["encoder_state"])
     policy_state.head.load_state_dict(document["head_state"])
     policy_state.optimizer.load_state_dict(document["optimizer_state"])

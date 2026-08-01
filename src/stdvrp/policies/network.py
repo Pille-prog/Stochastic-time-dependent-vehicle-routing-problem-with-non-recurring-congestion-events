@@ -151,6 +151,19 @@ instance — training mode or eval — agree bit for bit on CPU without needing
 (e.g. attention-backend choice) is a separate, real concern the ticket calls
 out; :func:`~stdvrp.policies.torch_support.resolve_device` handles it once, for
 every torch caller, rather than here.
+
+## Device (ticket 12)
+
+Both classes take an optional ``device: torch.device`` (default CPU, so every
+existing direct-construction call site — the unit tests among them — keeps
+working unchanged). Weight init (``_init_weights``) always draws through numpy
+and copies onto CPU-resident parameters first, exactly as before; ``__init__``
+then moves the whole module onto ``device`` in one ``self.to(device)`` call, so
+init reproducibility (same seed -> bit-identical parameters) is unaffected by
+which device the caller asked for. ``TokenEncoder.forward`` additionally moves
+its three ``torch.from_numpy`` token tensors onto ``self.device`` explicitly —
+the one place this module builds a tensor that ``self.to(device)`` does not
+already cover, since it is created fresh on every call, not a parameter.
 """
 
 from __future__ import annotations
@@ -249,9 +262,11 @@ class TokenEncoder(nn.Module):
         n_observed_velocities: int,
         init_rng: np.random.Generator,
         dim_feedforward: int | None = None,
+        device: torch.device | None = None,
     ) -> None:
         super().__init__()
         self.d_model = d_model
+        self.device = device if device is not None else torch.device("cpu")
         dim_feedforward = dim_feedforward if dim_feedforward is not None else 4 * d_model
 
         self.client_base_embed = nn.Linear(CLIENT_TOKEN_BASE_WIDTH, d_model)
@@ -273,6 +288,7 @@ class TokenEncoder(nn.Module):
         )
 
         self._init_weights(init_rng)
+        self.to(self.device)
 
     def _init_weights(self, rng: np.random.Generator) -> None:
         for embed in (self.client_base_embed, self.vehicle_embed, self.global_embed):
@@ -308,9 +324,9 @@ class TokenEncoder(nn.Module):
             # deterministic, not random -- nothing to draw from init_rng here.
 
     def forward(self, tokens: Tokens) -> Embeddings:
-        client_tokens = torch.from_numpy(tokens.client_tokens).float()
-        vehicle_tokens = torch.from_numpy(tokens.vehicle_tokens).float()
-        global_token = torch.from_numpy(tokens.global_token).float()
+        client_tokens = torch.from_numpy(tokens.client_tokens).float().to(self.device)
+        vehicle_tokens = torch.from_numpy(tokens.vehicle_tokens).float().to(self.device)
+        global_token = torch.from_numpy(tokens.global_token).float().to(self.device)
 
         number_vehicles = vehicle_tokens.shape[0]
         base = client_tokens[:, :CLIENT_TOKEN_BASE_WIDTH]
@@ -352,8 +368,10 @@ class QHead(nn.Module):
         d_model: int,
         init_rng: np.random.Generator,
         hidden_dim: int | None = None,
+        device: torch.device | None = None,
     ) -> None:
         super().__init__()
+        self.device = device if device is not None else torch.device("cpu")
         hidden_dim = hidden_dim if hidden_dim is not None else d_model
         client_dim = 2 * d_model  # Embeddings.clients' per-vehicle slice width
         input_dim = d_model + client_dim + 1  # + claimed
@@ -362,6 +380,7 @@ class QHead(nn.Module):
         self._arc_dim0_index = _arc_dim0_index(d_model)
 
         self._init_weights(init_rng)
+        self.to(self.device)
 
     def _init_weights(self, rng: np.random.Generator) -> None:
         _xavier_uniform_(self.layer1.weight, rng)

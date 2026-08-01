@@ -104,6 +104,7 @@ def build_network(
     n_layers: int = 3,
     n_heads: int = 4,
     n_obs: int = 3,
+    device: torch.device | None = None,
 ):
     rng = np.random.default_rng(seed)
     encoder = TokenEncoder(
@@ -112,8 +113,9 @@ def build_network(
         n_heads=n_heads,
         n_observed_velocities=n_obs,
         init_rng=rng,
+        device=device,
     )
-    head = QHead(d_model=d_model, init_rng=rng)
+    head = QHead(d_model=d_model, init_rng=rng, device=device)
     return encoder, head
 
 
@@ -329,3 +331,32 @@ class TestClaimedIsWired:
             "claimed never affects Q's gradient even after an optimizer step -- "
             "it may have been dropped from QHead's forward pass"
         )
+
+
+class TestDeviceParity:
+    """Ticket 12: one forward, two devices -- the only cross-device equivalence
+    this effort asserts. Full-trajectory equivalence is explicitly NOT asserted
+    (a 1e-7 rounding difference flips the discrete argmin the decision rule
+    takes elsewhere, and episodes diverge from there -- see
+    transformer_policy.py's module docstring); this pins only that identical
+    weights and identical input still produce the same numbers on CPU and CUDA
+    for a single, isolated forward pass."""
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA GPU on this machine")
+    def test_identical_weights_and_input_give_allclose_q_on_cpu_and_cuda(self) -> None:
+        geometry, time_windows, snapshot = make_dense_world(5, 3, N_OBS, seed=77)
+        tokens = call_tokenize(geometry, time_windows, snapshot)
+
+        cpu_encoder, cpu_head = build_network(seed=55, n_obs=N_OBS, device=torch.device("cpu"))
+        cuda_encoder, cuda_head = build_network(seed=55, n_obs=N_OBS, device=torch.device("cuda"))
+
+        with torch.no_grad():
+            cpu_embeddings = cpu_encoder(tokens)
+            cuda_embeddings = cuda_encoder(tokens)
+            claimed = torch.zeros(tokens.client_tokens.shape[0])
+            q_cpu = cpu_head(cpu_embeddings.vehicles[0], cpu_embeddings.clients[:, 0, :], claimed)
+            q_cuda = cuda_head(
+                cuda_embeddings.vehicles[0], cuda_embeddings.clients[:, 0, :], claimed.to("cuda")
+            )
+
+        torch.testing.assert_close(q_cpu, q_cuda.cpu(), atol=1e-4, rtol=1e-4)
