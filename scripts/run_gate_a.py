@@ -143,6 +143,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--results-path", type=Path, default=None, help="write the full report as JSON here"
     )
+    parser.add_argument(
+        "--device",
+        default=None,
+        choices=["cpu", "cuda", "auto"],
+        help="override the config's device (ticket 12: 'auto' resolves once per run and is "
+        "not guaranteed to be the faster choice on every machine -- see ticket 12's Comments)",
+    )
     args = parser.parse_args(argv)
 
     init_seeds = tuple(int(value) for value in args.init_seeds.split(","))
@@ -157,6 +164,8 @@ def main(argv: list[str] | None = None) -> None:
     config = ExperimentConfig.from_yaml(args.config)
     if args.data_dir is not None:
         config = dataclasses.replace(config, data_dir=args.data_dir)
+    if args.device is not None:
+        config = dataclasses.replace(config, device=args.device)
     reference_card = ReferenceCard.load(args.reference_card)
 
     print(f"config: {args.config}")
