@@ -5,7 +5,7 @@ double booking) and B5 (a legal action for every vehicle, every ``tau`` —
 including zero pending Clients) hold by construction, checked directly rather
 than trusted. ``TestOneEncoderPassPerDecisionEpoch`` pins the acceptance
 criterion "one encoder pass per decision epoch, asserted — not ``m``".
-``TestDepotWarmStart`` extends ticket 05's warm-start claim to the depot
+``TestDepotMyopicBase`` extends ticket 15's myopic-base claim to the depot
 candidate this module synthesizes (ADR-0007, "The depot's Q value").
 """
 
@@ -422,14 +422,15 @@ class TestOneEncoderPassPerDecisionEpoch:
         assert calls["count"] == 1
 
 
-# --- The depot's warm start ----------------------------------------------------
+# --- The depot's myopic base ----------------------------------------------------
 
 
-class TestDepotWarmStart:
-    """At init, ``Q(v, depot) == minutes_to_depot / horizon_length +
-    DEPOT_WARM_START_PENALTY`` — one whole horizon above every Client, so the
-    untrained greedy policy is "nearest feasible Client, home only when no
-    Client is feasible" (network.py, "The depot is the last resort at init")."""
+class TestDepotMyopicBase:
+    """At init, ``Q(v, depot) == c(s, v, depot)`` exactly (ticket 15,
+    ``network.py``, "The depot's place in `c`") -- the tokenizer's projected
+    cost for the return leg, plus :data:`DEPOT_WARM_START_PENALTY` (one whole
+    horizon), so the untrained greedy policy is "nearest feasible Client, home
+    only when no Client is feasible"."""
 
     @settings(max_examples=30, deadline=None, derandomize=True)
     @given(
@@ -437,16 +438,15 @@ class TestDepotWarmStart:
         n_vehicles=st.integers(1, 3),
         seed=st.integers(0, 1_000_000),
     )
-    def test_depot_q_matches_minutes_to_depot_plus_one_horizon(
+    def test_depot_q_matches_the_myopic_base_plus_one_horizon(
         self, n_clients: int, n_vehicles: int, seed: int
     ) -> None:
         geometry, time_windows, clients = make_world(n_clients, seed)
         policy = build_policy(geometry, time_windows, clients, n_vehicles, init_seed=seed)
         state = make_state(n_vehicles, pending=clients)
 
-        horizon_length = float(SHIFT_END - HORIZON_START)
         with torch.no_grad():
-            from stdvrp.policies.tokenizer import tokenize
+            from stdvrp.policies.tokenizer import WARM_START_WEIGHTS, tokenize
 
             tokens = tokenize(
                 state,
@@ -457,15 +457,15 @@ class TestDepotWarmStart:
                 episode_end_minute=EPISODE_END,
             )
             embeddings = policy.encoder(tokens)
+            weights = np.array(WARM_START_WEIGHTS["cost"])
+            expected_depot_cost = tokens.depot_arc_tokens @ weights + DEPOT_WARM_START_PENALTY
             for vehicle in range(n_vehicles):
                 pending = list(state.clients_not_visited)
                 claimed = np.zeros(len(pending), dtype=bool)
                 q = policy._score(embeddings, vehicle, pending, claimed)
-                expected = (
-                    geometry.average_minutes(state.last_node_reached[vehicle], DEPOT)
-                    / horizon_length
-                ) + DEPOT_WARM_START_PENALTY
-                np.testing.assert_allclose(q[len(pending)].item(), expected, atol=1e-4, rtol=1e-4)
+                np.testing.assert_allclose(
+                    q[len(pending)].item(), expected_depot_cost[vehicle], atol=1e-4, rtol=1e-4
+                )
 
     def test_a_vehicle_standing_on_the_depot_still_goes_to_the_nearest_client(self) -> None:
         """The Gate A regression: ``minutes(depot, depot) == 0`` used to make the

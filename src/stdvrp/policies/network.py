@@ -1,5 +1,6 @@
 """network: the transformer encoder over ticket-04 tokens, the Q head that scores
-(vehicle, Client) pairs, and the myopic warm start (ticket 05, neural-policy).
+(vehicle, Client) pairs, and the myopic base ``c(s, v, a)`` (ticket 05,
+superseded by ticket 15, neural-policy).
 
 torch is an optional extra (ticket 03): this module imports it at module scope
 because its whole reason to exist is the network, unlike ``torch_support.py``'s
@@ -39,17 +40,19 @@ workaround adopted only for the warm start below. The client's three base
 facts go through a separate, ordinary fixed-width embedding and the shared
 self-attention transformer; the arc embedding bypasses the transformer
 entirely (it is cheap — ``O(n_pending * m)`` linear ops, not attention — and
-keeping it un-mixed by cross-token attention is exactly what makes the warm
-start below exact rather than approximate).
+keeping it un-mixed by cross-token attention is what let the pre-ticket-15
+warm start be exact rather than approximate; ticket 15 makes that property
+moot by reading ``c`` straight off ``arc_tokens``, before any embedding
+happens at all — see "The myopic base" below).
 
 The arc pathway is where the cost features belong structurally: it is the
 action-conditional path, and it is **linear**. ``QHead``'s own linear path
 composed with ``arc_embed`` spans every linear function of the six raw arc
-facts, so the advantage ``A(s, a)`` — the quantity the argmin reads, and the
-one Gate A measured the raw-facts network failing to learn (``Q`` collapsing
-to ``V(s)``) — is expressible as a near-linear readout of the projected costs
-from the first gradient step, instead of something to be rediscovered from
-noisy Monte Carlo returns.
+facts, so the residual ``W · φ(s, v, a)`` can express a near-linear correction
+to the projected costs directly, rather than having to rediscover them from
+noisy Monte Carlo returns — and since ticket 15, the projected costs
+themselves reach ``Q`` by an even shorter, gradient-free path: see "The myopic
+base" below.
 
 ``Embeddings.clients`` therefore has shape ``[n_pending, m, 2*d_model]``: for
 each client, one row per vehicle, formed by concatenating that client's
@@ -63,82 +66,153 @@ the **vehicle's own** context embedding (the depot's meaning is "return to
 base", a fact about the vehicle — ADR-0007) — built here so the depot's arc
 half goes through the identical pathway as every real candidate's, rather
 than being hand-assembled by the Policy from a separate geometry read.
+``Embeddings.cost``/``Embeddings.depot_cost`` (ticket 15) are the myopic base
+``c`` for the same two candidate sets, built from the same two token tensors
+but bypassing ``arc_embed`` entirely — see "The myopic base" below.
 
-## The warm start (this module's load-bearing part)
+## The myopic base (this module's load-bearing part; ticket 15)
 
-F2 (``docs/research/rl-methodology-for-stdvrp.md``) recommends a myopic warm
-start: initialise so ``Q(i, j) ≈ minutes_from_vehicle_i_to_j`` rather than
-leaving a ~150-Client argmin to an untrained network with no prior (the
-farthest Client would be as likely a greedy choice as the nearest). This is an
-**initialization, not a feature**: ``minutes_from_vehicle`` is not passed to
-``QHead`` as an extra argument (its signature stays exactly
-``(vehicle_embedding, client_embeddings, claimed)``); instead, specific weights
-of the *ordinary, otherwise-trainable* layers below are hand-set so that the
-network's output happens to equal that value at initialisation. Every one of
-those weights remains a normal ``nn.Parameter`` — nothing here is a permanent,
-non-trainable skip connection, and gradient descent is free to move every one
-of them once training starts.
+Ticket 05 built ``Q``'s initial value as a *warm start*: hand-set weights that
+made the untrained network's output happen to equal a cheap myopic estimate,
+trainable away from the very first gradient step. Ticket 08 then measured four
+independently-arrived-at techniques — this module's "A dueling decomposition"
+and "The level term" sections below, the Huber knee in
+``transformer_policy.py``, and the ``"cost"`` warm start itself — and read them
+as four separate results when they share one signature: each made the
+optimizer more effective, and each only helped when the starting policy was
+bad. That is one finding about where ``c(s, a)`` lived — in ordinary trainable
+weights, so an optimizer with a bigger step unlearns it faster — not four
+findings about three techniques. Ticket 15 removes the coupling structurally
+instead of managing it with a bigger lever:
 
-The construction, precisely:
+    Q(s, v, a) = c(s, v, a)  +  W · φ(s, v, a)
+                 ↑ tokenizer     ↑ the only term with parameters, W = 0 at init
 
-1. **Every ``nn.TransformerEncoderLayer`` is an exact identity map at
-   init.** With ``norm_first=True``, a layer computes
-   ``x = x + attn(norm1(x))`` then ``x = x + ffn(norm2(x))``. Zero-initialising
-   ``self_attn.out_proj`` and the FFN's ``linear2`` (weight **and** bias) makes
-   ``attn(...)`` and ``ffn(...)`` evaluate to an exact-zero tensor *regardless*
-   of what ``norm1``/``norm2``/``in_proj``/``linear1`` computed upstream (a
-   ``Linear`` with zero weight and zero bias is a constant-zero function of any
-   finite input) — so each residual sum degenerates to ``x + 0 = x``, bit for
-   bit. Verified empirically before writing this module (a
-   ``TransformerEncoder(num_layers=3)`` built this way returns its input
-   unchanged, exactly). ``dropout=0.0`` throughout — see "Determinism" below.
-   Consequently ``client_context`` (a client token's post-encoder embedding)
-   equals its **pre-encoder linear embedding** at init: a plain, transformer-
-   untouched function of the client's three base facts.
-2. **The arc embedding's dimension 0 is a hand-set readout of the arc token.**
-   ``arc_embed: nn.Linear(ARC_TOKEN_WIDTH, d_model)``'s row 0 is set to
-   :data:`WARM_START_WEIGHTS`\\ ``[warm_start]``, bias ``0.0``, so
-   ``arc_embed(arc)[0]`` is a chosen linear combination of the six arc facts
-   (always ``>= 0``: every field is a duration or a cost). Every other output
-   dimension of ``arc_embed`` (and every other weight in this module) is
-   Xavier-uniform from ``init_rng``, giving the network real capacity to learn
-   beyond the warm start.
+``c(s, v, a)`` — **the myopic base** — is the projected cost the tokenizer
+already computes exactly for candidate ``a``: ``arc_tokens`` (or
+``depot_arc_tokens`` for the synthetic depot row) dotted with
+:data:`~stdvrp.policies.tokenizer.WARM_START_WEIGHTS`\\ ``["cost"]`` — the same
+six-field vector ticket 08 introduced, now read directly off the token instead
+of copied into a row of ``arc_embed``. :meth:`TokenEncoder.forward` computes
+it alongside :class:`Embeddings`' other tensors (``Embeddings.cost``,
+``Embeddings.depot_cost``) straight from ``arc_tokens``/``depot_arc_tokens`` —
+plain ``torch.from_numpy`` tensors, never a ``Parameter`` — so ``c`` carries no
+gradient by construction, not by convention: there is no weight anywhere on
+its path for an optimizer to reach, and it is in no ``state_dict``. The depot
+row additionally adds :data:`DEPOT_WARM_START_PENALTY` — see "The depot's
+place in ``c``" below. Callers (``transformer_policy.py``'s ``_score``) add
+``c`` to :class:`QHead`'s output themselves: "outside ``QHead``" is literal,
+not a figure of speech — the class never receives ``c`` as an argument at all.
 
-   ``"minutes"`` — the default, and the initialization Gate A's frozen null
-   model is written against — puts ``1.0`` on ``minutes`` and ``0.0``
-   everywhere else, so the cost fields contribute **exactly nothing at init**
-   while their gradient path is live from the very first backward pass
-   (``linear``'s warm-start weight times ``arc_embed`` row 0's cost columns).
-   ``"cost"`` additionally prices the leg by the three single-Client
-   components of the simulator's own cost function. **Ticket 08 measured that
-   difference at -28% of episode cost, against -20% for the same architecture
-   after 650 training episodes** (eight ``evaluation_seeds``, real Chengdu
-   data: 4754 for ``"minutes"``, 3421 for ``"cost"``, 3794 for the trained
-   ``"minutes"`` network's best block). The cost components were already in
-   the token and already reachable by a single weight; leaving that weight at
-   zero was asking gradient descent to rediscover, from noisy Monte Carlo
-   returns, an arithmetic identity the tokenizer had already computed.
-3. **``QHead`` is a linear path plus an MLP branch, and the warm start lives
-   on the linear path.** ``QHead``'s input row is ``[vehicle | client_context
-   | arc | claimed | is_depot]`` (the layout ``TokenEncoder`` builds
-   ``Embeddings.clients`` in, plus the two per-candidate scalars), and
+``QHead`` keeps the same forward signature and the same two-branch shape it
+always had (``linear(x) + layer2(ReLU(layer1(x)))``); only ``_init_weights``
+changes, and it gets simpler rather than more special-cased. Previously
+``linear`` was zeroed *except* for two hand-set columns (the reconstruction of
+``c`` and the depot penalty); now ``linear.weight``, ``linear.bias``,
+``layer2.weight`` and ``layer2.bias`` are *all* zero, with no exception.
+``layer1`` stays Xavier-random, for the same reason it always did — see "Why
+``layer1`` gets real random weights, not zero" below, unchanged by this
+ticket. The result is ``W · φ(s, v, a) == 0`` for every candidate, every
+vehicle, every state, at construction: not approximately, and not because the
+arc facts happen to be small, but because the two weights multiplying every
+path into ``QHead``'s output are the zero tensor. ``Q(s, v, a) == c(s, v, a)``
+at init follows for free, regardless of what ``arc_embed``, the transformer
+layers, or ``layer1`` compute — which is what makes the equivalence to
+ticket 14's frozen null exact rather than numerical coincidence (see
+"Verified against ticket 14's frozen null" below).
 
-       A = linear(x) + layer2(ReLU(layer1(x)))
+``arc_embed`` row 0 is no longer special: ordinary Xavier-uniform, exactly
+like ``client_base_embed``/``vehicle_embed``/``global_embed`` and every other
+row of ``arc_embed`` itself. Nothing downstream depends any more on any
+specific embedding dimension matching a raw fact, so ``TokenEncoder`` no
+longer needs an identity-at-init encoder either — see "Real attention at
+initialization" below.
 
-   ``linear: nn.Linear(3*d_model + 2, 1)`` is zeroed except for a ``1.0`` at
-   the column reading ``arc_embed``'s dimension 0 (global index ``2*d_model``)
-   and :data:`DEPOT_WARM_START_PENALTY` at the column reading ``is_depot``
-   (see "The depot is the last resort at init" below). Bias 0.
-4. **The MLP branch contributes exactly zero at init.** ``layer2:
-   nn.Linear(hidden, 1)`` is zeroed weight and bias, so whatever
-   ``ReLU(layer1(x))`` computes is multiplied by zero. Therefore ``A ==
-   linear(x) == minutes_from_vehicle_i_to_j`` exactly at construction, for
-   every vehicle, every client, every state — not a statistical approximation.
-   ``claimed`` is init-inert (by design — the warm start must not depend on
-   it) but not a dead argument: ``layer1``'s rows are ordinary Xavier-random
-   and do read it, so it starts affecting ``Q`` as soon as training moves
-   ``layer2``'s columns off zero (see the deadlock note below for why
-   ``layer1`` must *not* also be zeroed).
+``c(s, v, a)`` is a **myopic base**, not a warm start: a warm start is a point
+optimization moves away from, and nothing here moves away from ``c`` — it is
+structurally unreachable, not merely untouched so far. It is also **not**
+Powell's post-decision state, despite ``CONTEXT.md`` following Powell's
+vocabulary elsewhere: ``c`` is built from ``tau``, the time windows and
+``EpisodeGeometry.average_minutes`` — a *static historical prior* baked into
+the geometry at capture time, not an observation of this Episode (ADR-0006) —
+so it is a *projection*, not the immediate cost the simulator will actually
+charge for taking action ``a`` from state ``s``. ``Q = c + W·φ`` is a residual
+VFA over a known myopic base: ``W·φ`` absorbs both the future cost-to-go *and*
+the error in the projection, together, exactly as any residual value function
+does.
+
+## Real attention at initialization (ticket 15)
+
+Every ``nn.TransformerEncoderLayer``'s ``self_attn.out_proj`` and FFN
+``linear2`` used to be zeroed (weight **and** bias), which made each residual
+branch evaluate to an exact-zero tensor regardless of what fed it, and hence
+made the whole ``TransformerEncoder`` an exact identity map at init — the only
+way to guarantee ``client_context`` equalled a plain, transformer-untouched
+linear embedding of the client's three base facts, which the pre-ticket-15
+warm start needed in order to be exact rather than approximate.
+
+That guarantee is no longer needed: nothing downstream reads
+``client_context``, or anything else the encoder computes, to reconstruct
+``c`` any more — ``c`` is read straight off the raw arc token, before any
+embedding happens at all (previous section). So ``out_proj``/``linear2`` are
+now ordinary Xavier-random, like every other weight in this module, and the
+encoder performs real, nontrivial attention from the very first forward
+pass — a random feature map over the token set, not a linear embedding wearing
+a transformer's clothes. This is what ticket 17's frozen-encoder arm needs to
+be a meaningful arm at all: fixing the encoder at init only tests something
+once "at init" is a real function of the input, not the identity.
+
+## The depot's place in ``c`` (formerly "The depot is the last resort at init")
+
+``QHead`` scores :class:`Embeddings`' ``clients`` tensor — one row per pending
+Client — so the depot, never a Client, has no natural row. ``TokenEncoder``
+builds one for it the same way it builds every real candidate's: ``c(s, v,
+depot)`` is ``depot_arc_tokens[v]`` dotted with the same
+``WARM_START_WEIGHTS["cost"]`` vector, **plus** :data:`DEPOT_WARM_START_PENALTY`
+— one whole horizon, in the ``minutes / horizon_length`` currency every other
+field of ``c`` already speaks. Every Client reachable within the shift scores
+at most ``1`` in that currency, so the depot loses the pre-training argmin to
+any feasible Client and only wins when nothing else survives ``_sweep``'s
+candidate filter — "nearest feasible Client, home only when no Client is
+feasible", the null model spec.md specifies.
+
+Ticket 08's Gate A run measured what happens without this: the untrained
+network at mean cost 81 701 against the linear baseline's 2 483, because every
+vehicle starts parked at the depot and ``minutes_to_depot == 0`` there, so
+every vehicle's argmin was the depot at decision epoch 1 and the whole fleet
+retired on the first transition (``Model._reroute_for`` only reroutes a
+*travelling* vehicle, so parking is irreversible).
+
+``is_depot`` remains an ordinary ``QHead`` input (1.0 on the synthetic depot
+row, 0.0 on every Client, concatenated into ``x`` beside ``claimed``) — the
+penalty now lives entirely in ``c``, so ``is_depot`` no longer needs to reach
+any hand-set weight to do its job. It is not a dead argument for all that:
+exactly like ``claimed`` (``TestClaimedIsWired``,
+``tests/unit/test_network.py``), ``layer1``'s Xavier-random rows read it from
+the first forward pass, so a trained network is free to price going home
+however the returns say it should — including below every Client near the
+shift end — the moment training moves ``layer2``'s corresponding column off
+zero. Nothing here masks the depot out of the action set: ADR-0007's
+"feasible = every pending Client not already claimed, plus the depot" (as
+amended by ADR-0011) is untouched.
+
+## Verified against ticket 14's frozen null
+
+Ticket 14 measured the untrained ``"cost"`` warm start (the pre-ticket-15
+architecture, ``DEPOT_WARM_START_PENALTY = 1.0``) at ``m + 2`` over the 50
+``evaluation_seeds``: mean cost **3365.09**
+(``.scratch/neural-policy/results/action_set_m2_50.py``), the frozen null this
+effort reports every trained number against. Because ``Q(s, v, a) ==
+c(s, v, a)`` at init *by construction* (the two sections above), and ``c(s, v,
+a)`` is defined as exactly the quantity the old ``"cost"`` warm start computed
+(the same ``WARM_START_WEIGHTS["cost"]`` dot product, the same
+``DEPOT_WARM_START_PENALTY`` addition on the depot row), the two architectures
+compute the identical scalar for every candidate of every decision epoch —
+independent of the random weights either one draws, since neither
+architecture's random weights reach ``Q`` at init. Confirmed by re-running
+``action_set_m2_50.py``'s arm 1 against this module on both the mini fixture
+and the real dataset — see this ticket's Comments
+(``.scratch/neural-policy/issues/15-the-myopic-base.md``) for the run.
 
 ## A dueling decomposition of ``Q`` — tried, measured, and rejected (ticket 08)
 
@@ -190,6 +264,23 @@ and threw the ranking away" signature ``transformer_policy.py`` records under
 
 Anything that revisits this has to fix the scale mismatch *first*, not add a
 term that makes the mismatch land on the advantage.
+
+**Why this section is moot now, and why the finding still stands (ticket
+15).** The argmin's blindness to any quantity shared by every candidate is a
+property of the argmin, not of where ``c`` lives, so it is unaffected by
+ticket 15 and the "training sees only the joint sum" problem above is still
+real (``transformer_policy.py``, "What the joint sum costs" — ticket 16's
+problem to solve, not this one's). What ticket 15 removes is the specific
+trigger that made centring backfire *here*: the "large, same-signed
+correction" was large only because the pre-ticket-15 warm start pinned
+``Q_joint`` at init to 0.3-0.9 against a ~0.03 target (next section) — an
+artifact of the warm start sharing ``arc_embed``'s scale rather than the
+return's. Under ``Q = c + W·φ``, ``Q_joint`` at init is ``Σ_v c(s, v, a_v)``, a
+cost projection already living on roughly the scale of ``U_t`` (the ``"cost"``
+warm start's own episode costs, ticket 08, were the same order of magnitude as
+the trained linear baseline's). The specific failure mode measured above has
+no obvious trigger left, which is a reason to *reconsider* a dueling split —
+not a demonstration that it now works. This has not been re-measured.
 
 ## The level term, and why it needs a gain (``level_gain``, ticket 08)
 
@@ -255,77 +346,61 @@ alongside ``"cost"``, and a Gate A run whose question is specifically "does it
 learn" should use ``"minutes"`` with a gain of 100 — the configuration in
 which the answer is most clearly yes.
 
-## Why the warm start is on a linear path
+**Why this section is moot now (ticket 15).** The 0.3-0.9-vs-0.03 mismatch
+this whole section is built to correct was an artifact of the pre-ticket-15
+warm start: ``Q_joint`` at init summed ``m`` copies of a *bare, unrelated*
+travel-time fraction, on a scale the target return had no reason to share.
+Under ``Q = c + W·φ``, ``Q_joint`` at init is ``Σ_v c(s, v, a_v)`` — a cost
+*projection*, already on the scale of the return it approximates (the
+``"cost"`` warm start's own untrained episode costs, measured throughout this
+effort, were the same order of magnitude as a trained policy's, not 10-30x
+off). There is no longer a large, same-signed gap for ``level_gain`` to
+close, so the mechanism above has little left to do regardless of the value
+chosen. It stays wired, at its measured bit-identical-to-absent default,
+because ticket 16 — not this one — is what removes the per-episode Adam SGD
+loop this section's "~100 episodes of same-signed steps" story depends on;
+until then the mechanism is dormant rather than deleted.
 
-Because the previous version put it behind the ReLU, and **it died in one
-training episode.** ``hidden[0] = ReLU(w0 · x)`` with ``w0`` zeroed except for
-the two warm-start weights meant the unit's pre-activation was
-``minutes_from_vehicle / horizon_length`` — measured on the mini fixture, a
-number in ``[0.002, 0.061]``. The other 384 columns of ``w0`` start at exactly
-zero but are ordinary parameters, and the ``[vehicle | client_context]``
-prefix they multiply has L2 norm ~2.9, so Adam's normalised steps (which move
-every weight by ~``lr`` per step regardless of how small its gradient is) put
-a perturbation on that pre-activation far larger than the signal it carries.
+## Why a dead ReLU can no longer touch ``c`` (formerly "the warm start is on a linear path")
+
+The pre-ticket-15 warm start put its two hand-set weights on ``linear`` rather
+than behind ``layer1``'s ReLU specifically to survive training: an earlier
+draft put them behind the ReLU instead, and **it died in one training
+episode.** ``hidden[0] = ReLU(w0 · x)`` with ``w0`` zeroed except for the two
+warm-start weights meant the unit's pre-activation was ``minutes_from_vehicle
+/ horizon_length`` — measured on the mini fixture, a number in ``[0.002,
+0.061]``. The other 384 columns of ``w0`` start at exactly zero but are
+ordinary parameters, and the ``[vehicle | client_context]`` prefix they
+multiply has L2 norm ~2.9, so Adam's normalised steps (which move every weight
+by ~``lr`` per step regardless of how small its gradient is) put a
+perturbation on that pre-activation far larger than the signal it carries.
 Measured, one episode of training moved it from ``[+0.003, +1.000]`` to
 ``[-0.546, -0.077]``: **dead for every candidate**. A dead ReLU has exactly
 zero gradient, so ``w0`` could never come back — the myopic prior, the depot
-penalty and the ranking they encode were gone permanently after episode 1, and
-the spread of ``Q`` across a vehicle's candidates collapsed from 0.036 to
-0.004 with the argmin no longer picking the nearest Client.
+penalty and the ranking they encoded were gone permanently after episode 1,
+and the spread of ``Q`` across a vehicle's candidates collapsed from 0.036 to
+0.004 with the argmin no longer picking the nearest Client. Putting the two
+weights on ``linear`` instead (no kink) fixed it: the same weights stayed
+trainable but degraded continuously and recovered, instead of being
+annihilated by the first optimizer step that overshot.
 
-On a linear path there is no kink to fall off. The same weights are just as
-trainable — gradient descent can flatten, invert or replace the myopic prior
-whenever the returns say so — but it degrades continuously and recovers,
-instead of being annihilated by the first optimizer step that overshoots. The
-MLP branch keeps the head's nonlinear capacity; it simply is not where the
-initialization is stored.
+Ticket 15 makes the whole class of failure structurally unreachable rather
+than merely survivable. ``c`` is not behind an activation, linear or
+otherwise — it is not inside ``QHead`` at all, added by the caller after
+``QHead`` returns (see "The myopic base" above). No weight of any kind sits
+between ``c`` and ``Q``, so there is nothing for a dead ReLU, an optimizer
+overshoot, or any other training pathology to gate off. The finding above
+stays true and citeable for ``W · φ`` itself — a dead ``layer1`` unit is still
+a dead unit, and the deadlock note just below still matters for exactly that
+reason — it simply no longer has anything to say about ``c``, which is the
+finding worth keeping this section around for.
 
-## The depot is the last resort at init (the ``is_depot`` input)
+## Why ``layer1`` gets real random weights, not zero
 
-Ticket 08's Gate A run measured the untrained network at mean cost **81 701**
-against the linear baseline's **2 483** — not "a respectable nearest-neighbour
-rival" but a policy that serves nobody. The cause was in this warm start.
-``TransformerMonteCarloPolicy`` scores the depot as one more candidate whose
-"arc" half is ``[minutes_to_depot, length_to_depot]``, so points 2-4 above gave
-it ``Q(v, depot) == minutes_to_depot / horizon_length`` — which is **exactly
-0.0 for a vehicle standing on the depot**, the smallest value the ReLU'd row 0
-can produce. Every vehicle starts the Episode parked at the depot, so at
-decision epoch 1 every vehicle's argmin was the depot; ``Model`` saw
-``fleet.all_parked()`` and terminated the Episode after a single transition
-with every Client unserved. Worse, ``Model._reroute_for`` only reroutes a
-*travelling* vehicle, so parking is irreversible: even away from the depot, a
-vehicle that happened to be nearer home than to any Client retired for good.
-
-``QHead`` therefore takes a second per-candidate scalar next to ``claimed``:
-``is_depot``, 1.0 on the synthetic depot row and 0.0 on every Client. Row 0
-reads it with weight :data:`DEPOT_WARM_START_PENALTY` ``= 1.0`` — **one whole
-horizon** in the units ``arc_embed``'s dimension 0 already speaks
-(``minutes / horizon_length``), so at init
-
-    Q(v, client) == minutes_to_client / horizon_length      (<= 1 for any
-                                                             reachable Client)
-    Q(v, depot)  == minutes_to_depot / horizon_length + 1
-
-and the depot loses the argmin to *any* feasible Client, while still winning
-when the mask leaves it as the only candidate. That is precisely the null model
-spec.md specifies ("the untrained network already goes to the nearest feasible
-Client"), and it is measurably so: on the mini fixture the untrained network
-now reproduces an independently written nearest-neighbour policy's episode cost
-to the last decimal (477.5 / 327.8 on seeds 100/101, against 8 350 / 10 293
-before).
-
-This is an **initialization, not a rule** — the same discipline as the rest of
-this warm start. ``is_depot`` is an ordinary input column and
-``DEPOT_WARM_START_PENALTY`` an ordinary weight in an ordinary trainable row, so
-a trained network is free to price going home however the returns say it should,
-including below every Client near the shift end. Nothing here masks the depot
-out of the action set: ADR-0007's "feasible = every pending Client not already
-claimed, plus the depot" is untouched, and the depot keeps both its meanings.
-
-**Why ``layer1`` gets real random weights, not zero:** an earlier draft zeroed
-the *entire* first layer, reasoning that units contributing nothing at init can
-stay dormant. That is a genuine dead end, not a transient one: with
-``layer1.weight[row, :] == 0`` identically, ``hidden[row]`` is exactly ``0``
+An earlier draft zeroed the *entire* first layer, reasoning that units
+contributing nothing at init can stay dormant. That is a genuine dead end, not
+a transient one: with ``layer1.weight[row, :] == 0`` identically,
+``hidden[row]`` is exactly ``0``
 for *every* input, so ``d(loss)/d(layer2.weight[0, row]) = hidden[row] *
 d(loss)/d(Q) == 0`` *always* — ``layer2``'s columns never move, so
 ``d(loss)/d(hidden[row])`` (which routes back through ``layer2.weight[0,
@@ -340,8 +415,8 @@ following step, once ``layer2.weight[0, row]`` is no longer exactly zero.
 (This is the same mechanism as zero-gamma residual-block initialisation in
 ResNet-style networks: zeroing a block's *final* projection is safe and
 standard; zeroing *everything feeding into it too* is not.) The exactly-zero
-pieces in this module (``out_proj``/``linear2`` for identity-at-init, and
-``QHead.layer2``) are all of the "safe" kind — a real, nonzero,
+pieces in this module (``QHead.linear`` and ``QHead.layer2``, since ticket 15
+— see "The myopic base" above) are of the "safe" kind — a real, nonzero,
 input-dependent quantity feeds them from upstream, so their own gradient is
 nonzero from step one even though their forward output starts at zero.
 
@@ -405,12 +480,15 @@ from stdvrp.policies.tokenizer import (
 
 __all__ = ["DEPOT_WARM_START_PENALTY", "Embeddings", "QHead", "TokenEncoder"]
 
-#: How much the warm start adds to the depot candidate's ``Q``, in the units
-#: ``arc_embed``'s dimension 0 speaks (``minutes / horizon_length``): one whole
+#: How much the myopic base ``c`` adds to the depot candidate, in the units
+#: every other field of ``c`` speaks (``minutes / horizon_length``): one whole
 #: horizon. Any Client reachable within the shift scores below that, so the
 #: untrained greedy policy is "nearest feasible Client, home only when no Client
-#: is feasible" -- see this module's docstring, "The depot is the last resort at
-#: init". An ordinary weight in an ordinary trainable row, not a floor.
+#: is feasible" -- see this module's docstring, "The depot's place in `c`".
+#: Read directly by ``TokenEncoder.forward`` when it builds ``Embeddings.
+#: depot_cost`` (ticket 15) -- not a ``QHead`` weight any more, so an optimizer
+#: can never move it; kept, at the value ticket 14 measured, rather than a
+#: floor baked into the tokenizer.
 DEPOT_WARM_START_PENALTY = 1.0
 
 #: Per-candidate scalars ``QHead`` reads alongside the embeddings, in order:
@@ -423,30 +501,6 @@ _TYPE_CLIENT = 0
 _TYPE_VEHICLE = 1
 _TYPE_GLOBAL = 2
 _N_TOKEN_TYPES = 3
-
-
-def _arc_dim0_index(d_model: int) -> int:
-    """Global index of ``arc_embed``'s reconstruction dimension within a QHead
-    input row (``[vehicle | client_context | arc | claimed | is_depot]``).
-
-    The single source of truth for the layout ``TokenEncoder.forward`` builds
-    (``Embeddings.clients`` = ``concat([client_context, arc], dim=-1)``, each
-    ``d_model`` wide) and ``QHead`` depends on for the warm start — both sides
-    call this instead of re-deriving the offset independently, and
-    ``TestWarmStart`` (``tests/unit/test_network.py``) is the end-to-end check
-    that would catch the two going out of sync (e.g. a future reordering of
-    ``TokenEncoder``'s ``torch.cat``).
-    """
-    return d_model + d_model
-
-
-def _is_depot_index(d_model: int) -> int:
-    """Global index of the ``is_depot`` flag within a QHead input row.
-
-    Last column of ``[vehicle | client_context | arc | claimed | is_depot]``:
-    ``d_model`` + ``2 * d_model`` + the ``claimed`` scalar.
-    """
-    return d_model + 2 * d_model + 1
 
 
 def _xavier_uniform_(tensor: torch.Tensor, rng: np.random.Generator) -> None:
@@ -493,13 +547,33 @@ class Embeddings:
     Q value"). Same layout as one row of a per-vehicle ``clients`` slice, so
     ``QHead`` scores it like any other candidate."""
 
+    cost: torch.Tensor
+    """``[n_pending, m]``: the myopic base ``c(s, v, client)`` (module
+    docstring, "The myopic base") — ``arc_tokens`` dotted with
+    ``WARM_START_WEIGHTS["cost"]``, bypassing ``arc_embed`` entirely. Plain
+    arithmetic on a ``torch.from_numpy`` tensor: no gradient reaches it, it is
+    not a ``Parameter``, and it is in no ``state_dict``. Added to ``QHead``'s
+    output by the caller, never read by ``QHead`` itself."""
+
+    depot_cost: torch.Tensor
+    """``[m]``: ``c(s, v, depot)`` — the same dot product over
+    ``Tokens.depot_arc_tokens``, plus :data:`DEPOT_WARM_START_PENALTY` (module
+    docstring, "The depot's place in `c`"). Same non-gradient, non-``Parameter``
+    discipline as ``cost`` above."""
+
 
 class TokenEncoder(nn.Module):
     """Runs once per decision epoch: tokens -> :class:`Embeddings`.
 
-    See the module docstring for the full shape rationale and the warm-start
-    construction this class is half of (the other half is :class:`QHead`).
+    See the module docstring for the full shape rationale and the myopic-base
+    construction (``Embeddings.cost``/``depot_cost``) this class computes
+    alongside the trainable embeddings ``QHead`` scores.
     """
+
+    # Declared here (not just assigned via register_buffer in __init__) so
+    # mypy resolves attribute access in forward() to Tensor, not the
+    # Tensor | Module union nn.Module.__getattr__ is typed with.
+    _myopic_base_weights: torch.Tensor
 
     def __init__(
         self,
@@ -511,16 +585,9 @@ class TokenEncoder(nn.Module):
         init_rng: np.random.Generator,
         dim_feedforward: int | None = None,
         device: torch.device | None = None,
-        warm_start: str = "minutes",
     ) -> None:
         super().__init__()
-        if warm_start not in WARM_START_WEIGHTS:
-            raise ValueError(
-                f"unknown warm_start {warm_start!r}: expected one of "
-                f"{sorted(WARM_START_WEIGHTS)}"
-            )
         self.d_model = d_model
-        self.warm_start = warm_start
         self.device = device if device is not None else torch.device("cpu")
         dim_feedforward = dim_feedforward if dim_feedforward is not None else 4 * d_model
 
@@ -542,6 +609,17 @@ class TokenEncoder(nn.Module):
             layer, num_layers=n_layers, enable_nested_tensor=False
         )
 
+        # The myopic base's weight vector (module docstring, "The myopic
+        # base"): a plain buffer, not a Parameter, so it never appears in
+        # .parameters()/state_dict() (persistent=False) and never receives a
+        # gradient. Registered once here rather than rebuilt every forward
+        # call, so it moves with .to(device) like everything else.
+        self.register_buffer(
+            "_myopic_base_weights",
+            torch.tensor(WARM_START_WEIGHTS["cost"], dtype=torch.float32),
+            persistent=False,
+        )
+
         self._init_weights(init_rng)
         self.to(self.device)
 
@@ -550,19 +628,12 @@ class TokenEncoder(nn.Module):
             _xavier_uniform_(embed.weight, rng)
             _zero_(embed.bias)
 
-        # arc_embed: row 0 IS the warm start (its other load-bearing half lives
-        # in QHead._init_weights below) -- one weight per arc-token field, from
-        # WARM_START_WEIGHTS. Under "minutes" it reconstructs
-        # minutes_from_vehicle exactly and the cost fields are init-inert;
-        # under "cost" the three single-Client cost components join it in the
-        # same 1/horizon_length currency. Every other output dimension is
-        # ordinary Xavier-random capacity.
+        # arc_embed: ordinary Xavier-random, every row -- ticket 15 retired the
+        # hand-set row 0 that used to carry WARM_START_WEIGHTS (the myopic base
+        # ``c`` is now read straight off ``arc_tokens`` in forward() below,
+        # never through this embedding).
         _xavier_uniform_(self.arc_embed.weight, rng)
         _zero_(self.arc_embed.bias)
-        with torch.no_grad():
-            weights = WARM_START_WEIGHTS[self.warm_start]
-            self.arc_embed.weight[0, :] = torch.tensor(weights, dtype=torch.float32)
-            self.arc_embed.bias[0] = 0.0
 
         _xavier_uniform_(self.type_embedding, rng)
 
@@ -570,15 +641,15 @@ class TokenEncoder(nn.Module):
             attn = encoder_layer.self_attn
             _xavier_uniform_(attn.in_proj_weight, rng)
             _zero_(attn.in_proj_bias)
-            # Identity-at-init (see module docstring): a Linear with zero weight
-            # AND zero bias is a constant-zero function of any finite input, so
-            # zeroing out_proj/linear2 makes each residual branch contribute
-            # exactly zero regardless of what in_proj/linear1 computed.
-            _zero_(attn.out_proj.weight)
+            # Ticket 15: ordinary Xavier-random, every projection -- the
+            # identity-at-init construction this module used to need (module
+            # docstring, "Real attention at initialization") retired along
+            # with the warm start it existed to serve.
+            _xavier_uniform_(attn.out_proj.weight, rng)
             _zero_(attn.out_proj.bias)
             _xavier_uniform_(encoder_layer.linear1.weight, rng)
             _zero_(encoder_layer.linear1.bias)
-            _zero_(encoder_layer.linear2.weight)
+            _xavier_uniform_(encoder_layer.linear2.weight, rng)
             _zero_(encoder_layer.linear2.bias)
             # norm1/norm2: PyTorch's own default (weight=1, bias=0) is already
             # deterministic, not random -- nothing to draw from init_rng here.
@@ -611,15 +682,38 @@ class TokenEncoder(nn.Module):
             [vehicle_context, self.arc_embed(depot_arc_tokens)], dim=-1
         )  # [number_vehicles, 2*d_model]
 
-        return Embeddings(clients=clients, vehicles=vehicle_context, depot=depot)
+        # The myopic base (module docstring, "The myopic base"): read straight
+        # off the raw arc tokens, never through arc_embed -- no Parameter, no
+        # gradient, on either path. cost/depot_cost carry no gradient because
+        # arc_tokens/depot_arc_tokens (plain torch.from_numpy tensors) and
+        # _myopic_base_weights (a non-persistent buffer) are both leaves with
+        # requires_grad=False; the product of two such leaves is too.
+        cost = (arc_tokens * self._myopic_base_weights).sum(dim=-1)  # [n_pending, m]
+        depot_cost = (
+            depot_arc_tokens * self._myopic_base_weights
+        ).sum(dim=-1) + DEPOT_WARM_START_PENALTY  # [m]
+
+        return Embeddings(
+            clients=clients,
+            vehicles=vehicle_context,
+            depot=depot,
+            cost=cost,
+            depot_cost=depot_cost,
+        )
 
 
 class QHead(nn.Module):
-    """Scores one vehicle against every pending Client: a **cost to minimize**.
+    """Scores one vehicle against every pending Client: the residual
+    ``W · φ(s, v, a)``, **not** the final ``Q`` — a **cost to minimize**, added
+    to (never a substitute for) the myopic base ``c(s, v, a)`` the caller reads
+    off :class:`Embeddings`' ``cost``/``depot_cost`` (module docstring, "The
+    myopic base"; ticket 15). ``QHead`` itself never sees ``c`` and has no way
+    to reach it.
 
     Matches the baseline's ``argmin`` convention (spec.md) — the caller (ticket
-    06) takes ``argmin`` over feasible clients, exactly as ``MonteCarloPolicy``
-    does. Never flip this sign.
+    06) takes ``argmin`` over ``c + QHead(...)`` for every feasible candidate,
+    exactly as ``MonteCarloPolicy`` does over its own scores. Never flip this
+    sign.
     """
 
     def __init__(
@@ -635,40 +729,27 @@ class QHead(nn.Module):
         if level_gain <= 0.0:
             raise ValueError(f"level_gain must be positive, got {level_gain}")
         self.device = device if device is not None else torch.device("cpu")
-        # See the module docstring, "The level term, and why it needs a gain".
+        # See the module docstring, "The level term, and why it needs a gain"
+        # (moot since ticket 15 -- kept wired at its measured default).
         self.level_gain = level_gain
         hidden_dim = hidden_dim if hidden_dim is not None else d_model
         client_dim = 2 * d_model  # Embeddings.clients' per-vehicle slice width
         input_dim = d_model + client_dim + CANDIDATE_FLAG_WIDTH  # + claimed, is_depot
-        # The warm start lives on ``linear``, NOT behind ``layer1``'s ReLU --
-        # see the module docstring, "Why the warm start is on a linear path".
         self.linear = nn.Linear(input_dim, 1)
         self.layer1 = nn.Linear(input_dim, hidden_dim)
         self.layer2 = nn.Linear(hidden_dim, 1)
-        self._arc_dim0_index = _arc_dim0_index(d_model)
-        self._is_depot_index = _is_depot_index(d_model)
 
         self._init_weights(init_rng)
         self.to(self.device)
 
     def _init_weights(self, rng: np.random.Generator) -> None:
-        # The linear path: zero everywhere except the two warm-start weights,
-        # so at init Q is exactly minutes_from_vehicle / horizon_length for a
-        # Client and one whole horizon more for the depot candidate. Ordinary
-        # trainable parameters -- gradient reaches every one of them from the
-        # first backward pass, because their input x is nonzero.
+        # W = 0 at init (module docstring, "The myopic base"): linear and
+        # layer2 are now zero with no exception -- previously linear was zero
+        # except two hand-set warm-start columns. layer1 stays Xavier-random;
+        # see "Why layer1 gets real random weights, not zero" for why zeroing
+        # it too would freeze layer2's columns at zero forever.
         _zero_(self.linear.weight)
         _zero_(self.linear.bias)
-        with torch.no_grad():
-            self.linear.weight[0, self._arc_dim0_index] = 1.0
-            self.linear.weight[0, self._is_depot_index] = DEPOT_WARM_START_PENALTY
-
-        # The MLP branch: Xavier-random first layer, zeroed output projection,
-        # so it contributes exactly zero at init and the warm start above is
-        # the whole of Q. layer1's rows must NOT also be zeroed -- see the
-        # module docstring's deadlock note; with them random, layer2's columns
-        # each see a nonzero hidden[r] and move off zero on the first step,
-        # which unlocks layer1 from the step after.
         _xavier_uniform_(self.layer1.weight, rng)
         _zero_(self.layer1.bias)
         _zero_(self.layer2.weight)
@@ -687,8 +768,10 @@ class QHead(nn.Module):
         appends). ``claimed``: ``[n_candidates]`` (nonzero where another vehicle
         already claimed that Client this decision). ``is_depot``:
         ``[n_candidates]``, 1.0 on the synthetic depot row and 0.0 on every
-        Client — the flag the warm start prices going home with (see this
-        module's docstring). Returns ``[n_candidates]``.
+        Client. Returns ``W · φ(s, v, a)`` — the trainable residual, ``0.0``
+        for every candidate at init — over ``[n_candidates]``; the caller adds
+        the myopic base ``c(s, v, a)`` to get ``Q`` (module docstring, "The
+        myopic base").
         """
         n_candidates = client_embeddings.shape[0]
         vehicle = vehicle_embedding.unsqueeze(0).expand(n_candidates, -1)

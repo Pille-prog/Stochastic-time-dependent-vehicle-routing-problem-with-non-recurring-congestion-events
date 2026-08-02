@@ -129,32 +129,45 @@ class ExperimentConfig:
     # ticket's lr/gradient-clipping stability sweep varies on
     # ``evaluation_seeds``; not a frozen acceptance parameter.
     neural_grad_clip_norm: float | None = None
-    # Ticket 08: which myopic warm start ``TokenEncoder`` initialises
-    # ``arc_embed`` row 0 with (``network.WARM_START_WEIGHTS``). ``"minutes"``
-    # (the default) is the nearest-feasible-Client null model spec.md's Gate A
-    # is written against; ``"cost"`` additionally prices the leg by the three
-    # single-Client projected cost components the arc token already carries,
-    # measured at -28% of episode cost against ``"minutes"``. Changing it
-    # changes the untrained network, hence Gate A's null -- to a *harder* one.
+    # Ticket 08; DEAD since ticket 15 (kept for YAML/historical-run compat,
+    # still validated, no longer wired to anything). Used to select which
+    # myopic warm start ``TokenEncoder`` initialised ``arc_embed`` row 0 with
+    # (``network.WARM_START_WEIGHTS``). Ticket 15 took the myopic base ``c``
+    # out of the network entirely (``network.py``, "The myopic base"): ``c``
+    # is now always ``WARM_START_WEIGHTS["cost"]``, computed by
+    # ``TokenEncoder.forward`` and never touched by this field. The value
+    # below (and every existing config file's) is inert; the historical
+    # "minutes" vs "cost" measurements it once selected between stay citeable
+    # under the old architecture (network.py, "The myopic base").
     neural_warm_start: str = "minutes"
-    # Ticket 08: ``delta`` for ``learn``'s Huber loss. torch's own default of
-    # 1.0 is not a neutral choice here -- the standardized target and the
-    # network's output both live around 1e-2, so every residual falls in the
-    # quadratic branch and the loss is exactly ``0.5 * MSE``, robustness never
-    # engaging. One truncated training episode (the 40000-minus-200-per-visit
-    # terminal penalty, research note F10) then lands on *every* decision
-    # epoch's target in that episode, squared. A delta near the residual scale
-    # is what makes those episodes contribute a bounded gradient instead of a
-    # dominating one. Kept at 1.0 by default so the knob alone changes nothing.
+    # Ticket 08; DEAD-ish since ticket 15 (kept wired, but the problem it
+    # addresses is far smaller now -- see below). ``delta`` for ``learn``'s
+    # Huber loss. torch's own default of 1.0 is not a neutral choice here --
+    # the standardized target and the network's output both live around
+    # 1e-2, so every residual falls in the quadratic branch and the loss is
+    # exactly ``0.5 * MSE``, robustness never engaging. One truncated
+    # training episode (the 40000-minus-200-per-visit terminal penalty,
+    # research note F10) then lands on *every* decision epoch's target in
+    # that episode, squared. A delta near the residual scale is what makes
+    # those episodes contribute a bounded gradient instead of a dominating
+    # one. Kept at 1.0 by default so the knob alone changes nothing. Ticket
+    # 16 is what actually retires this field, by replacing ``learn``'s
+    # per-episode Huber-loss SGD with a closed-form least-squares solve.
     neural_huber_delta: float = 1.0
-    # Ticket 08: how much faster ``QHead``'s level term (``linear``'s bias --
-    # the one weight added identically to every candidate, so the only one the
-    # argmin cannot see) moves per optimizer step. At init ``Q_joint`` is
-    # 0.3-0.9 while the standardized return is ~0.03, and closing that gap at
-    # the shared learning rate takes ~100 episodes of same-signed steps that
-    # drag every ranking weight along with them. A gain closes it inside the
-    # first episode instead. 1.0 (the default) is bit-identical to the term not
-    # existing.
+    # Ticket 08; MOOT since ticket 15 (kept wired, at its measured
+    # bit-identical-to-absent default). How much faster ``QHead``'s level
+    # term (``linear``'s bias -- the one weight added identically to every
+    # candidate, so the only one the argmin cannot see) moves per optimizer
+    # step. Under the pre-ticket-15 architecture, at init ``Q_joint`` was
+    # 0.3-0.9 while the standardized return was ~0.03, and closing that gap
+    # at the shared learning rate took ~100 episodes of same-signed steps
+    # that dragged every ranking weight along with them; a gain closed it
+    # inside the first episode instead. Ticket 15 removes the mismatch at
+    # its source (``network.py``, "The level term" -- the section's "why
+    # this is moot now" note): ``Q_joint`` at init is now ``Σ_v c(s, v,
+    # a_v)``, already on the scale of the return it approximates, so there
+    # is no longer a large, same-signed gap for this gain to close. 1.0 (the
+    # default) is bit-identical to the term not existing.
     neural_level_gain: float = 1.0
     # "cpu", "cuda", or "auto" (ticket 12; amends spec.md decision 7). "auto"
     # is the default: it resolves once per run (torch_support.resolve_device)

@@ -1,5 +1,20 @@
 # Measurement artifacts (tickets 08 and 13-17)
 
+## The myopic base leaves the network: `W = 0` against ticket 14's frozen null (ticket 15)
+
+- **`myopic_base_null_50.py`** / **`myopic_base_null_50.json`** — two
+  comparisons, both zero training. (1) Mini fixture: this ticket's
+  architecture against the pre-ticket-15 architecture (a sibling worktree
+  checked out at ticket 14's commit), same 50 `evaluation_seeds` — mean
+  **461.287099** both ways, `max |old - new| = 0.0000000000` across every
+  seed. (2) Real dataset: this ticket's architecture reads **3365.092529**
+  against ticket 14's frozen **3365.09** (`action_set_m2_50.py`'s arm 1) —
+  matching to the cent. Not a coincidence: `Q(s, v, a) == c(s, v, a)` holds by
+  construction once `QHead.linear`/`layer2` are the zero tensor (`network.py`,
+  "The myopic base"), so neither architecture's random weights reach `Q` at
+  init; this is the empirical check that the reasoning has no gap.
+
+
 The raw evidence behind issue `08-gate-a-does-it-learn.md`'s Comments and the
 redesign it handed to. Kept here and not under `runs/`, which is gitignored:
 the numbers are transcribed into the tickets, but a transcription is not a

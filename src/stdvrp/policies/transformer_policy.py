@@ -125,44 +125,60 @@ candidate row as ``Embeddings.depot``:
 
     depot_row = concat([vehicle_context, arc_embed(depot_arc_tokens[v])])
 
-``_score`` appends ``embeddings.depot[vehicle]`` to the client rows before
-calling ``QHead`` — one uniform pathway, rather than this module hand-building
-a 2-wide pair from a separate ``EpisodeGeometry`` read as it did before the
-decision-1 amendment. The "context" half of a real Client's row is that
-Client's transformer-refined embedding; the depot has no such thing, so its
-row uses the vehicle's own context embedding instead — a deliberate choice,
-not an arbitrary filler: the depot's meaning is "return to base", which is a
-fact about the *vehicle* (its remaining capacity, how deep into the shift it
-is), not about the destination.
+and, since ticket 15, the synthetic candidate's myopic base alongside it:
 
-The row additionally carries an ``is_depot`` flag into ``QHead`` beside
-``claimed``: it is the only thing that distinguishes this synthetic candidate
-from a real Client's row, and the warm start reads it (``network.py``,
-"The depot is the last resort at init") to price going home at one whole
-horizon. So at construction ``Q(v, depot) == minutes_to_depot / horizon_length
-+ 1`` while every Client scores ``minutes_to_client / horizon_length <= 1``,
-and the untrained greedy policy is **"go to the nearest feasible Client, home
-only when no Client is feasible"** — the null model spec.md specifies.
+    Embeddings.depot_cost[v] = c(s, v, depot)   (network.py, "The depot's place in `c`")
 
-An earlier version of this file left the flag out, so the depot got the same
-myopic warm start as a real candidate: ``Q(v, depot) == minutes_to_depot /
-horizon_length``, which is exactly ``0`` for a vehicle standing on the depot.
-Every vehicle starts parked there, so every vehicle's argmin was the depot at
-decision epoch 1, ``Model`` saw ``fleet.all_parked()``, and the Episode
-terminated after one transition with every Client unserved (ticket 08 measured
-the resulting "null model" at mean cost 81 701 against the linear baseline's
-2 483). ``Model._reroute_for`` reroutes only *travelling* vehicles, so the same
-warm start also retired vehicles permanently whenever home happened to be
-nearer than any Client.
+``_score`` appends both ``embeddings.depot[vehicle]`` (to the client
+embedding rows, before calling ``QHead``) and ``embeddings.depot_cost[vehicle]``
+(to the client myopic-base row, before adding it to ``QHead``'s output) — one
+uniform pathway for each, rather than this module hand-building either from a
+separate ``EpisodeGeometry`` read as it did before the decision-1 amendment.
+The "context" half of a real Client's embedding row is that Client's
+transformer-refined embedding; the depot has no such thing, so its row uses
+the vehicle's own context embedding instead — a deliberate choice, not an
+arbitrary filler: the depot's meaning is "return to base", which is a fact
+about the *vehicle* (its remaining capacity, how deep into the shift it is),
+not about the destination.
 
-The flag alone is a **prior, not a guarantee** — measured on the mini fixture,
-one episode of training is enough for ``QHead``'s Xavier-random background
-units to overtake row 0 and put the depot back under every Client, at which
-point the fleet retires again and the Episode stops producing training signal.
-Since ADR-0011, it is ``select_vehicle_possible_actions``'s own branches —
-not a Policy-private ``_depot_is_feasible`` — that keep the depot from being
-offered as a candidate at all outside the window where heading home is legal;
-the flag is what keeps the *untrained* policy honest inside that window, where
+The embedding row additionally carries an ``is_depot`` flag into ``QHead``
+beside ``claimed``: it is the only thing that distinguishes this synthetic
+candidate's *embedding* row from a real Client's (the myopic-base gap between
+them is carried separately, in ``c``, not through this flag — see
+``network.py``, "The depot's place in `c`"). At construction ``Q(v, depot) ==
+c(s, v, depot) == minutes_to_depot / horizon_length + 1`` (``QHead``'s own
+output is exactly zero for every candidate at init — "The myopic base"),
+while every Client scores ``Q(v, client) == c(s, v, client) ==
+minutes_to_client / horizon_length <= 1``, so the untrained greedy policy is
+**"go to the nearest feasible Client, home only when no Client is
+feasible"** — the null model spec.md specifies.
+
+An earlier version of this file left the flag out entirely, so the depot got
+the same myopic estimate as a real candidate: ``Q(v, depot) ==
+minutes_to_depot / horizon_length``, which is exactly ``0`` for a vehicle
+standing on the depot. Every vehicle starts parked there, so every vehicle's
+argmin was the depot at decision epoch 1, ``Model`` saw
+``fleet.all_parked()``, and the Episode terminated after one transition with
+every Client unserved (ticket 08 measured the resulting "null model" at mean
+cost 81 701 against the linear baseline's 2 483). ``Model._reroute_for``
+reroutes only *travelling* vehicles, so the same construction also retired
+vehicles permanently whenever home happened to be nearer than any Client.
+
+``c``'s one-horizon depot margin is, since ticket 15, structurally
+permanent — no weight anywhere on its path for an optimizer to move (module
+docstring, "The myopic base"). What training *can* still move is ``QHead``'s
+residual: once ``layer2``'s columns move off zero, ``is_depot`` (read by
+``layer1``'s Xavier-random rows from the first forward pass, exactly like
+``claimed``) can drive the residual to favour or disfavour the depot row
+independently of every Client's, which is enough on its own to put the depot
+back under a Client's total ``Q`` regardless of ``c``'s fixed gap — a trained
+network is free to price going home however the returns say it should,
+including below every Client near the shift end (``network.py``, "The
+depot's place in `c`"). Since ADR-0011, it is
+``select_vehicle_possible_actions``'s own branches — not a Policy-private
+``_depot_is_feasible`` — that keep the depot from being offered as a
+candidate at all outside the window where heading home is legal; the myopic
+base is what keeps the *untrained* policy honest inside that window, where
 the depot competes with real Clients in the argmin like any other candidate.
 See "ADR-0011" above for whether the penalty is still earning its keep now
 that the depot enters far less often — decided by measurement, not argument.
@@ -202,11 +218,15 @@ defaulting to torch's 1.0 so the knob alone changes nothing); setting it near
 the residual scale is what turns those episodes into a bounded gradient.
 
 The **prediction is not divided**, and that asymmetry is the whole point: the
-network's output already lives in normalized units, because ticket 05's warm
-start pins it at ``minutes_from_vehicle / horizon_length`` (``network.py``).
-The two scales meet — a Chengdu episode the linear baseline runs at cost ~2 500
-gives ``y ≈ 2500 / (150 * 850) ≈ 0.020``, against a warm-started ``Q`` of
-``~5 min / 480 min ≈ 0.010``.
+prediction already lives in normalized units, because it is
+``c(s, v, a) + QHead(...)`` (ticket 15, ``network.py``, "The myopic base") and
+``c`` is built from the tokenizer's own minute-normalised arc facts. At init
+``QHead(...) == 0`` exactly, so ``Q == c`` outright — even more directly
+normalized than the pre-ticket-15 architecture this paragraph originally
+described, where the network's *own* output (not an external term) was pinned
+to that scale by the warm start. The two scales meet either way — a Chengdu
+episode the linear baseline runs at cost ~2 500 gives ``y ≈ 2500 / (150 * 850)
+≈ 0.020``, against an untrained ``Q`` of ``~5 min / 480 min ≈ 0.010``.
 
 Ticket 08's Gate A run divided **both** sides, which is arithmetically the same
 as regressing ``Q`` on the *raw* return: the network was asked to move its
@@ -553,25 +573,33 @@ class TransformerMonteCarloPolicy(Policy):
         pending: list[int],
         claimed_mask: np.ndarray,
     ) -> torch.Tensor:
-        """``Q(vehicle, candidate)`` over every pending Client plus the depot, in that order."""
+        """``Q(vehicle, candidate) == c(s, v, candidate) + QHead(...)`` over every
+        pending Client plus the depot, in that order (ticket 15, ``network.py``,
+        "The myopic base") -- the addition ``QHead`` itself never performs.
+        """
         n_pending = len(pending)
         client_embeddings = embeddings.clients[:, vehicle, :]
         augmented = torch.cat([client_embeddings, embeddings.depot[vehicle].unsqueeze(0)], dim=0)
+        myopic_base = torch.cat(
+            [embeddings.cost[:, vehicle], embeddings.depot_cost[vehicle].unsqueeze(0)], dim=0
+        )
 
         claimed = torch.zeros(n_pending + 1, dtype=torch.float32, device=self.device)
         if n_pending:
             claimed[:n_pending] = torch.from_numpy(claimed_mask.astype(np.float32)).to(self.device)
 
         # The one structural fact separating the synthetic depot row from a real
-        # Client's, and what the warm start prices going home with (network.py,
-        # "The depot is the last resort at init"). Without it the head cannot
-        # tell the two apart at all -- the depot row's "context" half is the
-        # vehicle's own embedding, which every Client row of this sweep also
-        # carries in its `vehicle_embedding` argument.
+        # Client's embedding row (the myopic-base gap between them is carried
+        # separately, in `myopic_base` above -- network.py, "The depot's place
+        # in `c`"). Without this flag the head cannot tell the two apart at
+        # all -- the depot row's "context" half is the vehicle's own embedding,
+        # which every Client row of this sweep also carries in its
+        # `vehicle_embedding` argument.
         is_depot = torch.zeros(n_pending + 1, dtype=torch.float32, device=self.device)
         is_depot[n_pending] = 1.0
 
-        q: torch.Tensor = self.head(embeddings.vehicles[vehicle], augmented, claimed, is_depot)
+        residual = self.head(embeddings.vehicles[vehicle], augmented, claimed, is_depot)
+        q: torch.Tensor = myopic_base + residual
         return q
 
     # --- Learning ------------------------------------------------------------

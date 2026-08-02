@@ -122,6 +122,11 @@ neural_grad_clip_norm: null
 # test_seeds the untrained "cost" network costs 3811.28 against the fully
 # trained "minutes" network's 4423.73 -- 13.8% cheaper, with no training at all.
 # That is a real result and it belongs to Gate B's question, not Gate A's.
+#
+# DEAD since ticket 15 (config.py, ExperimentConfig.neural_warm_start): the
+# myopic base is now always "cost" (network.py, "The myopic base"), computed
+# outside the network and unreachable by this key. Left at its Gate-A value
+# for the historical record above; changing it now changes nothing.
 neural_warm_start: minutes
 
 # Ticket 08. Huber's quadratic/linear knee, and a MEASURED NEGATIVE RESULT --
@@ -143,6 +148,10 @@ neural_warm_start: minutes
 # to be well above the normal residual and well below the outlier -- those two
 # scales are ~1e-2 and ~3e-1, so the window is real but narrow, and nothing
 # has measured a value inside it. Do not set this without one.
+#
+# MOOT since ticket 15, retired by ticket 16: the historical finding above
+# stands, but ticket 16 replaces this file's per-episode Huber-loss SGD with
+# a closed-form least-squares solve, at which point this key stops mattering.
 neural_huber_delta: 1.0
 
 # Ticket 08. How much faster QHead's level term -- linear's bias, the one
@@ -167,4 +176,9 @@ neural_huber_delta: 1.0
 # just spends it faster. This config runs "cost", so: 1.0.
 #
 # A Gate A run asking "does it learn" should use minutes + 100 instead.
+#
+# MOOT since ticket 15: the 0.3-0.9-vs-0.03 mismatch this section measures was
+# an artifact of the pre-ticket-15 warm start; Q_joint at init is now
+# Sum_v c(s, v, a_v), already on the target's scale, so there is no longer a
+# large same-signed gap for this gain to close (network.py, "The level term").
 neural_level_gain: 1.0

@@ -1,0 +1,39 @@
+=== Mini fixture: this architecture vs the recorded constant ===
+  new, mini fixture 10/50 running mean 403.2465
+  new, mini fixture 20/50 running mean 406.0872
+  new, mini fixture 30/50 running mean 443.2313
+  new, mini fixture 40/50 running mean 449.6268
+  new, mini fixture 50/50 running mean 461.2871
+new, mini fixture                mean 461.287099  n=50
+recorded constant (pre-ticket-15): 461.287099
+this run:                          461.287099
+delta:                             +0.000000
+
+=== Real dataset: this architecture vs ticket 14's frozen 3365.09 ===
+  new, real dataset 10/50 running mean 3289.4021
+  new, real dataset 20/50 running mean 3070.1946
+  new, real dataset 30/50 running mean 3131.8795
+  new, real dataset 40/50 running mean 3296.2108
+  new, real dataset 50/50 running mean 3365.0925
+new, real dataset                mean 3365.092529  n=50
+ticket 14 frozen null (old architecture): 3365.090000
+this run (new architecture):               3365.092529
+delta:                                     +0.002529
+
+wrote .scratch/neural-policy/results/myopic_base_null_50.json
+
+--- --old-src provenance run (recorded once, for the constant above) ---
+=== Mini fixture: old architecture (worktree @ HEAD, commit 25c4ea6) vs new (this tree) ===
+  old, mini fixture 10/50 running mean 403.2465
+  old, mini fixture 20/50 running mean 406.0872
+  old, mini fixture 30/50 running mean 443.2313
+  old, mini fixture 40/50 running mean 449.6268
+  old, mini fixture 50/50 running mean 461.2871
+old, mini fixture                mean 461.287099  n=50
+  new, mini fixture 10/50 running mean 403.2465
+  new, mini fixture 20/50 running mean 406.0872
+  new, mini fixture 30/50 running mean 443.2313
+  new, mini fixture 40/50 running mean 449.6268
+  new, mini fixture 50/50 running mean 461.2871
+new, mini fixture                mean 461.287099  n=50
+mini fixture max |old - new| per seed: 0.0000000000
