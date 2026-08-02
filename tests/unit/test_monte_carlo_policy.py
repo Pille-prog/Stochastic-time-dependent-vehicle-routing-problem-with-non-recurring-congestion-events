@@ -26,6 +26,7 @@ from hypothesis import strategies as st
 
 from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPath, ShortestPathCache
+from stdvrp.policies import action_set
 from stdvrp.policies.feature_extraction import StateFeatures
 from stdvrp.policies.monte_carlo import MonteCarloPolicy, TimeWindows
 from stdvrp.simulation.state import State, TrainingSnapshot
@@ -413,7 +414,9 @@ def reference_possible_actions(
         # ticket 05 (B11): filtered here too, to stay in lockstep with the fix in
         # _select_vehicle_possible_actions — this oracle pins ticket 07's
         # vectorization, not the pre-ticket-05 duplicate-booking bug.
-        shortest_distance_clients = policy._classify_shortest_distance_clients()
+        shortest_distance_clients = action_set._classify_shortest_distance_clients(
+            state, policy.geometry, policy.depot
+        )
         for _distance, client in shortest_distance_clients[vehicle]:
             if client not in forbidden_actions:
                 possible_actions.append(client)
