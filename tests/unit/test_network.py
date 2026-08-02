@@ -174,6 +174,72 @@ class TestWarmStart:
             assert int(torch.argmin(q).item()) == int(np.argmin(minutes_from_vehicle[v]))
 
 
+class TestLevelGain:
+    """Ticket 08: ``level_gain`` scales how far one optimizer step moves ``Q``'s
+    overall level (``network.py``, "The level term, and why it needs a gain").
+
+    Two properties carry the whole design. It must be **invisible to every
+    argmin** — otherwise it is the dueling mistake again, a level correction
+    landing on the ranking — and the default must be **bit-identical** to the
+    term not existing, so the frozen null model and every prior measurement
+    stand unchanged."""
+
+    def head_with(self, gain: float):
+        return QHead(d_model=16, init_rng=np.random.default_rng(4), level_gain=gain)
+
+    def score(self, head, world):
+        geometry, time_windows, snapshot = world
+        encoder, _ = build_network(seed=4, n_obs=N_OBS)
+        tokens = call_tokenize(geometry, time_windows, snapshot)
+        embeddings = encoder(tokens)
+        n_pending = tokens.client_tokens.shape[0]
+        return head(
+            embeddings.vehicles[0],
+            embeddings.clients[:, 0, :],
+            torch.zeros(n_pending),
+            torch.zeros(n_pending),
+        )
+
+    def test_the_default_gain_is_bit_identical_to_no_level_term(self) -> None:
+        world = make_dense_world(6, 2, N_OBS, seed=44)
+        with torch.no_grad():
+            plain = self.score(self.head_with(1.0), world)
+            head = self.head_with(1.0)
+            head.linear.bias.copy_(torch.full_like(head.linear.bias, 0.25))
+            biased = self.score(head, world)
+        # A nonzero bias still lands exactly once, not twice.
+        torch.testing.assert_close(biased, plain + 0.25, atol=0.0, rtol=0.0)
+
+    @settings(max_examples=25, deadline=None, derandomize=True)
+    @given(world=worlds())
+    def test_the_gain_shifts_every_candidate_equally(self, world) -> None:
+        head = self.head_with(100.0)
+        with torch.no_grad():
+            before = self.score(head, world).clone()
+            head.linear.bias.copy_(torch.full_like(head.linear.bias, -0.01))
+            after = self.score(head, world)
+
+        shift = (after - before).numpy()
+        np.testing.assert_allclose(shift, np.full_like(shift, shift[0]), atol=1e-6, rtol=0)
+        assert int(torch.argmin(after).item()) == int(torch.argmin(before).item())
+
+    def test_the_gain_multiplies_the_bias_gradient(self) -> None:
+        """The mechanism: one step moves the level ``gain`` times as far,
+        because the bias's gradient is multiplied by exactly ``gain``."""
+        world = make_dense_world(6, 2, N_OBS, seed=44)
+        grads = []
+        for gain in (1.0, 100.0):
+            head = self.head_with(gain)
+            self.score(head, world).sum().backward()
+            assert head.linear.bias.grad is not None
+            grads.append(float(head.linear.bias.grad.item()))
+        assert grads[1] == pytest.approx(100.0 * grads[0], rel=1e-5)
+
+    def test_a_nonpositive_gain_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="level_gain must be positive"):
+            QHead(d_model=16, init_rng=np.random.default_rng(0), level_gain=0.0)
+
+
 class TestWarmStartWeights:
     """Ticket 08: ``arc_embed`` row 0 is one of ``WARM_START_WEIGHTS``."""
 

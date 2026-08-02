@@ -191,6 +191,70 @@ and threw the ranking away" signature ``transformer_policy.py`` records under
 Anything that revisits this has to fix the scale mismatch *first*, not add a
 term that makes the mismatch land on the advantage.
 
+## The level term, and why it needs a gain (``level_gain``, ticket 08)
+
+That scale mismatch, measured. At initialization ``Q`` is a sum of
+minute-normalised quantities: with ``m`` vehicles, ``Q_joint = sum_v Q(s, v,
+a_v)`` lands around **0.3-0.9** under the ``"cost"`` warm start. The target
+``learn`` regresses it onto is ``U_t / (number_clients * episode_length)``,
+which for a Chengdu episode costing ~3800 is **0.03 at ``t = 0`` and decays to
+0**. The two are an order of magnitude apart, and the first training episode's
+logged loss says so exactly: ``0.5 * 0.8^2 = 0.32``, against a logged
+``3.2e-01``.
+
+So before the network can learn anything about *ranking*, it has to move
+``Q_joint`` down by 0.3-0.9 — while the differences between candidates that
+the ``argmin`` reads are ~0.03. The correction is 10-30x larger than the
+signal **and it has the same sign at every step**, so Adam (whose step size is
+~``lr`` regardless of gradient magnitude) walks in a straight line for as long
+as it takes, dragging every weight it touches. Measured on the real dataset
+with the ``"cost"`` warm start: 50 episodes took the policy from its untrained
+3811 to 6169 on the ``test_seeds``, +62% *worse* than its own null, with
+training-episode costs climbing monotonically 6-8k -> 22-50k.
+
+There is exactly one weight in this head that is added to every candidate of
+every sweep identically, and therefore the only one that can move ``Q``'s
+magnitude without touching a single ``argmin``: ``linear``'s **bias**. It is
+already trainable and already receives precisely this gradient — it is simply
+too slow, because it moves at ~``lr`` per step like everything else. Travelling
+the ~0.08 it needs at ``lr = 3e-5`` takes ~2700 steps, which at this fixture's
+~27 steps per episode is ~100 episodes. **That is the exact window in which the
+damage happens.**
+
+:attr:`QHead.level_gain` multiplies that one weight's effective contribution,
+so one optimizer step moves the level ``level_gain`` times as far. At 100 the
+level converges inside the first episode instead of the hundredth. It is
+written as an increment on top of ``self.linear(x)`` — ``(level_gain - 1.0) *
+linear.bias`` — so that the default of ``1.0`` adds exactly ``0.0`` and is
+bit-identical to this term not existing, and so that the parameter, its
+meaning and the ``state_dict``'s keys are all unchanged.
+
+This is what the dueling attempt above should have been. Both are "give the
+level its own fast home"; the difference is that a *centred advantage* puts
+the correction somewhere the ``argmin`` reads, and a *bias* puts it in the one
+direction the ``argmin`` is blind to.
+
+**Measured, and the result is conditional — read this before setting it.** On
+the mini fixture (200 episodes, paired against the same untrained null), a gain
+of 100 on the ``"minutes"`` warm start improves every column: best block
+``-5.68% -> -7.44%``, mean over 20 blocks ``-2.42% -> -2.79%``, mean of the
+last five ``-1.84% -> -3.03%``, blocks worse than the null ``3/20 -> 2/20``.
+That is the best learning behaviour measured anywhere in this effort.
+
+On the ``"cost"`` warm start the *same* gain makes things worse: mean over
+blocks ``+2.57% -> +5.31%``, blocks worse than the null ``14/20 -> 16/20``.
+The reading is uncomfortable but consistent with everything else here — the
+gain does not make the ranking signal any less noisy, it just removes what was
+throttling the optimizer. Starting from a poor ranking (nearest-neighbour)
+that is an improvement, because there is something to find. Starting from a
+good one (cost-greedy) it only lets the noise do damage sooner. **Training is
+not adding value on top of a good initialization; it is spending it.**
+
+So the default is ``1.0``, ``experiments/chengdu/config.yaml`` leaves it there
+alongside ``"cost"``, and a Gate A run whose question is specifically "does it
+learn" should use ``"minutes"`` with a gain of 100 — the configuration in
+which the answer is most clearly yes.
+
 ## Why the warm start is on a linear path
 
 Because the previous version put it behind the ReLU, and **it died in one
@@ -565,9 +629,14 @@ class QHead(nn.Module):
         init_rng: np.random.Generator,
         hidden_dim: int | None = None,
         device: torch.device | None = None,
+        level_gain: float = 1.0,
     ) -> None:
         super().__init__()
+        if level_gain <= 0.0:
+            raise ValueError(f"level_gain must be positive, got {level_gain}")
         self.device = device if device is not None else torch.device("cpu")
+        # See the module docstring, "The level term, and why it needs a gain".
+        self.level_gain = level_gain
         hidden_dim = hidden_dim if hidden_dim is not None else d_model
         client_dim = 2 * d_model  # Embeddings.clients' per-vehicle slice width
         input_dim = d_model + client_dim + CANDIDATE_FLAG_WIDTH  # + claimed, is_depot
@@ -627,5 +696,12 @@ class QHead(nn.Module):
             [vehicle, client_embeddings, claimed.unsqueeze(-1), is_depot.unsqueeze(-1)], dim=-1
         )
         hidden = torch.relu(self.layer1(x))
-        output: torch.Tensor = (self.linear(x) + self.layer2(hidden)).squeeze(-1)
+        # ``linear``'s bias is the one weight added identically to every
+        # candidate of every sweep, so scaling its contribution moves Q's
+        # overall level without touching a single argmin -- module docstring,
+        # "The level term, and why it needs a gain". Written as an increment so
+        # the default gain of 1.0 adds exactly 0.0 and is bit-identical to this
+        # term not being here at all.
+        level = (self.level_gain - 1.0) * self.linear.bias
+        output: torch.Tensor = (self.linear(x) + level + self.layer2(hidden)).squeeze(-1)
         return output

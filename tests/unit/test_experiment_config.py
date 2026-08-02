@@ -54,6 +54,7 @@ def valid_values() -> dict:
         "neural_grad_clip_norm": None,
         "neural_warm_start": "minutes",
         "neural_huber_delta": 1.0,
+        "neural_level_gain": 1.0,
         "device": "cpu",
     }
 
@@ -161,6 +162,7 @@ def test_omitted_defaulted_keys_take_their_defaults(tmp_path: Path) -> None:
     del values["neural_grad_clip_norm"]
     del values["neural_warm_start"]
     del values["neural_huber_delta"]
+    del values["neural_level_gain"]
     config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
     assert config.device == "auto"
     assert config.neural_grad_clip_norm is None
@@ -168,6 +170,7 @@ def test_omitted_defaulted_keys_take_their_defaults(tmp_path: Path) -> None:
     # nearest-feasible-Client warm start and torch's own Huber delta.
     assert config.neural_warm_start == "minutes"
     assert config.neural_huber_delta == 1.0
+    assert config.neural_level_gain == 1.0
 
 
 def test_grad_clip_norm_value_is_accepted(tmp_path: Path) -> None:
@@ -267,3 +270,29 @@ def test_type_errors_are_rejected(tmp_path: Path) -> None:
         ExperimentConfig.from_yaml(
             write_config(tmp_path, valid_values() | {"epsilon": "not a number"})
         )
+
+
+def test_level_gain_value_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_level_gain": 100.0}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_level_gain == 100.0
+
+
+def test_nonpositive_level_gain_is_rejected(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_level_gain": 0}
+    with pytest.raises(ValueError, match=r"neural_level_gain must be positive"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
+def test_warm_start_names_stay_in_sync_with_the_weight_vectors() -> None:
+    """``config.NEURAL_WARM_STARTS`` duplicates ``tokenizer``'s keys on purpose
+    (importing them would make config depend on stdvrp.policies, which
+    circularly imports the simulator -- a failure that only appears when config
+    is imported first). This is the pin that stops the two drifting."""
+    # The same landmine, from the other side: stdvrp.simulation has to finish
+    # initializing before stdvrp.policies is importable (see test_tokenizer.py).
+    import stdvrp.simulation  # noqa: F401
+    from stdvrp.config import NEURAL_WARM_STARTS
+    from stdvrp.policies.tokenizer import WARM_START_WEIGHTS
+
+    assert set(NEURAL_WARM_STARTS) == set(WARM_START_WEIGHTS)

@@ -451,7 +451,135 @@ value on top of a good initialization.**
   **harder** gate, decided on `evaluation_seeds`, which is exactly where
   spec.md puts architecture tuning. A criterion moved in the direction that
   makes it harder to pass is not a criterion rewritten to be passable.
-- The honest statement of where this stands: **the network is not yet adding
-  value over its own initialization.** Passing Gate A against the weak null
-  would be true and substantively misleading. Whatever closes this ticket has
-  to say so.
+- The honest statement of where this stands, **as written before arm 0
+  finished and corrected by it below**: the network looked like it was not
+  adding value over its own initialization. Under the `cost` warm start that
+  is right. Under `minutes` it is wrong — arm 0's converged measurement is
+  +15.5% over its own null, significant. See the official result below.
+
+### 2026-08-01 (fifth) — the level term: the scale mismatch, found and given a fast home
+
+The `cost` arm launched above was watched for 87 episodes and made the previous
+section's last bullet concrete, then explained it.
+
+**What it showed.** Null on `test_seeds` **3811.28** (so the warm start's −28%
+holds on the verdict set too, not just on `evaluation_seeds`). First evaluation
+block, at episode 50: **6168.5 — +62% *worse* than its own null**, with training
+episode costs climbing monotonically 6-8k → 15-26k → 22-50k. Training does not
+fail to help here. It actively destroys a good policy, monotonically.
+
+**Why, from the first line of the log.** Episode 1's loss is `3.2e-01`, falling
+to ~5e-4. That is not noise, it is a level. At init `Q_joint = sum_v Q(s,v,a_v)`
+is a sum of minute-normalised quantities landing around **0.3-0.9**, while the
+target `U_t / (number_clients * episode_length)` is **0.03 at t=0, decaying to
+0**. `0.5 * 0.8² = 0.32` reproduces the logged loss exactly. So before the
+network can learn anything about ranking it must walk `Q_joint` down by an
+order of magnitude — while the candidate differences the `argmin` reads are
+~0.03. The correction is 10-30× the signal **and has the same sign every
+step**, so Adam (step ~`lr` regardless of gradient size) walks in a straight
+line, dragging every weight it touches. The `cost` warm start makes `Q` larger,
+which is exactly why it degrades faster than `minutes`.
+
+**The fix.** `QHead.linear`'s bias is the one weight added identically to every
+candidate of every sweep — the only one no `argmin` can see. It already gets
+precisely this gradient; it is just as slow as everything else, needing ~2700
+steps (~100 episodes at this fixture's ~27 steps/episode) to travel the ~0.08
+required. That is the exact window of the damage. `neural_level_gain`
+multiplies its effective contribution, so one step moves the level that many
+times as far; written as `(gain - 1.0) * linear.bias` so the default `1.0` adds
+exactly `0.0` and is bit-identical to the term not existing. This is what the
+rejected dueling attempt should have been: both give the level a fast home, but
+a centred advantage puts the correction where the `argmin` reads and a bias
+puts it in the one direction the `argmin` is blind to.
+
+**Measured, and conditional** (mini fixture, 200 episodes, gain 100):
+
+| arm | null | best | mean over blocks | last 5 | end | worse than null |
+|---|---|---|---|---|---|---|
+| `minutes` (committed) | 577.2 | −5.68% | −2.42% | −1.84% | −2.16% | 3/20 |
+| **`minutes` + gain 100** | 577.2 | **−7.44%** | **−2.79%** | **−3.03%** | −0.13% | **2/20** |
+| `cost` | 542.8 | −3.94% | +2.57% | +3.37% | +4.89% | 14/20 |
+| `cost` + gain 100 | 542.8 | −2.39% | +5.31% | +8.43% | +12.68% | 16/20 |
+
+On `minutes` it improves every column and is the **best learning behaviour
+measured anywhere in this effort**. On `cost` it makes things worse. The gain
+does not make the ranking signal less noisy — it removes what was throttling
+the optimizer. From a poor ranking (nearest-neighbour) there is something to
+find, so that helps; from a good one (cost-greedy) it only lets the noise do
+damage sooner.
+
+**Which is the finding, stated plainly: training is not adding value on top of
+a *good* initialization, it is spending it.** Absolute numbers on the mini
+fixture make it unarguable — the *untrained* `cost` network sits at 542.8, and
+no trained configuration in the table sustains anything below that (best
+sustained is `minutes` + gain 100 at 577.2 × 0.9697 = 559.7). Note the
+qualifier: from the *poor* `minutes` initialization training does genuinely
+help, and the official arm-0 result below measures how much.
+
+**Shipped:** `experiments/chengdu/config.yaml` keeps `neural_warm_start: cost`
+with `neural_level_gain: 1.0` — the warm start is measured on real data over 50
+`evaluation_seeds`, the gain only on the fixture and only helps the other warm
+start. A Gate A run whose question is specifically "does it learn" should use
+`minutes` + gain 100, where the answer is most clearly yes.
+
+### 2026-08-01 (sixth) — OFFICIAL: Gate A arm 0, converged (`runs/gate_a_v2/results_init0.json`)
+
+The frozen-null arm converged at **1150 episodes** and restored its best
+evaluated network (episode 650) for measurement, per protocol. On the 50
+held-out `test_seeds`, paired against the *same architecture untrained*:
+
+| | value |
+|---|---|
+| untrained (null) mean | **5299.48** |
+| trained mean | **4423.73** |
+| mean per-seed reduction | **+15.49%** (median +21.02%) |
+| trained cheaper on | **39 / 50 seeds** |
+| Wilcoxon signed-rank | **p = 6.21e-05** |
+| calibration Spearman rho, trained | **0.5427** (untrained −0.3487) |
+
+**Part 1 (null model): PASS for this arm** — p < 0.05 and ≥ 5% reduction, both
+comfortably. **Part 3 (calibration): PASS** — 0.543 against a required 0.5,
+from −0.349 untrained. **Part 2 (reproducibility): NOT MEASURED** — it requires
+≥ 3 independent init seeds and exactly one ran, so the reported `sd 0.00%` is
+an artefact of `n = 1`, not a result.
+
+`GATE A: FAIL` in the log is therefore **"one of three arms run"**, not "the
+network did not learn". It learned, significantly, and the ticket's own
+diagnostic instrument agrees: the failure protocol above says calibration is
+what distinguishes "the value function is not fitting" from "the value function
+fits but the policy does not improve", and here *both* fit — rho 0.543 **and**
+a policy 15.5% better than its null.
+
+Two things this corrects in the sections above, written while the arm was still
+running:
+
+1. The eval-block trajectory degrading past the null (−24% at ep 650, +74%
+   later) is a description of the *trajectory*, not of the outcome. The trainer
+   selects and restores the best block, so the measured network is ep 650's.
+2. The checkpoint selected on `evaluation_seeds` (−24.3% there) transfers to
+   `test_seeds` at +15.5%. That is shrinkage — F12's winner's curse, visible
+   and modest — not collapse.
+
+**And the finding that survives all of it,** on one seed set, apples to apples:
+
+| policy on the 50 `test_seeds` | mean cost |
+|---|---|
+| untrained, `minutes` warm start (the Gate A null) | 5299.48 |
+| **trained** to convergence, `minutes` — 1150 episodes | 4423.73 |
+| untrained, `cost` warm start — **zero training** | **3811.28** |
+
+**The untrained cost-greedy initialization is 13.8% cheaper than the fully
+trained network.** Training works; it is simply worth less than the arithmetic
+the tokenizer was already computing and the warm start was throwing away.
+
+#### What closing this ticket now requires
+
+- Arms 1 and 2 (`--init-seeds 1,2`) — ~4-6h each, unchanged config, purely
+  mechanical. Part 2 is the only unmeasured part, and part 1 must hold on each.
+- The relaunch, verbatim:
+  `uv run python -u scripts/run_gate_a.py --config experiments/chengdu/config.yaml --reference-card experiments/chengdu/reference_card.json --data-dir "C:/Users/ferna/OneDrive/Documentos/Mega city" --init-seeds 1,2 --checkpoint-dir runs/gate_a_v2 --results-path runs/gate_a_v2/results_init12.json --device cpu`
+  The config now ships `neural_warm_start: minutes` for exactly this reason —
+  all three arms must share one architecture or the null differs between them
+  and the gate is void. Flip it to `cost` for Gate B, not before.
+- Whatever the arms say, Gate B inherits a live question the gate itself does
+  not ask: the best *policy* measured here is untrained.

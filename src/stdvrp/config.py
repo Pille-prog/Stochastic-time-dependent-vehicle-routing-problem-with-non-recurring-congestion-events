@@ -21,6 +21,19 @@ from typing import Any
 
 import yaml
 
+#: Accepted values of ``neural_warm_start``, **duplicated** from
+#: ``stdvrp.policies.tokenizer.WARM_START_WEIGHTS`` rather than imported, and
+#: pinned in sync by ``test_experiment_config.py``.
+#:
+#: Importing it would make this module — which everything imports, early —
+#: depend on the ``stdvrp.policies`` package, whose ``__init__`` pulls in
+#: ``monte_carlo`` and through it ``stdvrp.simulation``: a circular import that
+#: surfaces only when ``config`` happens to be imported first. That is the same
+#: reason ``tokenizer.py`` duplicates the simulator's cost rates instead of
+#: importing them. Two names is a cheap price for a validation that cannot
+#: depend on import order.
+NEURAL_WARM_STARTS = ("minutes", "cost")
+
 
 @dataclass(frozen=True, slots=True)
 class ExperimentConfig:
@@ -134,6 +147,15 @@ class ExperimentConfig:
     # is what makes those episodes contribute a bounded gradient instead of a
     # dominating one. Kept at 1.0 by default so the knob alone changes nothing.
     neural_huber_delta: float = 1.0
+    # Ticket 08: how much faster ``QHead``'s level term (``linear``'s bias --
+    # the one weight added identically to every candidate, so the only one the
+    # argmin cannot see) moves per optimizer step. At init ``Q_joint`` is
+    # 0.3-0.9 while the standardized return is ~0.03, and closing that gap at
+    # the shared learning rate takes ~100 episodes of same-signed steps that
+    # drag every ranking weight along with them. A gain closes it inside the
+    # first episode instead. 1.0 (the default) is bit-identical to the term not
+    # existing.
+    neural_level_gain: float = 1.0
     # "cpu", "cuda", or "auto" (ticket 12; amends spec.md decision 7). "auto"
     # is the default: it resolves once per run (torch_support.resolve_device)
     # to "cuda" if available, else "cpu". The old "cpu by default" choice
@@ -233,15 +255,11 @@ class ExperimentConfig:
             raise ValueError("neural_grad_clip_norm must be positive or null")
         if self.neural_huber_delta <= 0:
             raise ValueError("neural_huber_delta must be positive")
-        # Imported inside the method, not at module scope: this module is
-        # imported early and by everything, and the weights live next to the
-        # arc-token layout they index (tokenizer.py, which is deliberately
-        # torch-free) -- a deferred import keeps that dependency one-way.
-        from stdvrp.policies.tokenizer import WARM_START_WEIGHTS
-
-        if self.neural_warm_start not in WARM_START_WEIGHTS:
+        if self.neural_level_gain <= 0:
+            raise ValueError("neural_level_gain must be positive")
+        if self.neural_warm_start not in NEURAL_WARM_STARTS:
             raise ValueError(
-                f"neural_warm_start must be one of {sorted(WARM_START_WEIGHTS)}, "
+                f"neural_warm_start must be one of {sorted(NEURAL_WARM_STARTS)}, "
                 f"got {self.neural_warm_start!r}"
             )
         if self.device not in ("cpu", "cuda", "auto"):

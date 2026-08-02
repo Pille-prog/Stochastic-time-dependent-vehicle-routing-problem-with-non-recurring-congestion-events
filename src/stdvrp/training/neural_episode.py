@@ -127,7 +127,12 @@ def build_neural_policy_state(
         device=device,
         warm_start=config.neural_warm_start,
     )
-    head = QHead(d_model=config.neural_d_model, init_rng=init_rng, device=device)
+    head = QHead(
+        d_model=config.neural_d_model,
+        init_rng=init_rng,
+        device=device,
+        level_gain=config.neural_level_gain,
+    )
     optimizer = torch.optim.Adam(
         chain(encoder.parameters(), head.parameters()), lr=config.neural_learning_rate
     )

@@ -109,9 +109,20 @@ neural_grad_clip_norm: null
 # future_delay to the weight vector is worse (an 8-seed screen put it at 5185
 # at full weight and 3778 at a tenth, against 3421 for this vector).
 #
-# This changes the untrained network, so it changes Gate A's null model -- to a
-# stronger one. Report the null alongside the trained number, always.
-neural_warm_start: cost
+# *** SET TO "minutes", DELIBERATELY, DESPITE THE ABOVE. ***
+#
+# Gate A's null is "the same architecture untrained", so all three arms must
+# share one architecture. Arm 0 has already run and converged on "minutes"
+# (runs/gate_a_v2/results_init0.json: null 5299.48 -> trained 4423.73, +15.5%,
+# p=6.2e-05, calibration rho 0.543 -- parts 1 and 3 PASS). Arms 1 and 2 are all
+# that is left to close the ticket, and flipping this key would silently make
+# them incomparable to arm 0 and void the gate.
+#
+# Flip it to "cost" for Gate B and for anything that ships: on the same 50
+# test_seeds the untrained "cost" network costs 3811.28 against the fully
+# trained "minutes" network's 4423.73 -- 13.8% cheaper, with no training at all.
+# That is a real result and it belongs to Gate B's question, not Gate A's.
+neural_warm_start: minutes
 
 # Ticket 08. Huber's quadratic/linear knee, and a MEASURED NEGATIVE RESULT --
 # left at torch's default, which the knob exists to make visible rather than
@@ -133,3 +144,27 @@ neural_warm_start: cost
 # scales are ~1e-2 and ~3e-1, so the window is real but narrow, and nothing
 # has measured a value inside it. Do not set this without one.
 neural_huber_delta: 1.0
+
+# Ticket 08. How much faster QHead's level term -- linear's bias, the one
+# weight added identically to every candidate and therefore the only one no
+# argmin can see -- moves per optimizer step (network.py, "The level term, and
+# why it needs a gain").
+#
+# The problem it addresses is real and measured: at init Q_joint is 0.3-0.9
+# while the standardized return is ~0.03, so the first thing training does is
+# walk that gap down with same-signed steps for ~100 episodes, dragging every
+# ranking weight along. On the real dataset with warm start "cost", 50 episodes
+# took the policy from its untrained 3811 to 6169 on test_seeds -- +62% worse
+# than its own null (runs/gate_a_cost/log.txt).
+#
+# But the fix is conditional, so it stays off HERE. Mini fixture, gain 100:
+#   warm start "minutes":  mean over blocks -2.42% -> -2.79%, best -5.68% ->
+#                          -7.44%, blocks worse than null 3/20 -> 2/20.  Better
+#                          on every column, and the best learning measured.
+#   warm start "cost":     mean +2.57% -> +5.31%, worse 14/20 -> 16/20. Worse.
+# The gain does not make the ranking signal less noisy; it removes what was
+# throttling the optimizer. From a poor ranking that helps, from a good one it
+# just spends it faster. This config runs "cost", so: 1.0.
+#
+# A Gate A run asking "does it learn" should use minutes + 100 instead.
+neural_level_gain: 1.0
