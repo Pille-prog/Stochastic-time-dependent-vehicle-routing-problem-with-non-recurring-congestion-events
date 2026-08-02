@@ -1,38 +1,118 @@
 """TransformerMonteCarloPolicy: decide, decide_train, learn (ticket 06, neural-policy).
 
 The ``TrainablePolicy`` (ticket 02) that scores every pending Client with the
-ticket-05 ``TokenEncoder``/``QHead`` and learns from the same Monte Carlo return
-``MonteCarloPolicy.learn`` targets. Imports torch at module scope, like
+ticket-05 ``TokenEncoder``/``QHead`` and argmins over the linear baseline's own
+``m + 2`` candidates (ticket 14, ADR-0011) rather than the whole scored row, and
+learns from the same Monte Carlo return ``MonteCarloPolicy.learn`` targets.
+Imports torch at module scope, like
 ``network.py``: this file's whole reason to exist is the network, so it must
 never be imported from ``stdvrp.policies.__init__`` or any module reachable at
 package-import time. Callers import it explicitly:
 ``from stdvrp.policies.transformer_policy import TransformerMonteCarloPolicy``.
 
-## ADR-0007 — the action set is feasibility, not heuristic
+## ADR-0011 — the action set is the baseline's own (reverses ADR-0007)
 
-``_select_vehicle_possible_actions``, ``_classify_shortest_distance_clients``,
-``delayed_clients``, the ``350``/``310`` literals and ``number_actions_test``
-are hand-engineered ranking built for the linear baseline's small candidate
-pool. None of it applies here. What is left is three constraints, each one a
-fact about what the simulator can execute rather than a guess about what is a
-good idea:
+ADR-0007 gave this Policy a bespoke feasibility-only action set — "every
+pending Client not already claimed, plus the depot" — on the argument that
+``_select_vehicle_possible_actions`` is hand-engineered ranking built for the
+linear baseline's small candidate pool, with nothing in it a network needs.
+Ticket 14 measured that argument wrong: the candidate count is worth
+**12.68%** to the linear baseline itself (``m+40`` 2168.39 vs ``m+2`` 2483.24
+over 50 ``evaluation_seeds``, 36/50, Wilcoxon p = 8.24e-05 —
+``results/baseline_null_50.py``); a ``k``-nearest shortlist is a regularizer
+against long myopic hauls (``c(s, a)`` can send a vehicle far across the map to
+a Client about to breach its window — myopically correct, globally ruinous),
+not a crutch for a model that cannot see far. The second reason is fairness
+rather than performance: spec.md decision 1's amendment already handed the
+four projected costs to the network on the ground that the baseline's own
+state-action features carry them, which levels the two Policies' *inputs*;
+the action set was the last un-levelled axis, and a Gate B result could not be
+attributed to the approximator while it stayed that way.
 
-1. **No double booking** (the B11 invariant): a Client another vehicle already
-   claimed this decision epoch is not a candidate.
-2. **No self-node** (ticket 11, B20, ADR-0008): a pending Client the vehicle is
-   already standing on is not a candidate — there is nothing to travel to.
-3. **Home is not a destination, it is an exit** — see
-   :meth:`TransformerMonteCarloPolicy._depot_is_feasible`, which amends
-   ADR-0007's original "plus the depot (always legal)" and documents the Gate A
-   measurement that forced the amendment.
+``_sweep`` now calls :func:`stdvrp.policies.action_set.select_vehicle_possible_actions`
+— ticket 13's extraction of the linear baseline's own definition, unmodified —
+at ``m + 2``, in both :meth:`decide` and :meth:`decide_train`.
+``episode.py`` trains the baseline at ``m+2`` but evaluates it at ``m+40`` over
+the swept action counts; this Policy is fixed at ``m+2`` throughout and does
+not inherit that mismatch. ``self.action`` is threaded through as
+``current_action``, mutated in place vehicle by vehicle within one ``_sweep``
+call — mirroring ``MonteCarloPolicy.action`` (``Model.run_training_episode``'s
+own comment already documents this aliasing generically as "``policy.action``").
 
-All three are enforced by :meth:`TransformerMonteCarloPolicy._sweep` directly,
-never reconstructed from a heuristic, and none of them ranks the candidates
-that survive: *which* feasible action wins is entirely the network's argmin.
-``claimed`` is additionally fed to the network as an input (spec.md decision 6:
-"claimed enters at the head"), so a trained network's *predictions* can account
-for contention, but the legality of an action never depends on what the network
-outputs for it.
+Two things retire with this change, and one closes as a side effect rather
+than as work of its own:
+
+- **``_is_retired`` retires.** Branch 1 of ``select_vehicle_possible_actions``
+  offers a vehicle parked at the depot past ``tau > 350`` only the depot, so it
+  can no longer claim a Client it cannot serve — the same protection
+  ``_is_retired`` gave, now expressed as one arm of the shared candidate
+  computation instead of a Policy-private clock check. One behavior
+  difference is deliberate, not a bug: ``_is_retired`` gated on
+  ``horizon_start_minute`` (a config clock, chosen to avoid colliding with
+  every vehicle's un-dispatched depot start at epoch 1); the shared branch
+  gates on the literal ``350`` instead. Adopting the *identical* set means
+  adopting that literal too, which is why this is a reversal of ADR-0007
+  rather than an amendment to it.
+- **``_depot_is_feasible`` retires.** Its condition 2 (the return leg already
+  breaches the shift: ``tau + average_minutes(position, depot) >
+  shift_end_minute``) *is* branch 3's own depot-append condition, literally
+  the same formula; its condition 1 (no Client feasible) is subsumed by every
+  branch's fallback to ``[depot]`` when nothing else survives.
+- **The ``claimed_mask`` defect closes.** Ticket 08 left it open: the old
+  ``claimed_mask`` was rebuilt fresh every ``_sweep`` call, so it only ever
+  knew about vehicles already decided *this* pass — never a not-yet-processed
+  vehicle's in-flight target from the previous decision epoch, the way
+  ``MonteCarloPolicy`` seeds ``forbidden_actions`` from ``self.action`` for
+  every other vehicle. Threading ``self.action`` through as ``current_action``
+  adopts that behavior for free.
+
+Two things ``action_set.py`` does not know about, because they are not part of
+the linear baseline's own rule, stay Policy-side, layered on top of whatever
+it returns:
+
+1. **No double booking within this pass** (the B11 invariant) — the same
+   guarantee as before ADR-0011, now arising from ``select_vehicle_possible_actions``
+   excluding ``current_action``'s other entries rather than from a locally
+   rebuilt mask.
+2. **No self-node** (``simulator-correctness`` ticket 11, B20, ADR-0008): a
+   pending Client the vehicle is already standing on is not a candidate —
+   there is nothing to travel to. ADR-0008 leaves ``monte_carlo.py`` untouched
+   because "its own candidate rules already exclude a vehicle's current node
+   by construction"; that argument is about how the linear baseline happens to
+   call the shared function, not a property of the function itself, so
+   :meth:`TransformerMonteCarloPolicy._sweep` still filters it explicitly —
+   in both the greedy and the ε-exploration branch — falling back to the
+   depot if nothing survives the filter. The depot is never filtered by
+   either rule.
+
+``claimed`` is additionally fed to the network as an input (spec.md decision
+6: "claimed enters at the head"), computed the same way it always has been —
+a mask over every *pending* Client, not only the ``m + 2`` candidates — so a
+trained network's *predictions* can still account for contention beyond the
+shortlist. One consequence of the shortlist worth naming rather than
+rediscovering by surprise: since ``select_vehicle_possible_actions`` already
+excludes every other vehicle's current target from the candidates it returns,
+``claimed`` is now **structurally ``False`` for every candidate the argmin
+actually considers** — informative for the rows the argmin ignores, constant
+for the rows it does not. The legality of an action never depended on what
+the network output for it before ADR-0011 either; that discipline is
+unchanged, only which candidates reach the argmin at all is different.
+
+**``is_depot``/``DEPOT_WARM_START_PENALTY``: kept, decided by measurement.**
+With the depot now entering the candidate list only where
+``select_vehicle_possible_actions`` itself admits it (forced retirement, or a
+shift-breach append competing with real Clients), the question this ticket
+opened was whether the penalty still earns its keep. Measured directly
+(``.scratch/neural-policy/results/action_set_m2_50.py``): the untrained
+``cost`` warm start over the 50 ``evaluation_seeds`` reads 3365.09 at
+``DEPOT_WARM_START_PENALTY = 1.0`` (as shipped) against 3364.52 at ``0.0`` —
+**-0.02%, 1/50 seeds differ, Wilcoxon p = 0.317**. Not a close call the
+penalty is winning; a null result. The structural prediction ("the depot
+rarely competes any more") holds, and the penalty is left in place rather
+than retired on it: it costs nothing where it no longer matters and is still
+correct where it does (the shift-breach window, where the depot genuinely
+does compete against real Clients in the argmin) — a null measurement is a
+reason not to touch working code, not a reason to remove it.
 
 ## The depot's Q value
 
@@ -79,9 +159,13 @@ The flag alone is a **prior, not a guarantee** — measured on the mini fixture,
 one episode of training is enough for ``QHead``'s Xavier-random background
 units to overtake row 0 and put the depot back under every Client, at which
 point the fleet retires again and the Episode stops producing training signal.
-:meth:`TransformerMonteCarloPolicy._depot_is_feasible` is what makes that
-unreachable; the flag is what keeps the *untrained* policy honest inside the
-window where heading home is legal.
+Since ADR-0011, it is ``select_vehicle_possible_actions``'s own branches —
+not a Policy-private ``_depot_is_feasible`` — that keep the depot from being
+offered as a candidate at all outside the window where heading home is legal;
+the flag is what keeps the *untrained* policy honest inside that window, where
+the depot competes with real Clients in the argmin like any other candidate.
+See "ADR-0011" above for whether the penalty is still earning its keep now
+that the depot enters far less often — decided by measurement, not argument.
 
 ## Why ``_already_acquired_cost`` is duplicated, not shared
 
@@ -217,8 +301,9 @@ import torch
 import torch.nn.functional as functional
 
 from stdvrp.network.episode_geometry import EpisodeGeometry
+from stdvrp.policies.action_set import select_vehicle_possible_actions
 from stdvrp.policies.base import Policy
-from stdvrp.policies.feature_extraction import TimeWindows
+from stdvrp.policies.feature_extraction import FeatureExtractor, TimeWindows
 from stdvrp.policies.network import Embeddings, QHead, TokenEncoder
 from stdvrp.policies.tokenizer import tokenize
 from stdvrp.simulation.state import is_parked_at_depot
@@ -246,6 +331,15 @@ class CalibrationPair(NamedTuple):
 # "Why _already_acquired_cost is duplicated, not shared").
 _DELAY_COST_FACTOR = 1.0
 _OVERTIME_COST_FACTOR = 5 / 6
+
+# Ticket 14: MonteCarloPolicy's other two hardcoded cost factors, needed only
+# to satisfy FeatureExtractor's constructor -- state_features() (the only
+# method this Policy calls) never reads them, only action_features() /
+# candidate_features() do, and this Policy calls neither. Duplicated for the
+# same reason as the two constants above: sharing them would mean importing
+# from or editing monte_carlo.py.
+_EARLINESS_COST_FACTOR = 0.1
+_SERVICE_TIME = 5.0
 
 
 class TransformerMonteCarloPolicy(Policy):
@@ -324,6 +418,31 @@ class TransformerMonteCarloPolicy(Policy):
         self._episode_length = float(episode_end_minute - horizon_start_minute)
         self._return_scale = float(number_clients) * self._episode_length
 
+        # Ticket 14 (ADR-0011): the shared action_set module, at the linear
+        # baseline's own m + 2 -- see this module's docstring, "ADR-0011".
+        self.feature_extractor = FeatureExtractor(
+            geometry,
+            time_windows,
+            number_vehicles=number_vehicles,
+            number_clients=number_clients,
+            depot=depot,
+            shift_end_minute=shift_end_minute,
+            episode_end_minute=episode_end_minute,
+            service_time=_SERVICE_TIME,
+            delay_cost_factor=_DELAY_COST_FACTOR,
+            earliness_cost_factor=_EARLINESS_COST_FACTOR,
+            overtime_cost_factor=_OVERTIME_COST_FACTOR,
+        )
+        self._number_actions = number_vehicles + 2
+        # select_vehicle_possible_actions' current_action -- mutated in place
+        # vehicle by vehicle inside _sweep, exactly as MonteCarloPolicy.action
+        # is (Model.run_training_episode's own comment already documents this
+        # aliasing generically as "policy.action"). Starts at the depot for
+        # every vehicle: depot is never a member of clients_not_visited, so an
+        # unprocessed vehicle's sentinel excludes nothing from anyone else's
+        # candidates until it has actually decided something.
+        self.action: list[int] = [depot] * number_vehicles
+
         # Ticket 07: the mean (standardized) Huber loss over every minibatch of
         # the most recent learn() call -- not part of the TrainablePolicy
         # protocol (learn returns None, matching MonteCarloPolicy), read
@@ -345,12 +464,29 @@ class TransformerMonteCarloPolicy(Policy):
 
     def _sweep(
         self,
-        state: State | TrainingSnapshot,
+        state: State,
         *,
         epsilon: float = 0.0,
         rng: np.random.Generator | None = None,
     ) -> list[int]:
-        """One encoder pass, then ``m`` cheap per-vehicle head passes (spec.md decision 6)."""
+        """One encoder pass, then ``m`` cheap per-vehicle head passes (spec.md decision 6).
+
+        Ticket 14 (ADR-0011): candidates come from
+        :func:`~stdvrp.policies.action_set.select_vehicle_possible_actions` —
+        the linear baseline's own, unmodified, at ``m + 2`` — with
+        ``self.action`` threaded through as ``current_action``. Two things are
+        layered on top, Policy-side, because ``action_set.py`` does not know
+        about either: the self-node exclusion (ADR-0008, B20 — the depot is
+        never filtered by it) and a depot fallback for the resulting empty set.
+        ``_is_retired``/``_depot_is_feasible`` retired with this change; see
+        this module's docstring, "ADR-0011", for where their reasoning went.
+
+        Narrower than ``decide``/``decide_train``'s shared ancestor type: only
+        ``State`` has the mutable identity ``select_vehicle_possible_actions``
+        expects, and ``_sweep`` is never called with a ``TrainingSnapshot`` —
+        ``_replay_joint_q`` below is the snapshot-replay path, and it does not
+        call this method.
+        """
         tokens = tokenize(
             state,
             self.geometry,
@@ -360,143 +496,55 @@ class TransformerMonteCarloPolicy(Policy):
             episode_end_minute=self.episode_end_minute,
         )
         embeddings = self.encoder(tokens)
+        features = self.feature_extractor.state_features(state)
 
-        tau = float(state.tau_episode)
         pending = list(state.clients_not_visited)
         n_pending = len(pending)
         pending_array = np.asarray(pending)
-        claimed_mask = np.zeros(n_pending, dtype=np.bool_)
-        action = [self.depot] * self.number_vehicles
+        pending_index = {client: index for index, client in enumerate(pending)}
 
         for vehicle in range(self.number_vehicles):
             vehicle_position = state.last_node_reached[vehicle]
-            if self._is_retired(tau, vehicle_position, state.vehicle_standing[vehicle]):
-                # Already home for good: the depot, and -- the part that matters
-                # -- no claim. See :meth:`_is_retired`.
-                continue
+            # Mirrors what select_vehicle_possible_actions computes internally
+            # from current_action (it does not expose the list separately):
+            # every other vehicle's target, freshly decided this pass or still
+            # holding last epoch's in-flight one. Needed here only for the
+            # `claimed` input feature below -- action_set already applies the
+            # same exclusion to the candidate set itself.
+            forbidden_ids = [self.action[v] for v in range(self.number_vehicles) if v != vehicle]
 
-            # ADR-0008: a node the vehicle is already on is not a travel
-            # destination -- there is nothing to travel to. Policy-side
-            # feasibility, not a heuristic (unlike ``claimed_mask``, this
-            # never applies to the depot, which keeps both its meanings).
-            infeasible_mask = claimed_mask | (pending_array == vehicle_position)
-            depot_feasible = self._depot_is_feasible(
-                tau,
-                vehicle_position,
-                no_client_feasible=not bool(n_pending) or bool(infeasible_mask.all()),
+            candidates = select_vehicle_possible_actions(
+                self._number_actions,
+                vehicle,
+                features,
+                state,
+                self.action,
+                self.geometry,
+                self.depot,
+                self.number_vehicles,
+                self.shift_end_minute,
             )
+            candidates = [c for c in candidates if c == self.depot or c != vehicle_position]
+            if not candidates:
+                candidates = [self.depot]
 
             if epsilon > 0.0 and rng is not None and rng.random() < epsilon:
-                feasible = [index for index in range(n_pending) if not infeasible_mask[index]]
-                if depot_feasible:
-                    feasible.append(n_pending)  # the depot sentinel
-                chosen = int(rng.choice(feasible))
+                chosen_id = int(rng.choice(candidates))
             else:
+                claimed_mask = np.isin(pending_array, forbidden_ids)
                 q = self._score(embeddings, vehicle, pending, claimed_mask)
+                allowed = torch.zeros(n_pending + 1, dtype=torch.bool, device=self.device)
+                for candidate in candidates:
+                    index = n_pending if candidate == self.depot else pending_index[candidate]
+                    allowed[index] = True
                 masked = q.clone()
-                if n_pending:
-                    infeasible = torch.from_numpy(infeasible_mask).to(self.device)
-                    masked[:n_pending][infeasible] = float("inf")
-                if not depot_feasible:
-                    masked[n_pending] = float("inf")
-                chosen = int(torch.argmin(masked).item())
+                masked[~allowed] = float("inf")
+                winner = int(torch.argmin(masked).item())
+                chosen_id = self.depot if winner == n_pending else pending[winner]
 
-            if chosen == n_pending:
-                action[vehicle] = self.depot
-            else:
-                action[vehicle] = pending[chosen]
-                claimed_mask[chosen] = True
+            self.action[vehicle] = chosen_id
 
-        return action
-
-    def _is_retired(self, tau: float, vehicle_position: float, standing: bool) -> bool:
-        """Has this vehicle already gone home for good? Then it gets no Client.
-
-        A vehicle that reaches the depot is parked (``FleetRoutes.park``) and
-        ``Model._reroute_for`` has **no branch that fires for a parked
-        vehicle** — none of its three guards can be true once ``arrival_tau ==
-        PARKED`` and ``departure_tau == 0``. Whatever this Policy names for
-        that vehicle is silently discarded by the simulator.
-
-        Silently discarded, but not harmless: :meth:`_sweep` claims whatever it
-        assigns, and ``claimed_mask`` is what stops *another* vehicle taking
-        the same Client. A retired vehicle handed the nearest pending Client
-        therefore **starves** it — it cannot go itself, and it has locked out
-        everyone who could — every decision epoch for the rest of the Episode,
-        until that Client is charged unserved at termination. This never fired
-        before the depot warm start was corrected (``network.py``) only because
-        the bug it fixes got there first: a parked vehicle scored the depot at
-        exactly ``0`` and so never claimed anything.
-
-        "Home for good" is read off the two State fields ``is_parked_at_depot``
-        already combines, plus one clock: **after the first decision epoch**, a
-        vehicle standing on the depot has been there since it parked.
-        ``horizon_start_minute`` is the exclusion because at ``tau ==
-        horizon_start_minute`` the whole fleet is standing on the depot
-        *un*-dispatched, indistinguishable from retired by State alone — and
-        ``begin_arc`` clears ``vehicle_standing`` the instant a vehicle is
-        dispatched, so from the second epoch on the two cases no longer
-        collide. ``MonteCarloPolicy._select_vehicle_possible_actions`` draws
-        the same distinction with ``is_parked_at_depot(...) and tau > 350``;
-        this is that rule with the config clock the ``350`` literal was
-        standing in for (``monte_carlo.py``'s own module docstring lists it
-        under "Depot-idle cutoffs are inconsistent literals that ignore the
-        configured horizon").
-        """
-        return tau > self.horizon_start_minute and is_parked_at_depot(
-            vehicle_position, standing, self.depot
-        )
-
-    def _depot_is_feasible(
-        self, tau: float, vehicle_position: float, *, no_client_feasible: bool
-    ) -> bool:
-        """May this vehicle head home this decision epoch? (ADR-0007, amended.)
-
-        Going to the depot is not a travel action like any other: ``Model``
-        parks the vehicle (``FleetRoutes.arrival_tau = PARKED``), and
-        ``Model._reroute_for`` reroutes only *travelling* vehicles, so the
-        vehicle never works again this Episode. When every vehicle has been
-        retired, ``Model.transition_function`` ends the Episode and charges
-        every pending Client as unserved. "Return to the depot" therefore does
-        not mean "travel there", it means **"retire this vehicle"** — and
-        retiring while there is still servable work is not a decision the
-        Policy is allowed to explore its way into. Two conditions make it legal:
-
-        1. **There is nothing left to travel to** — no pending Client is
-           feasible for this vehicle (all served, all claimed by another
-           vehicle, or the only one left is the node it already stands on).
-           This is the pre-existing fallback, and it is what makes the depot
-           the terminal action of a finished Episode.
-        2. **The return leg already breaches the shift** — ``tau +
-           average_minutes(position, depot) > shift_end_minute``. Past that
-           point the vehicle is on overtime whatever it does, and heading home
-           is the only way to stop the meter. This is the same condition
-           ``MonteCarloPolicy._select_vehicle_possible_actions`` gates the
-           depot behind, minus its ``350``/``310`` literals: a config clock and
-           an ``EpisodeGeometry`` read, both already permitted (ADR-0006).
-
-        **This amends ADR-0007's "the depot is always legal".** That clause
-        rested on the depot being one more destination the network could learn
-        to price, but it is an absorbing, irreversible exit whose warm-started
-        score is ``0`` for a vehicle standing on it — so ticket 08's Gate A run
-        retired the whole fleet at decision epoch 1 of every evaluation
-        Episode, measured the "null model" at mean cost 81 701 against the
-        linear baseline's 2 483, and never recovered: a one-transition Episode
-        produces almost no training signal, so the network could not learn its
-        way out of the trap it had fallen into. The warm-start penalty
-        (``network.py``) alone was measured insufficient — one Episode of
-        training is enough for ``QHead``'s background units to overtake row 0
-        and put the depot back under every Client. B11-style masking is how
-        this Policy already expresses a constraint the argmin must not be able
-        to violate; this is one more of them, not a ranking heuristic: within
-        the window where going home is legal, *which* action wins is still
-        entirely the network's call.
-        """
-        if no_client_feasible:
-            return True
-        return tau + self.geometry.average_minutes(vehicle_position, self.depot) > (
-            self.shift_end_minute
-        )
+        return self.action
 
     def _score(
         self,

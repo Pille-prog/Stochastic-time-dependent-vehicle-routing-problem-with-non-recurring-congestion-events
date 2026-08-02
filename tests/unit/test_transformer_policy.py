@@ -255,9 +255,13 @@ class TestSelfNodeNotACandidate:
 
 
 class TestHomeIsAnExitNotADestination:
-    """``_depot_is_feasible``: retiring a vehicle is legal only when there is
-    nothing left to travel to, or when the return leg already breaches the
-    shift. See that method's docstring for the Gate A measurement behind it."""
+    """Ticket 14 (ADR-0011): the depot's place in the candidate set is now
+    entirely ``select_vehicle_possible_actions``'s own branches, not a
+    Policy-private ``_depot_is_feasible``/``_is_retired`` (both retired).
+    ``tests/unit/test_action_set.py`` already pins the shared function's own
+    branch arithmetic directly (the 350 cutoff, the shift-breach depot
+    append, the no-Clients-left fallback); these tests pin that ``_sweep``
+    actually wires it in end to end."""
 
     def test_epsilon_exploration_never_retires_a_vehicle_with_work_left(self) -> None:
         """The whole ε budget spent on one vehicle that has servable Clients: the
@@ -274,29 +278,17 @@ class TestHomeIsAnExitNotADestination:
         assert DEPOT not in seen
         assert seen == set(clients), "exploration should still reach every feasible Client"
 
-    def test_the_depot_is_feasible_once_the_return_leg_breaches_the_shift(self) -> None:
-        """``MonteCarloPolicy``'s own depot gate, minus its 350/310 literals."""
-        geometry, time_windows, clients = make_world(3, seed=47)
-        policy = build_policy(geometry, time_windows, clients, number_vehicles=1)
-        minutes_home = geometry.average_minutes(clients[0], DEPOT)
-
-        assert not policy._depot_is_feasible(
-            SHIFT_END - minutes_home - 1.0, clients[0], no_client_feasible=False
-        )
-        assert policy._depot_is_feasible(
-            SHIFT_END - minutes_home + 1.0, clients[0], no_client_feasible=False
-        )
-
-    def test_a_retired_vehicle_gets_the_depot_and_claims_nothing(self) -> None:
-        """A parked vehicle's action is discarded by ``Model._reroute_for``, so a
-        Client it "claims" is starved: it cannot go, and the mask locks out
-        everyone who could. Vehicle 0 is home for good; vehicle 1 must still be
+    def test_a_parked_vehicle_past_the_350_cutoff_gets_the_depot_and_claims_nothing(
+        self,
+    ) -> None:
+        """Branch 1 (``is_parked_at_depot and tau > 350``) offers only the depot
+        -- no claim on a Client it cannot serve, so vehicle 1 must still be
         offered the Client nearest to it, not the runner-up."""
         geometry, time_windows, clients = make_world(4, seed=49)
         policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
         state = make_state(2, pending=clients, positions=[DEPOT, clients[0]])
         state.vehicle_standing = [True, True]
-        state.tau_episode = HORIZON_START + 2  # past the first decision epoch
+        state.tau_episode = 351.0  # the literal branch 1 gates on
 
         action = policy.decide(state)
 
@@ -307,9 +299,29 @@ class TestHomeIsAnExitNotADestination:
         )
         assert action[1] == nearest_to_one, "a retired vehicle's claim starved a Client"
 
+    def test_a_parked_vehicle_before_the_350_cutoff_still_gets_a_real_candidate(
+        self,
+    ) -> None:
+        """The retired ``_is_retired`` gated on ``horizon_start_minute``; the
+        shared module gates on the literal ``350`` instead -- a vehicle parked
+        at the depot between the two is now eligible for a real Client rather
+        than forced home. Adopting the identical action set means adopting
+        that literal too (this is why ticket 14 is a reversal of ADR-0007,
+        not an amendment to it)."""
+        geometry, time_windows, clients = make_world(4, seed=49)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=1)
+        state = make_state(1, pending=clients, positions=[DEPOT])
+        state.vehicle_standing = [True]
+        state.tau_episode = HORIZON_START + 2.0  # past the first epoch, still <= 350
+
+        action = policy.decide(state)
+
+        assert action[0] != DEPOT
+
     def test_the_whole_fleet_is_dispatchable_on_the_first_decision_epoch(self) -> None:
         """At ``tau == horizon_start_minute`` every vehicle stands on the depot
-        un-dispatched — State cannot tell that from retired, so the clock does."""
+        un-dispatched; branch 1's literal ``350`` cutoff already keeps every
+        vehicle out of the retired case without needing a first-epoch carve-out."""
         geometry, time_windows, clients = make_world(4, seed=50)
         policy = build_policy(geometry, time_windows, clients, number_vehicles=3)
         state = make_state(3, pending=clients, positions=[DEPOT, DEPOT, DEPOT])
@@ -317,11 +329,58 @@ class TestHomeIsAnExitNotADestination:
         assert state.tau_episode == HORIZON_START
         assert DEPOT not in policy.decide(state)
 
-    def test_the_depot_is_feasible_whenever_no_client_is(self) -> None:
-        geometry, time_windows, clients = make_world(3, seed=48)
-        policy = build_policy(geometry, time_windows, clients, number_vehicles=1)
 
-        assert policy._depot_is_feasible(float(HORIZON_START), DEPOT, no_client_feasible=True)
+class TestCurrentActionIsSelfAction:
+    """Ticket 14 (ADR-0011): ``self.action`` *is* ``current_action`` -- the
+    mechanism that closes ticket 08's ``claimed_mask`` defect. The old
+    ``claimed_mask`` was rebuilt fresh every ``_sweep`` call, so a
+    not-yet-processed vehicle's in-flight target from the *previous* decision
+    epoch never excluded anything from an earlier vehicle's candidates.
+    ``MonteCarloPolicy.action`` already avoids that (``Model.py``'s own
+    comment: "``policy.action`` is mutated on every later decision"); this
+    Policy now shares the same mechanism because it shares the same function.
+    """
+
+    def test_self_action_starts_at_the_depot_for_every_vehicle(self) -> None:
+        geometry, time_windows, clients = make_world(4, seed=60)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=3)
+
+        assert policy.action == [DEPOT, DEPOT, DEPOT]
+
+    def test_current_action_passed_to_the_shared_module_is_self_action(self) -> None:
+        """A stale in-flight target set directly on ``policy.action`` (as if
+        left there by the previous decision epoch) reaches
+        ``select_vehicle_possible_actions`` as ``current_action`` for a vehicle
+        processed *before* the one holding it -- proof the exclusion is not
+        limited to vehicles already decided this pass, at the same ``m + 2``
+        this ticket pins."""
+        geometry, time_windows, clients = make_world(3, seed=61)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        state = make_state(2, pending=clients)
+        stale_target = clients[0]
+        policy.action = [DEPOT, stale_target]
+
+        captured: dict[str, object] = {}
+        original = transformer_policy_module.select_vehicle_possible_actions
+
+        def spy(number_of_actions, vehicle, features, state_arg, current_action, *rest):
+            if vehicle == 0:
+                # Identity, not just equality: a callee that copied self.action
+                # instead of aliasing it would still pass a value comparison.
+                captured["is_self_action"] = current_action is policy.action
+                captured["number_of_actions"] = number_of_actions
+                captured["current_action"] = list(current_action)
+            return original(number_of_actions, vehicle, features, state_arg, current_action, *rest)
+
+        transformer_policy_module.select_vehicle_possible_actions = spy
+        try:
+            policy.decide(state)
+        finally:
+            transformer_policy_module.select_vehicle_possible_actions = original
+
+        assert captured["is_self_action"] is True
+        assert captured["current_action"] == [DEPOT, stale_target]
+        assert captured["number_of_actions"] == policy.number_vehicles + 2
 
 
 # --- One encoder pass per decision epoch --------------------------------------

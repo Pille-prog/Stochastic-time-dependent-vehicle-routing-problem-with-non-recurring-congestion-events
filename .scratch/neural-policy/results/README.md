@@ -1,9 +1,79 @@
-# Ticket 08 measurement artifacts
+# Measurement artifacts (tickets 08 and 13-17)
 
-The raw evidence behind issue `08-gate-a-does-it-learn.md`'s Comments. Kept
-here and not under `runs/`, which is gitignored: the numbers are transcribed
-into the ticket, but a transcription is not a result — anyone re-reading this
-in six months should be able to recompute the tables rather than trust them.
+The raw evidence behind issue `08-gate-a-does-it-learn.md`'s Comments and the
+redesign it handed to. Kept here and not under `runs/`, which is gitignored:
+the numbers are transcribed into the tickets, but a transcription is not a
+result — anyone re-reading this in six months should be able to recompute the
+tables rather than trust them.
+
+## The linear baseline's own null (ticket 14)
+
+- **`baseline_null_50.py`** / **`baseline_null_50.json`** /
+  **`baseline_null_50.log`** — three arms over the 50 `evaluation_seeds`,
+  through `EpisodeWorld.run_episode`, which is the identical path
+  `Trainer._run_evaluation_block` takes. `best_w @ m+2` reproduces ticket 01's
+  own episode-50 figure (2483.24) to the cent, which is what says the harness
+  is right.
+
+  | arm | mean | median |
+  |---|---|---|
+  | `W = 0` @ `m+2` | **30 791.43** | 30 627.72 |
+  | `best_w` @ `m+2` | 2483.24 | 2390.14 |
+  | `best_w` @ `m+40` (the card's winning cell) | 2168.39 | 2036.78 |
+
+  Two findings, one of them a refutation:
+
+  1. **The action count is worth 12.68%** (`m+40` vs `m+2`, 36/50 seeds,
+     Wilcoxon p = 8.24e-05) — the measured basis for ticket 14 reversing
+     ADR-0007. On `test_seeds` the same axis reads 2.1%: the effect
+     reproduces, its magnitude does not transfer.
+  2. **`W = 0` is not a myopic null.** It was predicted to be
+     "nearest allowed Client" (`X · W = 0` → `argmin` takes index 0 →
+     `_closest_allowed_clients` is nearest-first). Branch 3's
+     `list(set(possible_actions))` runs *after* the sort and node ids are
+     arbitrary ints, so the dedup returns hash-table order: `W = 0` picks an
+     **arbitrary** feasible Client. The linear baseline has no cheap myopic
+     null, and the candidate-set-versus-ranking decomposition has to wait for
+     ticket 14's own 2×2.
+
+  Read beside `warm_start_50.py` below — same 50 seeds — it also measures
+  **F12's winner's curse, and that it is policy-dependent**: a `W` selected on
+  `evaluation_seeds` reads 2168.39 there against 3384.82 on `test_seeds`
+  (×1.56), while cost-greedy reads 3693.23 against 3811.28 (×1.03). Any
+  quantity defined across the two seed sets is not well-defined; a Gate A′
+  threshold defined as "the gap to the baseline" was drafted and reverted on
+  exactly this.
+
+## The action set adopted: the missing 2×2 cell (ticket 14)
+
+- **`action_set_m2_50.py`** / **`action_set_m2_50.json`** /
+  **`action_set_m2_50.log`** — post-ticket-14 (the `m+2` `action_set.py`
+  shortlist live in `TransformerMonteCarloPolicy._sweep`), the untrained
+  `cost` warm start over the same 50 `evaluation_seeds`, two arms:
+
+  | arm | mean | median |
+  |---|---|---|
+  | cost @ `m+2`, `DEPOT_WARM_START_PENALTY = 1.0` (as shipped) | **3365.09** | 3376.23 |
+  | cost @ `m+2`, `DEPOT_WARM_START_PENALTY = 0.0` | 3364.52 | 3376.23 |
+
+  The first row is the cell `neural-policy` ticket 14's own table was missing
+  — cost-greedy ranking, the baseline's candidate set — completing the 2×2
+  that separates candidate set from ranking rule (full table in
+  `docs/adr/0011-the-action-set-is-shared-not-owned.md` and ticket 14's
+  Comments). Read against `warm_start_50.py`'s 3693.23 (cost-greedy at ~151
+  candidates, ranking rule held fixed): restricting to `m+2` is **8.9%
+  better** for the myopic dispatcher too, not only for a linear model that
+  cannot see far. Read against `baseline_null_50.py`'s 2168.39 (the linear
+  baseline's best cell, same seed set): the myopic base does **not** beat a
+  tuned 19-weight VFA at zero training here — the pre-declared branch for
+  "if it does" did not fire.
+
+  The two rows decide `is_depot`/`DEPOT_WARM_START_PENALTY`: **-0.02%, 1/50
+  seeds differ, Wilcoxon p = 0.317** — a null result. The penalty is kept
+  (costs nothing where it no longer matters, still correct where it does),
+  confirming the structural prediction that the depot now enters the `m+2`
+  candidate list only where `select_vehicle_possible_actions` itself admits
+  it, rather than by argument alone.
 
 ## Gate A
 
@@ -14,8 +84,12 @@ in six months should be able to recompute the tables rather than trust them.
   `test_seeds`, so every statistic in the ticket is recomputable:
   null 5299.48 -> trained 4423.73, +15.49% mean reduction, Wilcoxon
   p = 6.21e-05, calibration Spearman 0.5427 against -0.3487 untrained.
-  **Arms 1 and 2 land in `runs/gate_a_v2/results_init12.json`** — copy them
-  here alongside this file when they finish.
+  **This is `n = 1`.** Arms 1 and 2 were killed at episode 162 on 2026-08-02
+  when the learning rule they were testing was replaced (ticket 08's closing
+  comment); `results_init12.json` was never written, and Gate A part 2
+  (reproducibility) has never been measured. Cite the +15.49% with that
+  attached — `runs/gate_a_v2/gate_a_init1.pt` and `log_init12.txt` are what is
+  left of the arm.
 
 - **`gate_a_cost_warm_start_87ep.log`** — the arm launched with
   `neural_warm_start: cost`, stopped at episode 87 once it had made its point.
