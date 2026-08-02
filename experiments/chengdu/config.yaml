@@ -93,8 +93,42 @@ neural_batch_size: 32
 # Ticket 08 (Gate A stability): optional max L2 gradient norm per minibatch
 # step, over encoder+head jointly; null disables clipping. The other lever of
 # the lr/clipping stability sweep (evaluation_seeds only) -- not a frozen
-# acceptance parameter.
+# acceptance parameter. RETIRED since ticket 16: no gradient exists to clip.
 neural_grad_clip_norm: null
+
+# Ticket 16. The ridge estimator's own knobs (config.py's own docstring has
+# the fuller version of this note). Chosen on evaluation_seeds, on this exact
+# dataset, over four rounds
+# (.scratch/neural-policy/results/ridge_sweep*.{py,json,log}).
+#
+# *** NO CELL TESTED BEAT THE UNTRAINED NULL (3365.09). *** Rounds 1-2:
+# gamma=0.98, lambda in {1, 10, 100, 1e3, 1e4, 1e5} at N=50 (60 training
+# episodes) -- every cell scored 2.7x-10.7x the null, non-monotonically in
+# lambda (worst around 100-1,000). Round 3: lambda=1 at N=150 (150 episodes)
+# essentially matched N=50 (9039.89 vs 9152.26) -- ruling out "not enough
+# data accumulated yet" as the explanation, directly contradicting this
+# ticket's own "50 episodes ~= 20,000 samples should be enough" framing.
+# Round 4: lambda=1, N=50, gamma in {0.90, 0.95, 0.99} -- monotonic and
+# sensible, unlike lambda: 13476.03, 9622.48, 6978.45. gamma=0.99 (the
+# largest tried) is the best cell measured across all four rounds.
+# (Rounds 1-3 ran before code review found and fixed a scale-decay bug in
+# RidgeAccumulator -- raw_sum_sq not decaying like effective_n, its own
+# denominator -- inflating the frozen scale by an estimated ~26% at
+# N=50/gamma=0.98; round 4 already reflects the fix. That is far short of
+# explaining a 170%+ gap from the null, so the qualitative finding stands,
+# but rounds 1-3's absolute numbers are approximate.)
+#
+# lambda=1, gamma=0.99, N=50 is the least-bad cell measured, not a
+# validated-good one. Ticket 16's Comments carry the full numbers and a
+# working hypothesis (near-zero-variance feature columns can carry a
+# disproportionate physical-unit coefficient after standardization,
+# regardless of lambda). Ticket 17's Gate A' inherits this open question
+# directly -- its own lambda/gamma/N pass needs to either explain this or
+# search past it (gamma above 0.99 is the obvious next point on this round's
+# trend) before "does training add value" can be answered on this arm.
+neural_ridge_gamma: 0.99
+neural_ridge_lambda: 1.0
+neural_solve_cadence: 50
 
 # Ticket 08. The myopic warm start (network.py, "The warm start"; the weight
 # vectors are tokenizer.WARM_START_WEIGHTS). "minutes" is the bare

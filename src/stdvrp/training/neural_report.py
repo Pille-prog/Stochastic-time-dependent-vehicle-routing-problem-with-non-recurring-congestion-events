@@ -65,6 +65,18 @@ MIN_EVALUATION_CADENCE = 50
 #: however long it runs — the mechanism behind "scales with run length".
 TARGET_EVALUATION_BLOCKS = 40
 
+#: Ticket 16's mandatory mitigation for the ridge estimator's blind spot: an
+#: Episode the accumulator excluded (aborted at ``CLOCK_CEILING``, research
+#: note F10) supplies no gradient *away* from the abort region, so a policy
+#: that starts aborting degrades silently -- "the same 'small loss, destroyed
+#: policy' signature as ticket 08's failure, with a different cause" (this
+#: ticket's own words). A block whose exclusion rate reaches this ceiling is
+#: exactly that signal: healthy training excludes close to 0% of Episodes, so
+#: a run into double digits is already well past "rising" and into "acting on
+#: it is overdue." Not a config knob -- a protocol-level stop condition, the
+#: same status as :data:`PATIENCE_BLOCKS`/:data:`MAX_REDUCTIONS` above.
+EXCLUSION_RATE_STOP_THRESHOLD = 0.10
+
 
 def evaluation_cadence(
     episodes_completed: int,
@@ -107,17 +119,43 @@ def paired_wilcoxon_p(a: tuple[float, ...], b: tuple[float, ...]) -> float:
 
 @dataclass(frozen=True, slots=True)
 class EvaluationReport:
-    """One evaluation block, paired seed-by-seed against the reference card."""
+    """One evaluation block, paired seed-by-seed against the reference card.
+
+    ``training_episodes``/``excluded_episodes`` (ticket 16) are the training
+    Episodes run *since the previous block* (not the cumulative
+    ``episodes_completed``) and how many of those the ridge estimator excluded
+    as aborted (``TransformerMonteCarloPolicy._is_aborted`` /
+    ``RidgeAccumulator.episodes_excluded``). Both default to ``0`` so a
+    caller building a report without them (every test predating ticket 16)
+    keeps working unchanged, at :attr:`exclusion_rate` ``0.0``.
+    """
 
     episodes_completed: int
     seed_costs: tuple[float, ...]
     reference_seed_costs: tuple[float, ...]
+    training_episodes: int = 0
+    excluded_episodes: int = 0
 
     def __post_init__(self) -> None:
         if len(self.seed_costs) != len(self.reference_seed_costs):
             raise ValueError("seed_costs and reference_seed_costs must be the same paired length")
         if not self.seed_costs:
             raise ValueError("an evaluation block must have at least one paired seed")
+        if self.excluded_episodes > self.training_episodes:
+            raise ValueError("excluded_episodes cannot exceed training_episodes")
+
+    @property
+    def exclusion_rate(self) -> float:
+        """Fraction of this block's training Episodes the estimator excluded.
+
+        ``0.0`` when ``training_episodes`` is ``0`` (a report built without
+        that count at all, or the degenerate case of a block following zero
+        training Episodes) rather than raising on a division by zero -- the
+        live report must never crash a training run over this diagnostic.
+        """
+        if self.training_episodes == 0:
+            return 0.0
+        return self.excluded_episodes / self.training_episodes
 
     @property
     def mean_cost(self) -> float:
@@ -233,6 +271,22 @@ def hit_safety_cap(
     return episodes_completed >= max_episodes or elapsed_seconds >= max_hours * 3600.0
 
 
+def exclusion_rate_stop_signal(
+    report: EvaluationReport, *, threshold: float = EXCLUSION_RATE_STOP_THRESHOLD
+) -> bool:
+    """Ticket 16's mandatory mitigation: "a rising exclusion rate is a stop
+    signal."
+
+    A run that starts aborting is exactly what the ridge estimator is blind
+    to (module docstring at :data:`EXCLUSION_RATE_STOP_THRESHOLD`), so this is
+    checked every block, unconditionally -- not only when something else
+    already looks wrong. ``threshold`` defaults to the frozen protocol value;
+    a caller only ever overrides it to make a test's trigger reachable
+    without needing a genuinely diverging policy.
+    """
+    return report.exclusion_rate >= threshold
+
+
 # --- Formatting ------------------------------------------------------------------
 
 
@@ -291,8 +345,17 @@ def format_evaluation_block(report: EvaluationReport, state: ConvergenceState) -
         f"    Wilcoxon p={p_display}",
         f"              best so far: {state.best_delta_pct:+.1f}% @ep{state.best_episode}"
         f"     no improvement: {state.blocks_without_improvement}/{PATIENCE_BLOCKS} blocks",
-        _BLOCK_RULE,
     ]
+    # Ticket 16: "log the exclusion count and rate per evaluation block" --
+    # only printed once there is a training-episode count to rate against
+    # (every real run; some pre-ticket-16 reports built for other tests omit
+    # it, at its 0/0 default).
+    if report.training_episodes > 0:
+        lines.append(
+            f"              excluded {report.excluded_episodes}/{report.training_episodes} "
+            f"training episodes ({report.exclusion_rate * 100:.1f}%)"
+        )
+    lines.append(_BLOCK_RULE)
     return "\n".join(lines)
 
 

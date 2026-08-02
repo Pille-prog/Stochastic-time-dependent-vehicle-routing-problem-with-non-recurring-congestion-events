@@ -4,7 +4,10 @@ The ``TrainablePolicy`` (ticket 02) that scores every pending Client with the
 ticket-05 ``TokenEncoder``/``QHead`` and argmins over the linear baseline's own
 ``m + 2`` candidates (ticket 14, ADR-0011) rather than the whole scored row, and
 learns from the same Monte Carlo return ``MonteCarloPolicy.learn`` targets.
-Imports torch at module scope, like
+Since ticket 16, ``learn`` fits that target by accumulating normal equations
+across Episodes into a :class:`~stdvrp.policies.ridge_estimator.RidgeAccumulator`
+and re-solving on a cadence, rather than by an Adam step per Episode --
+see "The estimator" below. Imports torch at module scope, like
 ``network.py``: this file's whole reason to exist is the network, so it must
 never be imported from ``stdvrp.policies.__init__`` or any module reachable at
 package-import time. Callers import it explicitly:
@@ -183,6 +186,65 @@ the depot competes with real Clients in the argmin like any other candidate.
 See "ADR-0011" above for whether the penalty is still earning its keep now
 that the depot enters far less often — decided by measurement, not argument.
 
+## The estimator (ticket 16): accumulated ridge, not per-Episode Adam
+
+``learn`` no longer runs any gradient step. ``QHead.linear``/``layer2`` (the
+only parameters with a nonzero ``W`` at any point after init -- ``network.py``,
+"The myopic base") are now fit exactly, in closed form, by
+:class:`~stdvrp.policies.ridge_estimator.RidgeAccumulator`, which this class
+owns as ``self.ridge`` (injected, mutated in place, and carried by the caller
+across Episodes exactly the way ``encoder``/``head`` already are -- see
+``neural_episode.py``'s ``NeuralPolicyState``). ``encoder``/``head.layer1``
+are not touched by this ticket at all: nothing in ``learn`` computes a
+gradient any more, so they simply stay at whatever random weights ``__init__``
+drew (the "frozen encoder" arm; ticket 17's "trained encoder" arm, which
+resumes training them by SGD on the same residual, is a later ticket's work --
+see spec.md's "Two timescales").
+
+For every decision epoch of a (non-aborted) Episode, ``learn`` builds:
+
+::
+
+    Phi_t = sum_v phi(s, v, a_v)                    QHead.features(...), summed
+    y_t   = targets[t] / _return_scale - sum_v c(s, v, a_v)
+
+(:meth:`_replay_joint_features`, one encoder pass per epoch, mirroring
+:meth:`_replay_joint_q`'s own replay) and folds the whole Episode's
+``(Phi_t, y_t)`` rows into ``self.ridge`` in one
+:meth:`~stdvrp.policies.ridge_estimator.RidgeAccumulator.observe_episode`
+call. Every ``neural_solve_cadence`` Episodes (``self.solve_cadence``,
+tracked by the accumulator's own ``episodes_since_solve``), the normal
+equations are re-solved and the result is written straight onto
+``QHead.linear``/``layer2`` via :meth:`~stdvrp.policies.network.QHead.load_w_vector`
+-- the only way those four parameters ever move now. Before the first solve
+(and whenever the accumulator has seen no usable data yet) the solve returns
+the zero vector, which is exactly ``QHead``'s own zero-init -- ticket 15's
+null is this ticket's start state, not merely its limit as training data
+shrinks to nothing.
+
+**Aborted Episodes are excluded, not merely down-weighted** (:meth:`_is_aborted`,
+research note F10, ``ridge_estimator.py``'s own "Aborted Episodes are
+excluded" section): ``learn``'s frozen ``TrainablePolicy`` signature — shared
+structurally with ``MonteCarloPolicy.learn``, which this ticket does not touch
+— carries no explicit "this Episode aborted" flag, so the detection reads it
+off the one place ``ABORT_PENALTY - 200 * served`` is guaranteed to show up:
+the final transition's reward. ``served <= self.number_clients`` always, so
+``ABORT_PENALTY - ABORT_PENALTY_PER_SERVED_CLIENT * self.number_clients`` (a
+constant computed once, at construction) is a guaranteed floor under any
+abort's actual penalty for this Episode's demand, and far above any single
+non-aborted transition's plausible cost. An excluded Episode still ages the
+accumulator's memory (``self.ridge``'s own forgetting is applied on every
+call, aborted or not) -- it contributes nothing *new*, but it does not freeze
+the window in place either.
+
+``self.last_loss`` (read by the Trainer's live per-episode report, not part of
+the ``TrainablePolicy`` protocol) is repurposed from "the mean training loss
+over this episode's minibatch passes" to "the mean squared residual this
+Episode's samples show against the *entering* ``W``" — ``mean((y_t - Phi_t .
+w_vector)**2)``, computed before this call's potential re-solve. It is not
+touched on an aborted or empty Episode (matching the pre-ticket-16 behaviour
+of leaving it at its last value when ``learn`` has nothing to fit).
+
 ## Why ``_already_acquired_cost`` is duplicated, not shared
 
 ``learn``'s target is exactly ``update_W``'s: backward Monte Carlo return
@@ -244,11 +306,29 @@ Neither version changes what ``decide``'s argmin selects at a given set of
 weights: scaling every candidate's ``Q`` by the same positive constant preserves
 their relative order. What it changes is what *training* does to those weights.
 
+**Ticket 16 keeps exactly this asymmetry, with no loss left to have a shape at
+all.** There is no more Huber knee, no more ``delta`` (``neural_huber_delta``
+retires -- ``config.py``) and nothing analogous to "the prediction is not
+divided" to get wrong, because ``learn`` never computes ``Q`` as a scalar
+prediction to compare against a target any more: the regression's own target
+is ``y_t = targets[t] / _return_scale - sum_v c(s, v, a_v)`` (module docstring,
+"The estimator") -- ``c`` is subtracted from the *already-scaled* return
+directly, in the residual itself, rather than added back on the other side of
+a loss. The reasoning above for why ``c``/``Q`` must never be divided by
+``_return_scale`` is what justifies subtracting an *undivided* ``c`` from a
+*divided* target here; it is no longer a loss-shape nicety, it is the formula.
+
 ## One sample per decision epoch, over the *joint* action
 
 ``learn`` regresses ``Q_joint(s, a) = sum_v Q(s, v, a_v)`` — the whole action
 row's summed score — onto that epoch's Monte Carlo return. One sample per
-decision epoch, not ``m``.
+decision epoch, not ``m``. Ticket 16 keeps this structure exactly: the
+regression is over ``Phi_t = sum_v phi(s, v, a_v)`` against
+``y_t = targets[t]/_return_scale - sum_v c(s, v, a_v)`` (module docstring,
+"The estimator") rather than ``Q_joint`` against the raw target, but it is the
+same joint-over-vehicles sum, for the same reason -- everything below still
+explains why *that* structure is the right one; only the estimator fitting it
+changed.
 
 This is what the linear baseline already does, read off its own code rather
 than invented here. ``MonteCarloPolicy.learn`` builds **one** ``X`` per epoch
@@ -297,6 +377,21 @@ was implemented, measured, and rejected: see ``network.py``, "A dueling
 decomposition of ``Q`` — tried, measured, and rejected", including *why* it
 made things worse rather than better.
 
+**Ticket 16 pays for it, by changing the unit of estimation rather than the
+decomposition.** The diagnosis above is about *one Episode's* ~400 samples:
+within a single Episode ``U_t`` is a suffix sum, monotone in ``t``, and the
+global token carries the clock directly, so 595k (now 515, ticket 15)
+parameters fit it almost perfectly by reading ``t`` — the action carries no
+incremental explanatory power *within* one Episode, only *across* them
+(spec.md's redesign section, ticket 16's own issue). ``self.ridge``
+accumulates across ~50 Episodes before its first solve at the default
+cadence, at which point the sample count genuinely exceeds the parameter
+count (515 parameters against ~20 000 samples, rather than 595k against
+~400) and the joint sum's own signal is no longer drowned by one Episode's
+own clock. The dueling remedy above stays rejected on its own terms (module
+docstring there covers why); this is a different fix, aimed at the unit of
+estimation rather than the split within one Episode's sum.
+
 **A tried-and-rejected variant, so it is not re-tried naively:** ticket 08
 measured ~24-33 % of these samples carrying an action the simulator discarded
 (a mid-service vehicle — ``Model._reroute_for``'s first branch never reads
@@ -313,19 +408,19 @@ filter was reverted on that evidence; the full-row sum below is deliberate.
 
 from __future__ import annotations
 
-from itertools import chain
 from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import torch
-import torch.nn.functional as functional
 
 from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.policies.action_set import select_vehicle_possible_actions
 from stdvrp.policies.base import Policy
 from stdvrp.policies.feature_extraction import FeatureExtractor, TimeWindows
 from stdvrp.policies.network import Embeddings, QHead, TokenEncoder
+from stdvrp.policies.ridge_estimator import RidgeAccumulator
 from stdvrp.policies.tokenizer import tokenize
+from stdvrp.simulation.cost_ledger import ABORT_PENALTY, ABORT_PENALTY_PER_SERVED_CLIENT
 from stdvrp.simulation.state import is_parked_at_depot
 
 if TYPE_CHECKING:
@@ -365,12 +460,15 @@ _SERVICE_TIME = 5.0
 class TransformerMonteCarloPolicy(Policy):
     """The transformer approximator: greedy/epsilon-greedy decide, Monte Carlo learn.
 
-    Owns no trainable state of its own — ``encoder``/``head``/``optimizer`` are
+    Owns no trainable state of its own — ``encoder``/``head``/``ridge`` are
     injected, mutated in place by :meth:`learn`, and are the caller's to keep
     alive across Episodes (ticket 07's Trainer does exactly this: one Policy
     instance is built fresh per Episode around the same long-lived network and
-    optimizer, mirroring how ``MonteCarloPolicy``'s ``W`` flows in and out —
-    except here the mutation is in-place on shared objects, not a fresh array).
+    ridge accumulator, mirroring how ``MonteCarloPolicy``'s ``W`` flows in and
+    out — except here the mutation is in-place on shared objects, not a fresh
+    array). Since ticket 16, ``encoder``/``head.layer1`` are never mutated by
+    this class at all on the frozen-encoder arm -- only ``head.linear``/
+    ``head.layer2``, and only by :meth:`learn`'s ridge solve.
     """
 
     def __init__(
@@ -386,15 +484,11 @@ class TransformerMonteCarloPolicy(Policy):
         horizon_start_minute: int,
         encoder: TokenEncoder,
         head: QHead,
-        optimizer: torch.optim.Optimizer,
+        ridge: RidgeAccumulator,
         *,
         exploration_rng: np.random.Generator,
-        learn_rng: np.random.Generator,
-        learn_passes: int,
-        batch_size: int,
+        solve_cadence: int = 1,
         device: torch.device | None = None,
-        grad_clip_norm: float | None = None,
-        huber_delta: float = 1.0,
     ) -> None:
         self.number_vehicles = number_vehicles
         self.geometry = geometry
@@ -407,18 +501,15 @@ class TransformerMonteCarloPolicy(Policy):
         self.horizon_start_minute = horizon_start_minute
         self.encoder = encoder
         self.head = head
-        self.optimizer = optimizer
-        self.learn_passes = learn_passes
-        self.batch_size = batch_size
-        # Ticket 08 (stability sweep): optional max L2 norm for one minibatch
-        # step's gradient, over encoder+head jointly. None disables clipping.
-        self.grad_clip_norm = grad_clip_norm
-        # Ticket 08: where the Huber loss switches from quadratic to linear.
-        # torch's default of 1.0 is far above every residual this regression
-        # produces (see ``learn``), so it is exactly ``0.5 * MSE`` -- see
-        # ``ExperimentConfig.neural_huber_delta``. Kept as the default here so
-        # every direct-construction call site is unchanged.
-        self.huber_delta = huber_delta
+        # Ticket 16: the accumulated-least-squares estimator (module
+        # docstring, "The estimator") -- the caller's to keep alive across
+        # Episodes, exactly like encoder/head.
+        self.ridge = ridge
+        # How many learn() calls (Episodes) pass between one ridge solve and
+        # the next -- ExperimentConfig.neural_solve_cadence. 1 (the default)
+        # re-solves every Episode; every direct-construction call site (the
+        # unit tests among them) keeps working unchanged.
+        self.solve_cadence = solve_cadence
         # Ticket 12: this class builds several ad hoc tensors of its own (the
         # infeasible mask, claimed, the depot arc pair, learn's target) that
         # are never part of encoder/head's parameters, so `.to(device)` at
@@ -430,13 +521,21 @@ class TransformerMonteCarloPolicy(Policy):
 
         # Ticket 13 discipline (ADR-0001 phase 2): one injected Generator per
         # stochastic concern, never a global. ``exploration_rng`` is
-        # decide_train's epsilon gate and exploratory pick; ``learn_rng`` is
-        # learn's minibatch shuffle.
+        # decide_train's epsilon gate and exploratory pick. Ticket 16 retires
+        # the second stream this class used to need (``learn_rng``, the
+        # per-episode minibatch shuffle) -- the ridge solve has no shuffling
+        # of anything to do.
         self.exploration_rng = exploration_rng
-        self.learn_rng = learn_rng
 
         self._episode_length = float(episode_end_minute - horizon_start_minute)
         self._return_scale = float(number_clients) * self._episode_length
+        # Ticket 16 (module docstring, "The estimator"): a guaranteed floor
+        # under any aborted Episode's actual penalty for this Episode's
+        # demand (``served <= number_clients`` always), used by
+        # :meth:`_is_aborted` to detect one from the final transition's
+        # reward alone -- the only signal available under `learn`'s frozen
+        # ``TrainablePolicy`` protocol.
+        self._abort_reward_floor = ABORT_PENALTY - ABORT_PENALTY_PER_SERVED_CLIENT * number_clients
 
         # Ticket 14 (ADR-0011): the shared action_set module, at the linear
         # baseline's own m + 2 -- see this module's docstring, "ADR-0011".
@@ -463,11 +562,14 @@ class TransformerMonteCarloPolicy(Policy):
         # candidates until it has actually decided something.
         self.action: list[int] = [depot] * number_vehicles
 
-        # Ticket 07: the mean (standardized) Huber loss over every minibatch of
-        # the most recent learn() call -- not part of the TrainablePolicy
-        # protocol (learn returns None, matching MonteCarloPolicy), read
-        # separately by the Trainer's live per-episode report. 0.0 before the
-        # first learn() call.
+        # Ticket 07: not part of the TrainablePolicy protocol (learn returns
+        # None, matching MonteCarloPolicy), read separately by the Trainer's
+        # live per-episode report. Ticket 16 repurposes this from "the mean
+        # Huber loss over the last learn() call's minibatches" to "the mean
+        # squared residual the most recent (non-aborted, non-empty) Episode's
+        # samples show against the entering W" (module docstring, "The
+        # estimator") -- left untouched on an aborted or empty Episode. 0.0
+        # before the first contributing learn() call.
         self.last_loss = 0.0
 
     # --- Acting ------------------------------------------------------------
@@ -566,16 +668,19 @@ class TransformerMonteCarloPolicy(Policy):
 
         return self.action
 
-    def _score(
+    def _candidate_rows(
         self,
         embeddings: Embeddings,
         vehicle: int,
         pending: list[int],
         claimed_mask: np.ndarray,
-    ) -> torch.Tensor:
-        """``Q(vehicle, candidate) == c(s, v, candidate) + QHead(...)`` over every
-        pending Client plus the depot, in that order (ticket 15, ``network.py``,
-        "The myopic base") -- the addition ``QHead`` itself never performs.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Every pending Client plus the synthetic depot row, in that order --
+        the four tensors :meth:`_score` (``QHead.forward``) and
+        :meth:`_score_features` (``QHead.features``, ticket 16) both need and
+        must never disagree about: the augmented candidate embedding, the
+        myopic base ``c`` (ticket 15, ``network.py``, "The myopic base"),
+        ``claimed`` and ``is_depot``.
         """
         n_pending = len(pending)
         client_embeddings = embeddings.clients[:, vehicle, :]
@@ -598,9 +703,46 @@ class TransformerMonteCarloPolicy(Policy):
         is_depot = torch.zeros(n_pending + 1, dtype=torch.float32, device=self.device)
         is_depot[n_pending] = 1.0
 
+        return augmented, myopic_base, claimed, is_depot
+
+    def _score(
+        self,
+        embeddings: Embeddings,
+        vehicle: int,
+        pending: list[int],
+        claimed_mask: np.ndarray,
+    ) -> torch.Tensor:
+        """``Q(vehicle, candidate) == c(s, v, candidate) + QHead(...)`` over every
+        pending Client plus the depot, in that order (ticket 15, ``network.py``,
+        "The myopic base") -- the addition ``QHead`` itself never performs.
+        """
+        augmented, myopic_base, claimed, is_depot = self._candidate_rows(
+            embeddings, vehicle, pending, claimed_mask
+        )
         residual = self.head(embeddings.vehicles[vehicle], augmented, claimed, is_depot)
         q: torch.Tensor = myopic_base + residual
         return q
+
+    def _score_features(
+        self,
+        embeddings: Embeddings,
+        vehicle: int,
+        pending: list[int],
+        claimed_mask: np.ndarray,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(phi(s, v, candidate), c(s, v, candidate))`` over every pending
+        Client plus the depot -- ticket 16's regression feature and myopic
+        base, from the same candidate rows :meth:`_score` scores
+        (``Q == c + phi @ head.w_vector()`` exactly matches
+        ``_score``'s ``myopic_base + head(...)``; ``network.py``,
+        ``QHead.features``). Never called with gradients enabled: the ridge
+        estimator is solved in closed form, not by backpropagation.
+        """
+        augmented, myopic_base, claimed, is_depot = self._candidate_rows(
+            embeddings, vehicle, pending, claimed_mask
+        )
+        phi = self.head.features(embeddings.vehicles[vehicle], augmented, claimed, is_depot)
+        return phi, myopic_base
 
     # --- Learning ------------------------------------------------------------
 
@@ -610,39 +752,96 @@ class TransformerMonteCarloPolicy(Policy):
         actions: list[list[int]],
         rewards: list[float],
     ) -> None:
-        """One batch per Episode: K shuffled minibatch passes, then discard (spec.md decision 9)."""
+        """Fold one Episode into the ridge accumulator; re-solve on cadence
+        (ticket 16, module docstring "The estimator"). Excludes aborted
+        Episodes (:meth:`_is_aborted`) from the accumulator, but not from its
+        forgetting -- the accumulated memory still ages by one Episode either
+        way.
+        """
         T = len(actions)
         if T == 0:
             return
 
         targets = self._backward_returns(snapshots, actions, rewards)
+        aborted = self._is_aborted(rewards)
 
-        minibatch_losses: list[float] = []
-        for _ in range(self.learn_passes):
-            order = self.learn_rng.permutation(T)
-            for start in range(0, T, self.batch_size):
-                batch = order[start : start + self.batch_size]
-                self.optimizer.zero_grad()
-                losses = []
-                for index in batch:
-                    t = int(index)
-                    q_pred = self._replay_joint_q(snapshots[t], actions[t])
-                    target = torch.tensor(
-                        targets[t] / self._return_scale, dtype=torch.float32, device=self.device
-                    )
-                    losses.append(functional.huber_loss(q_pred, target, delta=self.huber_delta))
-                loss = torch.stack(losses).mean()
-                loss.backward()
-                if self.grad_clip_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(
-                        chain(self.encoder.parameters(), self.head.parameters()),
-                        self.grad_clip_norm,
-                    )
-                self.optimizer.step()
-                minibatch_losses.append(float(loss.item()))
+        if aborted:
+            empty_phi = np.empty((0, self.ridge.dim), dtype=np.float64)
+            empty_y = np.empty(0, dtype=np.float64)
+            self.ridge.observe_episode(empty_phi, empty_y, aborted=True)
+        else:
+            phi_rows = np.empty((T, self.ridge.dim), dtype=np.float64)
+            y_rows = np.empty(T, dtype=np.float64)
+            with torch.no_grad():
+                w_vector = self.head.w_vector()
+                for t in range(T):
+                    phi_sum, c_sum = self._replay_joint_features(snapshots[t], actions[t])
+                    y_t = targets[t] / self._return_scale - c_sum
+                    phi_rows[t] = phi_sum.cpu().numpy()
+                    y_rows[t] = y_t
+                residual = y_rows - phi_rows @ w_vector.cpu().numpy()
+            self.last_loss = float(np.mean(np.square(residual)))
+            self.ridge.observe_episode(phi_rows, y_rows, aborted=False)
 
-        if minibatch_losses:
-            self.last_loss = sum(minibatch_losses) / len(minibatch_losses)
+        if self.ridge.episodes_since_solve >= self.solve_cadence:
+            solved = self.ridge.solve()
+            self.head.load_w_vector(torch.from_numpy(solved.astype(np.float32)).to(self.device))
+
+    def _is_aborted(self, rewards: list[float]) -> bool:
+        """Whether this Episode ended by hitting ``CLOCK_CEILING`` (research
+        note F10; module docstring, "The estimator") -- read off the final
+        transition's reward, the only signal available under ``learn``'s
+        frozen ``TrainablePolicy`` signature. ``rewards[-1]`` carries the
+        abort penalty in full whenever it fired (plus whatever else that same
+        transition charged), and ``self._abort_reward_floor`` is a guaranteed
+        lower bound on that penalty for this Episode's demand -- see
+        ``__init__``.
+        """
+        return rewards[-1] >= self._abort_reward_floor
+
+    def _replay_joint_features(
+        self, snapshot: TrainingSnapshot, action_row: list[int]
+    ) -> tuple[torch.Tensor, float]:
+        """``(Phi_t, sum_v c(s, v, a_v))`` for one decision epoch -- the ridge
+        accumulator's own per-epoch sample (module docstring, "The
+        estimator"). Mirrors :meth:`_replay_joint_q`'s replay exactly (one
+        encoder pass, the same incremental ``claimed_mask`` seeded fresh per
+        epoch) but sums :meth:`_score_features`'s ``phi`` instead of scoring
+        through ``QHead.forward`` -- no gradient is ever built, since the
+        estimator is solved in closed form. Every vehicle contributes a term,
+        including one whose action the simulator will discard, for the same
+        reason :meth:`_replay_joint_q` does (module docstring, "A
+        tried-and-rejected variant").
+        """
+        tokens = tokenize(
+            snapshot,
+            self.geometry,
+            self.time_windows,
+            horizon_start_minute=self.horizon_start_minute,
+            shift_end_minute=self.shift_end_minute,
+            episode_end_minute=self.episode_end_minute,
+        )
+        with torch.no_grad():
+            embeddings = self.encoder(tokens)
+
+            pending = list(snapshot.clients_not_visited)
+            n_pending = len(pending)
+            index_of = {client: index for index, client in enumerate(pending)}
+            claimed_mask = np.zeros(n_pending, dtype=np.bool_)
+
+            phi_sum = torch.zeros(self.head.feature_dim, dtype=torch.float32, device=self.device)
+            c_sum = 0.0
+            for vehicle in range(self.number_vehicles):
+                phi, myopic_base = self._score_features(embeddings, vehicle, pending, claimed_mask)
+                chosen = action_row[vehicle]
+                if chosen == self.depot:
+                    index = n_pending
+                else:
+                    index = index_of[chosen]
+                    claimed_mask[index] = True
+                phi_sum = phi_sum + phi[index]
+                c_sum += float(myopic_base[index].item())
+        return phi_sum, c_sum
 
     def calibration_pairs(
         self,

@@ -64,15 +64,37 @@ class TestSpawnNeuralEpisodeRngs:
         for rng_a, rng_b in zip(a, b, strict=True):
             assert not np.array_equal(rng_a.random(10), rng_b.random(10))
 
-    def test_the_four_streams_are_mutually_independent(self) -> None:
+    def test_the_three_streams_are_mutually_independent(self) -> None:
         streams = spawn_neural_episode_rngs(42)
         draws = [rng.random(20) for rng in streams]
         for i in range(len(draws)):
             for j in range(i + 1, len(draws)):
                 assert not np.array_equal(draws[i], draws[j])
 
-    def test_returns_four_streams(self) -> None:
-        assert len(spawn_neural_episode_rngs(0)) == 4
+    def test_returns_three_streams(self) -> None:
+        assert len(spawn_neural_episode_rngs(0)) == 3
+
+    def test_dropping_the_fourth_stream_does_not_change_the_first_three(self) -> None:
+        """Ticket 16 retires the fourth (``learn_rng``) stream this function
+        used to spawn -- confirms the module docstring's claim that the
+        remaining three are unaffected: ``SeedSequence.spawn(3)``'s children
+        are positionally identical to ``spawn(4)``'s first three."""
+        congestion, velocity, exploration = spawn_neural_episode_rngs(7)
+        (
+            old_congestion_seed,
+            old_velocity_seed,
+            old_exploration_seed,
+            _old_learn_seed,
+        ) = np.random.SeedSequence(7).spawn(4)
+        np.testing.assert_array_equal(
+            congestion.random(10), np.random.default_rng(old_congestion_seed).random(10)
+        )
+        np.testing.assert_array_equal(
+            velocity.random(10), np.random.default_rng(old_velocity_seed).random(10)
+        )
+        np.testing.assert_array_equal(
+            exploration.random(10), np.random.default_rng(old_exploration_seed).random(10)
+        )
 
 
 class TestBuildNeuralPolicyState:
@@ -132,10 +154,15 @@ class TestEpisodeRunners:
         return EpisodeWorld.load(config)
 
     def test_training_episode_mutates_the_policy_state_in_place(self) -> None:
+        """Ticket 16: the frozen-encoder arm never moves ``encoder`` -- what
+        must mutate in place is the ridge accumulator and, once it has solved
+        (the fixture's default ``neural_solve_cadence`` of 1 solves after
+        every Episode), ``head.linear``/``head.layer2``."""
         config = make_config()
         world = self._world(config)
         state = build_neural_policy_state(config, np.random.default_rng(0))
-        before = [p.clone() for p in state.encoder.parameters()]
+        encoder_before = [p.clone() for p in state.encoder.parameters()]
+        w_before = state.head.w_vector().clone()
 
         result, loss = run_neural_training_episode(
             seed=1000,
@@ -149,9 +176,12 @@ class TestEpisodeRunners:
 
         assert result.total_cost >= 0
         assert loss >= 0
-        assert any(
-            not torch.equal(b, a) for b, a in zip(before, state.encoder.parameters(), strict=True)
-        )
+        assert all(
+            torch.equal(b, a)
+            for b, a in zip(encoder_before, state.encoder.parameters(), strict=True)
+        ), "the frozen-encoder arm must never move the encoder"
+        assert state.ridge.episodes_included + state.ridge.episodes_excluded == 1
+        assert not torch.equal(state.head.w_vector(), w_before)
 
     def test_evaluation_episode_does_not_mutate_the_policy_state(self) -> None:
         config = make_config()

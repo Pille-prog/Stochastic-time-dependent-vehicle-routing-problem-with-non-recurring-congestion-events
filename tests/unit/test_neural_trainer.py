@@ -122,6 +122,27 @@ class ScriptedEvaluationStub:
         return episode_result(self.block_means[block] + (within_block % 3) - 1)
 
 
+class ExclusionStub:
+    """Simulates a fraction of aborted Episodes by incrementing the ridge
+    accumulator's exclusion counter directly (ticket 16) -- the real
+    ``learn()`` never runs under this stub, so this is the only way to
+    exercise ``Trainer.train_neural``'s exclusion-rate stop rule without a
+    real Policy actually aborting an Episode."""
+
+    def __init__(self, exclude_every: int) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.exclude_every = exclude_every
+
+    def __call__(self, **kwargs: Any) -> tuple[EpisodeResult, float]:
+        self.calls.append(kwargs)
+        ridge = kwargs["policy_state"].ridge
+        if len(self.calls) % self.exclude_every == 0:
+            ridge.episodes_excluded += 1
+        else:
+            ridge.episodes_included += 1
+        return episode_result(100.0), 0.01
+
+
 class ConstantTrainingStub:
     def __init__(self, cost: float = 100.0, loss: float = 0.05) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -251,6 +272,95 @@ class TestConvergence:
 
         assert not result.converged
         assert result.episodes_completed == 8
+
+
+class TestExclusionRateStopRule:
+    """Ticket 16: "a rising exclusion rate is a stop signal" -- the mandatory
+    mitigation for the ridge estimator's blind spot to aborted Episodes.
+    """
+
+    def test_a_high_exclusion_rate_stops_the_run_uncoverged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = make_config()
+        n_seeds = len(config.evaluation_seeds)
+        # Every training episode "aborts" -- an exclusion rate of 100%, far
+        # past the stop threshold.
+        patch_runners(
+            monkeypatch,
+            ExclusionStub(exclude_every=1),
+            ScriptedEvaluationStub(n_seeds, [400.0] * 20),
+        )
+        trainer = Trainer(make_world(config), log=lambda _m: None)
+
+        result = trainer.train_neural(
+            reference_card=make_reference_card(config),
+            checkpoint_path=tmp_path / "ckpt.pt",
+            max_episodes=100,
+            evaluation_cadence_minimum=4,
+        )
+
+        assert result.stopped_for_exclusion_rate
+        assert not result.converged
+        assert result.episodes_completed < 100
+
+    def test_a_healthy_run_never_stops_for_exclusion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = make_config()
+        n_seeds = len(config.evaluation_seeds)
+        patch_runners(monkeypatch, ConstantTrainingStub(), ScriptedEvaluationStub(n_seeds, [400.0]))
+        trainer = Trainer(make_world(config), log=lambda _m: None)
+
+        result = trainer.train_neural(
+            reference_card=make_reference_card(config),
+            checkpoint_path=tmp_path / "ckpt.pt",
+            max_episodes=8,
+            evaluation_cadence_minimum=4,
+        )
+
+        assert not result.stopped_for_exclusion_rate
+
+    def test_the_exclusion_rate_is_reported_per_block_not_cumulatively(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A block's count must be a delta against the previous block, not the
+        run's cumulative total -- otherwise a rate that stays flat forever
+        would still be misreported as growing block over block. Both blocks
+        stay under the stop threshold so the run reaches both without being
+        cut short by :class:`TestExclusionRateStopRule`'s own trigger."""
+        config = make_config()
+        n_seeds = len(config.evaluation_seeds)
+        # Block 1 (episodes 1-20): 1 excluded (5%, under the 10% ceiling).
+        # Block 2 (episodes 21-40): none excluded.
+        calls: list[dict[str, Any]] = []
+
+        def training(**kwargs: Any) -> tuple[EpisodeResult, float]:
+            calls.append(kwargs)
+            ridge = kwargs["policy_state"].ridge
+            if len(calls) == 1:
+                ridge.episodes_excluded += 1
+            else:
+                ridge.episodes_included += 1
+            return episode_result(100.0), 0.01
+
+        patch_runners(monkeypatch, training, ScriptedEvaluationStub(n_seeds, [400.0, 390.0]))
+        trainer = Trainer(make_world(config), log=lambda _m: None)
+
+        result = trainer.train_neural(
+            reference_card=make_reference_card(config),
+            checkpoint_path=tmp_path / "ckpt.pt",
+            max_episodes=40,
+            evaluation_cadence_minimum=20,
+        )
+
+        assert not result.stopped_for_exclusion_rate
+        assert result.evaluations[0].training_episodes == 20
+        assert result.evaluations[0].excluded_episodes == 1
+        assert result.evaluations[0].exclusion_rate == pytest.approx(0.05)
+        assert result.evaluations[1].training_episodes == 20
+        assert result.evaluations[1].excluded_episodes == 0
+        assert result.evaluations[1].exclusion_rate == 0.0
 
 
 class TestCheckpointAndResume:

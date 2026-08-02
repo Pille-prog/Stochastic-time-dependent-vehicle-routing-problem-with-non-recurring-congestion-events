@@ -55,6 +55,9 @@ def valid_values() -> dict:
         "neural_warm_start": "minutes",
         "neural_huber_delta": 1.0,
         "neural_level_gain": 1.0,
+        "neural_ridge_gamma": 0.98,
+        "neural_ridge_lambda": 10.0,
+        "neural_solve_cadence": 1,
         "device": "cpu",
     }
 
@@ -163,6 +166,9 @@ def test_omitted_defaulted_keys_take_their_defaults(tmp_path: Path) -> None:
     del values["neural_warm_start"]
     del values["neural_huber_delta"]
     del values["neural_level_gain"]
+    del values["neural_ridge_gamma"]
+    del values["neural_ridge_lambda"]
+    del values["neural_solve_cadence"]
     config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
     assert config.device == "auto"
     assert config.neural_grad_clip_norm is None
@@ -171,6 +177,9 @@ def test_omitted_defaulted_keys_take_their_defaults(tmp_path: Path) -> None:
     assert config.neural_warm_start == "minutes"
     assert config.neural_huber_delta == 1.0
     assert config.neural_level_gain == 1.0
+    assert config.neural_ridge_gamma == 0.99
+    assert config.neural_ridge_lambda == 1.0
+    assert config.neural_solve_cadence == 50
 
 
 def test_grad_clip_norm_value_is_accepted(tmp_path: Path) -> None:
@@ -209,6 +218,49 @@ def test_huber_delta_value_is_accepted(tmp_path: Path) -> None:
 def test_nonpositive_huber_delta_is_rejected(tmp_path: Path) -> None:
     values = valid_values() | {"neural_huber_delta": 0}
     with pytest.raises(ValueError, match=r"neural_huber_delta must be positive"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
+def test_ridge_gamma_value_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_ridge_gamma": 0.5}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_ridge_gamma == 0.5
+
+
+def test_ridge_gamma_of_exactly_one_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_ridge_gamma": 1.0}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_ridge_gamma == 1.0
+
+
+@pytest.mark.parametrize("gamma", [0.0, -0.1, 1.1])
+def test_ridge_gamma_out_of_range_is_rejected(tmp_path: Path, gamma: float) -> None:
+    values = valid_values() | {"neural_ridge_gamma": gamma}
+    with pytest.raises(ValueError, match=r"neural_ridge_gamma must be in \(0, 1\]"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
+def test_ridge_lambda_value_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_ridge_lambda": 25.0}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_ridge_lambda == 25.0
+
+
+def test_nonpositive_ridge_lambda_is_rejected(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_ridge_lambda": 0}
+    with pytest.raises(ValueError, match=r"neural_ridge_lambda must be positive"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
+def test_solve_cadence_value_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_solve_cadence": 10}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_solve_cadence == 10
+
+
+def test_nonpositive_solve_cadence_is_rejected(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_solve_cadence": 0}
+    with pytest.raises(ValueError, match=r"neural_solve_cadence must be positive"):
         ExperimentConfig.from_yaml(write_config(tmp_path, values))
 
 

@@ -185,6 +185,12 @@ class NeuralTrainingResult:
     # otherwise. Ticket 08 (Gate A) reads this back to confirm which of its
     # three reproducibility runs produced which trained network.
     init_seed: int | None = None
+    # Ticket 16: the run stopped because a block's exclusion rate reached
+    # EXCLUSION_RATE_STOP_THRESHOLD, distinct from both "converged" (True) and
+    # "hit the safety cap" (both False) -- a caller needs to tell the three
+    # apart without parsing the log. Never True at the same time as
+    # ``converged``: the loop breaks on whichever of the two fires first.
+    stopped_for_exclusion_rate: bool = False
 
 
 class Trainer:
@@ -500,6 +506,7 @@ class Trainer:
             ConvergenceState,
             EvaluationReport,
             evaluation_cadence,
+            exclusion_rate_stop_signal,
             format_episode_line,
             format_evaluation_block,
             format_lr,
@@ -578,6 +585,15 @@ class Trainer:
             episodes_completed, minimum=cadence_minimum
         )
         converged = False
+        # Ticket 16: the ridge estimator's per-block exclusion count/rate is a
+        # *delta* against the previous block (spec.md's live report is about
+        # this Episode window, not the whole run so far), so both cumulative
+        # counters are snapshotted here -- at the run's start, or wherever a
+        # resumed run's policy_state.ridge already stands -- and re-snapshotted
+        # after every block below.
+        episodes_at_last_block = episodes_completed
+        excluded_at_last_block = policy_state.ridge.episodes_excluded
+        stopped_for_exclusion_rate = False
 
         try:
             while not hit_safety_cap(
@@ -610,7 +626,11 @@ class Trainer:
                     episodes_completed=episodes_completed,
                     seed_costs=seed_costs,
                     reference_seed_costs=reference_seed_costs,
+                    training_episodes=episodes_completed - episodes_at_last_block,
+                    excluded_episodes=policy_state.ridge.episodes_excluded - excluded_at_last_block,
                 )
+                episodes_at_last_block = episodes_completed
+                excluded_at_last_block = policy_state.ridge.episodes_excluded
                 evaluations.append(report)
                 improved = report.mean_cost < convergence.best_mean_cost
                 action = update_convergence(convergence, report)
@@ -637,6 +657,15 @@ class Trainer:
                         "after 3 lr reductions"
                     )
 
+                if exclusion_rate_stop_signal(report):
+                    stopped_for_exclusion_rate = True
+                    self._log(
+                        f"EXCLUSION RATE {report.exclusion_rate * 100:.1f}% AT episode "
+                        f"{episodes_completed}: stopping -- the ridge estimator excludes "
+                        "aborted Episodes from its accumulator, so a policy that starts "
+                        "aborting degrades silently (ticket 16). Not reported as converged."
+                    )
+
                 elapsed_seconds = total_elapsed()
                 session_start = time.monotonic()
                 save_checkpoint(
@@ -651,7 +680,7 @@ class Trainer:
                     policy_state,
                 )
 
-                if converged:
+                if converged or stopped_for_exclusion_rate:
                     break
                 next_eval_at = episodes_completed + evaluation_cadence(
                     episodes_completed, minimum=cadence_minimum
@@ -689,6 +718,7 @@ class Trainer:
             policy_state=policy_state,
             device=str(policy_state.device),
             init_seed=init_seed,
+            stopped_for_exclusion_rate=stopped_for_exclusion_rate,
         )
 
     def _run_neural_training_episode(

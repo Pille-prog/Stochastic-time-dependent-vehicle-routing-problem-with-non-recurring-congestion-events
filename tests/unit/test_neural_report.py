@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from stdvrp.training.neural_report import (
+    EXCLUSION_RATE_STOP_THRESHOLD,
     LR_REDUCTION_FACTOR,
     MAX_REDUCTIONS,
     PATIENCE_BLOCKS,
@@ -23,6 +24,7 @@ from stdvrp.training.neural_report import (
     ConvergenceState,
     EvaluationReport,
     evaluation_cadence,
+    exclusion_rate_stop_signal,
     format_episode_line,
     format_evaluation_block,
     format_lr,
@@ -50,12 +52,19 @@ class TestPairedWilcoxonP:
 
 
 def make_report(
-    seed_costs: tuple[float, ...], reference_seed_costs: tuple[float, ...], episodes: int = 100
+    seed_costs: tuple[float, ...],
+    reference_seed_costs: tuple[float, ...],
+    episodes: int = 100,
+    *,
+    training_episodes: int = 0,
+    excluded_episodes: int = 0,
 ) -> EvaluationReport:
     return EvaluationReport(
         episodes_completed=episodes,
         seed_costs=seed_costs,
         reference_seed_costs=reference_seed_costs,
+        training_episodes=training_episodes,
+        excluded_episodes=excluded_episodes,
     )
 
 
@@ -97,6 +106,57 @@ class TestEvaluationReport:
     def test_empty_block_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="at least one"):
             EvaluationReport(episodes_completed=1, seed_costs=(), reference_seed_costs=())
+
+
+class TestExclusionRate:
+    """Ticket 16: the ridge estimator's exclusion count/rate, logged per block."""
+
+    def test_defaults_to_zero_when_omitted(self) -> None:
+        report = make_report((1.0,), (2.0,))
+        assert report.training_episodes == 0
+        assert report.excluded_episodes == 0
+        assert report.exclusion_rate == 0.0
+
+    def test_computes_the_rate(self) -> None:
+        report = make_report((1.0,), (2.0,), training_episodes=50, excluded_episodes=5)
+        assert report.exclusion_rate == pytest.approx(0.1)
+
+    def test_zero_excluded_gives_zero_rate(self) -> None:
+        report = make_report((1.0,), (2.0,), training_episodes=50, excluded_episodes=0)
+        assert report.exclusion_rate == 0.0
+
+    def test_all_excluded_gives_rate_one(self) -> None:
+        report = make_report((1.0,), (2.0,), training_episodes=10, excluded_episodes=10)
+        assert report.exclusion_rate == pytest.approx(1.0)
+
+    def test_more_excluded_than_training_episodes_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="cannot exceed"):
+            make_report((1.0,), (2.0,), training_episodes=5, excluded_episodes=6)
+
+
+class TestExclusionRateStopSignal:
+    def test_below_threshold_does_not_signal(self) -> None:
+        report = make_report((1.0,), (2.0,), training_episodes=100, excluded_episodes=5)
+        assert not exclusion_rate_stop_signal(report)
+
+    def test_at_or_above_threshold_signals(self) -> None:
+        report = make_report((1.0,), (2.0,), training_episodes=100, excluded_episodes=10)
+        assert exclusion_rate_stop_signal(report)
+
+    def test_default_threshold_matches_the_module_constant(self) -> None:
+        just_under = make_report((1.0,), (2.0,), training_episodes=1000, excluded_episodes=99)
+        just_over = make_report((1.0,), (2.0,), training_episodes=1000, excluded_episodes=101)
+        assert not exclusion_rate_stop_signal(just_under, threshold=EXCLUSION_RATE_STOP_THRESHOLD)
+        assert exclusion_rate_stop_signal(just_over, threshold=EXCLUSION_RATE_STOP_THRESHOLD)
+
+    def test_a_healthy_zero_exclusion_rate_never_signals(self) -> None:
+        report = make_report((1.0,), (2.0,), training_episodes=500, excluded_episodes=0)
+        assert not exclusion_rate_stop_signal(report)
+
+    def test_custom_threshold_is_respected(self) -> None:
+        report = make_report((1.0,), (2.0,), training_episodes=100, excluded_episodes=2)
+        assert exclusion_rate_stop_signal(report, threshold=0.01)
+        assert not exclusion_rate_stop_signal(report, threshold=0.5)
 
 
 class TestConvergence:
@@ -242,6 +302,28 @@ class TestFormatting:
         text = format_evaluation_block(report, state)
 
         assert "Wilcoxon p=nan" in text
+
+    def test_evaluation_block_reports_the_exclusion_rate_when_present(self) -> None:
+        report = make_report(
+            (10.0,) * 50, (20.0,) * 50, episodes=350, training_episodes=50, excluded_episodes=3
+        )
+        state = ConvergenceState(current_lr=3.0e-4)
+        update_convergence(state, report)
+
+        text = format_evaluation_block(report, state)
+
+        assert "excluded 3/50 training episodes (6.0%)" in text
+
+    def test_evaluation_block_omits_the_exclusion_line_when_absent(self) -> None:
+        """Reports built without a training-episode count (every test predating
+        ticket 16) must not suddenly print a nonsensical "0/0" line."""
+        report = make_report((10.0,) * 50, (20.0,) * 50, episodes=350)
+        state = ConvergenceState(current_lr=3.0e-4)
+        update_convergence(state, report)
+
+        text = format_evaluation_block(report, state)
+
+        assert "excluded" not in text
 
 
 class TestOpenTrainingLog:

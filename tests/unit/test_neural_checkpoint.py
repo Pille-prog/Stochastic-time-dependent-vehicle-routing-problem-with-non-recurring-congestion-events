@@ -93,6 +93,38 @@ class TestRoundTrip:
         restored_keys = fresh_state.optimizer.state_dict()["state"].keys()
         assert restored_keys == original_state_dict["state"].keys()
 
+    def test_the_ridge_accumulator_survives_the_round_trip(self, tmp_path: Path) -> None:
+        """Ticket 16: without this, resuming a run would restart accumulation
+        from an empty ``A``/``b`` while the loaded network already reflects
+        everything accumulated before the interruption -- this must catch
+        that regression, not just confirm ``load_checkpoint`` doesn't crash
+        on the new key."""
+        config = make_config()
+        state = build_neural_policy_state(config, np.random.default_rng(0))
+        rng = np.random.default_rng(2)
+        phi = rng.normal(size=(7, state.ridge.dim))
+        y = rng.normal(size=7)
+        state.ridge.observe_episode(phi, y, aborted=False)
+        state.ridge.observe_episode(np.empty((0, state.ridge.dim)), np.empty(0), aborted=True)
+        state.ridge.solve()  # freezes the column scale
+        original = state.ridge.state_dict()
+
+        path = tmp_path / "checkpoint.pt"
+        save_checkpoint(path, make_checkpoint(), state)
+
+        fresh_state = build_neural_policy_state(config, np.random.default_rng(1))
+        load_checkpoint(path, fresh_state)
+
+        restored = fresh_state.ridge.state_dict()
+        np.testing.assert_array_equal(restored["A"], original["A"])
+        np.testing.assert_array_equal(restored["b"], original["b"])
+        np.testing.assert_array_equal(restored["scale"], original["scale"])
+        assert restored["effective_n"] == original["effective_n"]
+        assert restored["episodes_included"] == original["episodes_included"] == 1
+        assert restored["episodes_excluded"] == original["episodes_excluded"] == 1
+        assert restored["episodes_since_solve"] == original["episodes_since_solve"]
+        np.testing.assert_allclose(fresh_state.ridge.solve(), state.ridge.solve())
+
 
 class TestAtomicWrite:
     def test_a_failed_write_does_not_disturb_the_previous_checkpoint(

@@ -2,6 +2,16 @@
 (vehicle, Client) pairs, and the myopic base ``c(s, v, a)`` (ticket 05,
 superseded by ticket 15, neural-policy).
 
+Ticket 16 adds ``QHead.features``/``w_vector``/``load_w_vector``: the same
+``linear(x) + layer2(ReLU(layer1(x)))`` computation :meth:`QHead.forward`
+performs, decomposed into a feature vector ``phi(s, v, a)`` and a combined
+weight vector ``W`` so that ``forward(...) == features(...) @ w_vector()``
+(level term aside -- see "The level term" below, now inert). ``learn``
+(``transformer_policy.py``) regresses onto ``features`` with
+:class:`~stdvrp.policies.ridge_estimator.RidgeAccumulator`'s closed-form
+solve, never onto ``forward``'s autograd graph -- ``linear``/``layer2`` are
+never touched by an optimizer any more, only by :meth:`QHead.load_w_vector`.
+
 torch is an optional extra (ticket 03): this module imports it at module scope
 because its whole reason to exist is the network, unlike ``torch_support.py``'s
 deferred-import boundary. It must therefore never be imported from
@@ -356,10 +366,16 @@ Under ``Q = c + W·φ``, ``Q_joint`` at init is ``Σ_v c(s, v, a_v)`` — a cost
 effort, were the same order of magnitude as a trained policy's, not 10-30x
 off). There is no longer a large, same-signed gap for ``level_gain`` to
 close, so the mechanism above has little left to do regardless of the value
-chosen. It stays wired, at its measured bit-identical-to-absent default,
-because ticket 16 — not this one — is what removes the per-episode Adam SGD
-loop this section's "~100 episodes of same-signed steps" story depends on;
-until then the mechanism is dormant rather than deleted.
+chosen. **Ticket 16 removes what was left**: the per-episode Adam SGD loop
+this section's "~100 episodes of same-signed steps" story depends on is gone
+-- ``linear``/``layer2`` are now written in one step by
+:meth:`QHead.load_w_vector` off a closed-form solve, never walked to, so
+there is no longer any optimizer step for ``level_gain`` to scale the size
+of. The field stays wired, at its measured bit-identical-to-absent default
+(:attr:`QHead.forward`'s ``level`` term is `0.0` whenever it is `1.0`), purely
+so a config file or a script that still sets it does not need to change; it
+is dormant rather than deleted for the same citability reason as
+``neural_warm_start``/``neural_huber_delta``.
 
 ## Why a dead ReLU can no longer touch ``c`` (formerly "the warm start is on a linear path")
 
@@ -689,9 +705,9 @@ class TokenEncoder(nn.Module):
         # _myopic_base_weights (a non-persistent buffer) are both leaves with
         # requires_grad=False; the product of two such leaves is too.
         cost = (arc_tokens * self._myopic_base_weights).sum(dim=-1)  # [n_pending, m]
-        depot_cost = (
-            depot_arc_tokens * self._myopic_base_weights
-        ).sum(dim=-1) + DEPOT_WARM_START_PENALTY  # [m]
+        depot_cost = (depot_arc_tokens * self._myopic_base_weights).sum(
+            dim=-1
+        ) + DEPOT_WARM_START_PENALTY  # [m]
 
         return Embeddings(
             clients=clients,
@@ -755,6 +771,24 @@ class QHead(nn.Module):
         _zero_(self.layer2.weight)
         _zero_(self.layer2.bias)
 
+    def _candidate_inputs(
+        self,
+        vehicle_embedding: torch.Tensor,
+        client_embeddings: torch.Tensor,
+        claimed: torch.Tensor,
+        is_depot: torch.Tensor,
+    ) -> torch.Tensor:
+        """``x``: ``[n_candidates, input_dim]`` -- the concatenation every
+        candidate's score (:meth:`forward`) and feature vector (:meth:`features`)
+        are both built from. Factored out once so the two paths cannot drift
+        apart on how a candidate's raw inputs are assembled.
+        """
+        n_candidates = client_embeddings.shape[0]
+        vehicle = vehicle_embedding.unsqueeze(0).expand(n_candidates, -1)
+        return torch.cat(
+            [vehicle, client_embeddings, claimed.unsqueeze(-1), is_depot.unsqueeze(-1)], dim=-1
+        )
+
     def forward(
         self,
         vehicle_embedding: torch.Tensor,
@@ -773,18 +807,83 @@ class QHead(nn.Module):
         the myopic base ``c(s, v, a)`` to get ``Q`` (module docstring, "The
         myopic base").
         """
-        n_candidates = client_embeddings.shape[0]
-        vehicle = vehicle_embedding.unsqueeze(0).expand(n_candidates, -1)
-        x = torch.cat(
-            [vehicle, client_embeddings, claimed.unsqueeze(-1), is_depot.unsqueeze(-1)], dim=-1
-        )
+        x = self._candidate_inputs(vehicle_embedding, client_embeddings, claimed, is_depot)
         hidden = torch.relu(self.layer1(x))
         # ``linear``'s bias is the one weight added identically to every
         # candidate of every sweep, so scaling its contribution moves Q's
         # overall level without touching a single argmin -- module docstring,
         # "The level term, and why it needs a gain". Written as an increment so
         # the default gain of 1.0 adds exactly 0.0 and is bit-identical to this
-        # term not being here at all.
+        # term not being here at all. Ticket 16: with W solved directly (never
+        # walked to by an optimizer), this term is inert regardless of
+        # ``level_gain`` -- there is no longer a level to accelerate -- and is
+        # kept wired only at its bit-identical-to-absent default (see
+        # ``ridge_estimator.py``/``transformer_policy.py``, "the estimator").
         level = (self.level_gain - 1.0) * self.linear.bias
         output: torch.Tensor = (self.linear(x) + level + self.layer2(hidden)).squeeze(-1)
         return output
+
+    @property
+    def feature_dim(self) -> int:
+        """Width of :meth:`features`' output: ``input_dim + hidden_dim + 1``
+        (ticket 16: ``x``, ``ReLU(layer1(x))``, and one constant column for the
+        combined intercept -- 386 + 128 + 1 = 515 at the shipped architecture).
+        """
+        return self.linear.in_features + self.layer1.out_features + 1
+
+    def features(
+        self,
+        vehicle_embedding: torch.Tensor,
+        client_embeddings: torch.Tensor,
+        claimed: torch.Tensor,
+        is_depot: torch.Tensor,
+    ) -> torch.Tensor:
+        """``phi(s, v, a)`` per candidate: ``[x ; ReLU(layer1(x)) ; 1]``, shape
+        ``[n_candidates, feature_dim]`` (ticket 16, "It is exactly linear in the
+        solvable parameters"). Same arguments as :meth:`forward`, and the two
+        share :meth:`_candidate_inputs`/``layer1`` exactly, so ``forward(...)  ==
+        features(...) @ w_vector()`` up to the (inert at its default) level term
+        -- :class:`~stdvrp.policies.ridge_estimator.RidgeAccumulator` regresses
+        onto this, never onto ``forward``'s own autograd graph, since the
+        estimator is solved in closed form, not by backpropagation.
+        """
+        x = self._candidate_inputs(vehicle_embedding, client_embeddings, claimed, is_depot)
+        hidden = torch.relu(self.layer1(x))
+        ones = x.new_ones((x.shape[0], 1))
+        return torch.cat([x, hidden, ones], dim=-1)
+
+    def w_vector(self) -> torch.Tensor:
+        """The combined ``[linear.weight ; layer2.weight ; linear.bias +
+        layer2.bias]`` row, in :meth:`features`' column order -- the only
+        quantity :class:`~stdvrp.policies.ridge_estimator.RidgeAccumulator`
+        solves for. ``layer2``'s bias and ``linear``'s collapse into one
+        intercept because they were never separately identifiable (ticket 16).
+        Detached: this is a plain readout of current parameter values, not
+        part of any autograd graph.
+        """
+        combined_bias = self.linear.bias.detach() + self.layer2.bias.detach()
+        return torch.cat(
+            [
+                self.linear.weight.detach().reshape(-1),
+                self.layer2.weight.detach().reshape(-1),
+                combined_bias,
+            ]
+        )
+
+    def load_w_vector(self, w: torch.Tensor) -> None:
+        """Assign a solved combined weight vector back onto ``linear``/``layer2``
+        in place (ticket 16: the ridge solve replaces gradient descent as the
+        only way these four parameters ever move). The intercept is written
+        entirely onto ``linear.bias``, with ``layer2.bias`` zeroed -- their
+        *sum* is what :meth:`forward`/:meth:`w_vector` read, so the split
+        between the two is arbitrary and this choice is as good as any other.
+        """
+        if w.shape != (self.feature_dim,):
+            raise ValueError(f"w must have shape ({self.feature_dim},), got {tuple(w.shape)}")
+        input_dim = self.linear.in_features
+        hidden_dim = self.layer1.out_features
+        with torch.no_grad():
+            self.linear.weight.copy_(w[:input_dim].reshape(1, input_dim))
+            self.layer2.weight.copy_(w[input_dim : input_dim + hidden_dim].reshape(1, hidden_dim))
+            self.linear.bias.copy_(w[input_dim + hidden_dim :])
+            self.layer2.bias.zero_()

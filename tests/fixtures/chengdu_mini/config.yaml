@@ -64,3 +64,7 @@ neural_grad_clip_norm: null
 neural_warm_start: minutes
 neural_huber_delta: 1.0
 neural_level_gain: 1.0
+# Ticket 16: pinned to 1 (unlike the real config) so the unit tests that train
+# a single Episode against this fixture still see an immediate ridge solve --
+# this fixture is exercising wiring, not the estimator's tuned quality.
+neural_solve_cadence: 1

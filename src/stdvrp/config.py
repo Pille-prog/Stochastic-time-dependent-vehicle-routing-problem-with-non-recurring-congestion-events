@@ -114,21 +114,73 @@ class ExperimentConfig:
     # baseline's ``learning_rate`` (a constant-step SGD rate; this one seeds
     # Adam, an unrelated scale — spec.md's live-report example shows ``3.0e-4``,
     # nothing like the baseline's ``1e-5``). ``neural_learning_rate`` is what
-    # ticket 07's convergence stopping multiplies by 0.3 on a patience trigger.
-    # ``neural_learn_passes`` is ``learn``'s ``K`` (shuffled minibatch passes
-    # per episode; spec.md's compute-budget measurement used 4).
-    # ``neural_batch_size`` is the minibatch size within one episode's ~400
-    # (epoch, vehicle) decision samples.
+    # ticket 07's convergence stopping multiplies by 0.3 on a patience trigger
+    # (that patience/reduction bookkeeping is unchanged by ticket 16 -- spec.md
+    # decision 12 stays as written -- even though the frozen arm below no
+    # longer runs any gradient step for it to govern). ``neural_learn_passes``
+    # was ``learn``'s ``K`` (shuffled minibatch passes per episode; spec.md's
+    # compute-budget measurement used 4). ``neural_batch_size`` was the
+    # minibatch size within one episode's ~400 (epoch, vehicle) decision
+    # samples. DEAD on the frozen-encoder arm since ticket 16 (``W`` is solved
+    # in closed form, not walked to by Adam -- "no learning rate anywhere in
+    # the system", ticket 17's own words for this arm); kept declared and
+    # validated because ticket 17's *trained*-encoder arm ("two timescales",
+    # this module's docstring) still trains the encoder/``layer1`` by SGD on
+    # the residual and will read these three again.
     neural_learning_rate: float
     neural_learn_passes: int
     neural_batch_size: int
     # Ticket 08 (Gate A stability): optional max L2 norm for the gradient of
     # one minibatch step of ``TransformerMonteCarloPolicy.learn`` (clipped over
     # encoder+head jointly, torch.nn.utils.clip_grad_norm_). ``null`` (the
-    # default) disables clipping -- the exact pre-knob behavior. The lever the
-    # ticket's lr/gradient-clipping stability sweep varies on
-    # ``evaluation_seeds``; not a frozen acceptance parameter.
+    # default) disables clipping -- the exact pre-knob behavior. RETIRED since
+    # ticket 16: the ridge solve has no gradient of its own to clip. Kept
+    # declared, at its inert default, for YAML/historical-run compatibility
+    # (``results/*`` scripts predating ticket 16 still cite it).
     neural_grad_clip_norm: float | None = None
+    # Ticket 16: the accumulated-least-squares estimator's own three knobs
+    # (module docstring, "The accumulator";
+    # :class:`~stdvrp.policies.ridge_estimator.RidgeAccumulator`).
+    # ``neural_ridge_gamma`` is exponential forgetting, gamma: the effective
+    # window is ~1/(1-gamma) Episodes. ``neural_ridge_lambda`` is the ridge
+    # penalty, applied to the *standardized* feature columns. ``neural_solve_cadence``
+    # (``N``) is how many training Episodes pass before the first solve, and
+    # between every solve after it.
+    #
+    # Chosen on evaluation_seeds, on the real Chengdu dataset, over four
+    # rounds (``.scratch/neural-policy/results/ridge_sweep*.{py,json,log}``)
+    # -- never test_seeds. **No cell tested beat the untrained null (3365.09).**
+    # Rounds 1-2: gamma=0.98, lambda in {1, 10, 100, 1e3, 1e4, 1e5} at N=50
+    # (60 training Episodes) -- every cell scored 2.7x-10.7x the null,
+    # non-monotonically in lambda (worst around 100-1,000). Round 3: lambda=1
+    # at N=150 (150 Episodes) essentially matched N=50 at the same lambda
+    # (9039.89 vs 9152.26) -- ruling out "not enough data yet" as the
+    # explanation the ticket's own "50 Episodes ~= 20,000 samples should be
+    # enough" framing predicted. Round 4: lambda=1, N=50, gamma in
+    # {0.90, 0.95, 0.99} -- monotonic and, unlike lambda, sensible: 13476.03,
+    # 9622.48, 6978.45. gamma=0.99 (the largest tested, effective window ~100
+    # Episodes) is the best cell measured across all four rounds, at +107.4%.
+    # (Rounds 1-3 ran before a scale-decay bug in ``RidgeAccumulator`` --
+    # ``raw_sum_sq`` not decaying like its own denominator ``effective_n`` --
+    # was found by code review and fixed; round 4 already reflects the fix.
+    # The bug inflated the frozen scale by an estimated ~26% at N=50/gamma=0.98,
+    # far short of explaining the 170%+ gap from the null on its own, so the
+    # qualitative finding stands, but rounds 1-3's absolute numbers should be
+    # read as approximate.)
+    #
+    # **This is a real, unresolved finding, not a config default anyone
+    # should trust blind** -- see this ticket's Comments for the full sweep
+    # and a working hypothesis (near-zero-variance feature columns,
+    # standardized to a floored scale, can carry a disproportionate
+    # *physical*-unit coefficient regardless of lambda). Recorded for ticket
+    # 17's Gate A' to pick up: it needs its own lambda/gamma/N chosen on
+    # evaluation_seeds before it can answer "does training add value"
+    # meaningfully, and this sweep's raw numbers are exactly the evidence
+    # that question needs -- gamma above 0.99 was not tried and is the
+    # obvious next point on this round's own trend.
+    neural_ridge_gamma: float = 0.99
+    neural_ridge_lambda: float = 1.0
+    neural_solve_cadence: int = 50
     # Ticket 08; DEAD since ticket 15 (kept for YAML/historical-run compat,
     # still validated, no longer wired to anything). Used to select which
     # myopic warm start ``TokenEncoder`` initialised ``arc_embed`` row 0 with
@@ -140,19 +192,19 @@ class ExperimentConfig:
     # "minutes" vs "cost" measurements it once selected between stay citeable
     # under the old architecture (network.py, "The myopic base").
     neural_warm_start: str = "minutes"
-    # Ticket 08; DEAD-ish since ticket 15 (kept wired, but the problem it
-    # addresses is far smaller now -- see below). ``delta`` for ``learn``'s
-    # Huber loss. torch's own default of 1.0 is not a neutral choice here --
-    # the standardized target and the network's output both live around
-    # 1e-2, so every residual falls in the quadratic branch and the loss is
-    # exactly ``0.5 * MSE``, robustness never engaging. One truncated
+    # Ticket 08; DEAD since ticket 16 (kept for YAML/historical-run
+    # compatibility, still validated, no longer wired to anything). ``delta``
+    # for ``learn``'s Huber loss. torch's own default of 1.0 was not a neutral
+    # choice -- the standardized target and the network's output both lived
+    # around 1e-2, so every residual fell in the quadratic branch and the loss
+    # was exactly ``0.5 * MSE``, robustness never engaging. One truncated
     # training episode (the 40000-minus-200-per-visit terminal penalty,
-    # research note F10) then lands on *every* decision epoch's target in
-    # that episode, squared. A delta near the residual scale is what makes
-    # those episodes contribute a bounded gradient instead of a dominating
-    # one. Kept at 1.0 by default so the knob alone changes nothing. Ticket
-    # 16 is what actually retires this field, by replacing ``learn``'s
-    # per-episode Huber-loss SGD with a closed-form least-squares solve.
+    # research note F10) then landed on *every* decision epoch's target in
+    # that episode, squared. Ticket 16 replaces ``learn``'s per-episode
+    # Huber-loss SGD with a closed-form least-squares solve -- there is no
+    # loss to have a knee any more, and the same heavy tail is instead handled
+    # by excluding the aborted Episode from the accumulator outright
+    # (``ridge_estimator.py``, "Aborted Episodes are excluded").
     neural_huber_delta: float = 1.0
     # Ticket 08; MOOT since ticket 15 (kept wired, at its measured
     # bit-identical-to-absent default). How much faster ``QHead``'s level
@@ -257,6 +309,7 @@ class ExperimentConfig:
             "neural_n_heads",
             "neural_learn_passes",
             "neural_batch_size",
+            "neural_solve_cadence",
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -270,6 +323,10 @@ class ExperimentConfig:
             raise ValueError("neural_huber_delta must be positive")
         if self.neural_level_gain <= 0:
             raise ValueError("neural_level_gain must be positive")
+        if not 0.0 < self.neural_ridge_gamma <= 1.0:
+            raise ValueError("neural_ridge_gamma must be in (0, 1]")
+        if self.neural_ridge_lambda <= 0:
+            raise ValueError("neural_ridge_lambda must be positive")
         if self.neural_warm_start not in NEURAL_WARM_STARTS:
             raise ValueError(
                 f"neural_warm_start must be one of {sorted(NEURAL_WARM_STARTS)}, "
@@ -339,6 +396,17 @@ class ExperimentConfig:
         if values.get("neural_grad_clip_norm") is not None:
             values["neural_grad_clip_norm"] = _require_float(
                 path, "neural_grad_clip_norm", values["neural_grad_clip_norm"]
+            )
+        # neural_ridge_gamma/neural_ridge_lambda/neural_solve_cadence (ticket
+        # 16) all carry dataclass defaults, so -- unlike neural_learning_rate
+        # above -- a config file may omit them entirely; only coerce a value
+        # that is actually present.
+        for name in ("neural_ridge_gamma", "neural_ridge_lambda"):
+            if name in values:
+                values[name] = _require_float(path, name, values[name])
+        if "neural_solve_cadence" in values:
+            values["neural_solve_cadence"] = _require_int(
+                path, "neural_solve_cadence", values["neural_solve_cadence"]
             )
         for name in ("links_file", "shortest_paths_file", "device"):
             if name in values and (not isinstance(values[name], str) or not values[name]):

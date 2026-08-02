@@ -21,6 +21,17 @@ was written on. :func:`load_checkpoint` refuses a cross-device resume with a
 loud error rather than silently loading anyway (which would produce a
 trajectory that *looks* resumed but quietly diverges from the interrupted
 run).
+
+**The ridge accumulator is part of the document too (ticket 16).** It is
+plain numpy, not a torch state dict, but it is exactly as load-bearing as
+``head_state``: without it, a resumed run would restart accumulation from an
+empty ``A``/``b`` while the loaded network already reflects everything
+accumulated before the interruption, which would desynchronize the two the
+moment the next solve ran. ``ridge_state`` is required, not defaulted with
+``.get`` the way ``best_weights`` is -- a checkpoint from before ticket 16 was
+trained under a different learning rule entirely (per-episode Adam SGD), so
+there is no coherent way to "resume" it under this one regardless of how the
+missing key is handled.
 """
 
 from __future__ import annotations
@@ -31,6 +42,7 @@ from pathlib import Path
 
 import torch
 
+from stdvrp.policies.ridge_estimator import RidgeAccumulator
 from stdvrp.training.neural_episode import NeuralPolicyState
 from stdvrp.training.neural_report import ConvergenceState, EvaluationReport
 
@@ -79,6 +91,11 @@ def save_checkpoint(
         "encoder_state": policy_state.encoder.state_dict(),
         "head_state": policy_state.head.state_dict(),
         "optimizer_state": policy_state.optimizer.state_dict(),
+        # Ticket 16: the accumulated ridge estimator -- without this, a
+        # resumed run would restart accumulation from nothing while the
+        # network already reflects everything accumulated before the
+        # interruption, silently breaking the bit-identical resume guarantee.
+        "ridge_state": policy_state.ridge.state_dict(),
         "best_weights": checkpoint.best_weights,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,6 +135,7 @@ def load_checkpoint(path: Path, policy_state: NeuralPolicyState) -> TrainingChec
     policy_state.encoder.load_state_dict(document["encoder_state"])
     policy_state.head.load_state_dict(document["head_state"])
     policy_state.optimizer.load_state_dict(document["optimizer_state"])
+    policy_state.ridge = RidgeAccumulator.from_state_dict(document["ridge_state"])
     return TrainingCheckpoint(
         episodes_completed=document["episodes_completed"],
         elapsed_seconds=document["elapsed_seconds"],

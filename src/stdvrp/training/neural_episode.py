@@ -10,16 +10,21 @@ against. ``TransformerMonteCarloPolicy`` instead flows its trainable state
 ~stdvrp.policies.transformer_policy.TransformerMonteCarloPolicy.learn`
 updates in place — the caller (the Trainer's training loop) keeps the same
 ``NeuralPolicyState`` alive across every Episode of a run, constructing a new,
-lightweight ``TransformerMonteCarloPolicy`` wrapper around it each time.
+lightweight ``TransformerMonteCarloPolicy`` wrapper around it each time. Since
+ticket 16, that includes ``NeuralPolicyState.ridge`` — the accumulated ridge
+estimator, which must persist across Episodes for the same reason the
+network's weights do: an accumulator rebuilt fresh every Episode would never
+accumulate anything *across* them, which is the whole point of ticket 16.
 
 **RNG state, and why the checkpoint does not need to persist it.** Every
-stochastic stream this module uses — congestion, velocity, exploration, and
-now the minibatch shuffle ``learn`` needs — is spawned fresh from the
-Episode's own ``seed`` (:func:`spawn_neural_episode_rngs`, extending ticket
-13's ``_spawn_episode_rngs`` with a fourth stream), never carried over from
-the previous Episode. Resuming a run therefore needs only the next episode
+stochastic stream this module uses — congestion, velocity and exploration —
+is spawned fresh from the Episode's own ``seed`` (:func:`spawn_neural_episode_rngs`,
+extending ticket 13's ``_spawn_episode_rngs``), never carried over from the
+previous Episode. Resuming a run therefore needs only the next episode
 *index* (which determines every subsequent Episode's seed and hence its
-streams) — there is no separate generator state to serialize.
+streams) — there is no separate generator state to serialize. Ticket 16
+retires the fourth stream this module used to spawn (``learn_rng``, the
+per-episode minibatch shuffle) — the ridge estimator shuffles nothing.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ from stdvrp.demand.client_generator import ClientGenerator
 from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPathCache
 from stdvrp.policies.network import QHead, TokenEncoder
+from stdvrp.policies.ridge_estimator import RidgeAccumulator
 from stdvrp.policies.torch_support import resolve_device
 from stdvrp.policies.transformer_policy import CalibrationPair, TransformerMonteCarloPolicy
 from stdvrp.simulation.episode import EpisodeResult
@@ -52,29 +58,32 @@ __all__ = [
     "spawn_neural_episode_rngs",
 ]
 
-NeuralEpisodeRngs = tuple[
-    np.random.Generator, np.random.Generator, np.random.Generator, np.random.Generator
-]
+NeuralEpisodeRngs = tuple[np.random.Generator, np.random.Generator, np.random.Generator]
 
 
 def spawn_neural_episode_rngs(seed: int) -> NeuralEpisodeRngs:
-    """Four independent per-Episode streams: congestion, velocity, exploration, learn.
+    """Three independent per-Episode streams: congestion, velocity, exploration.
 
     Extends :func:`stdvrp.simulation.episode._spawn_episode_rngs` (ticket 13,
-    ADR-0001 phase 2) with a fourth child for ``learn``'s minibatch shuffle —
-    a stochastic concern that function's three linear-baseline streams have no
+    ADR-0001 phase 2) with a third child for epsilon-greedy exploration — a
+    stochastic concern that function's two linear-baseline streams have no
     equivalent of. Kept as this module's own function, not a shared helper,
     for the same reason ``episode.py`` itself stays untouched: this file
     predicts a zero self-golden diff by never editing the pinned baseline.
+
+    A fourth stream (``learn_rng``, the per-episode minibatch shuffle)
+    existed here through ticket 15; ticket 16 retires it along with the SGD
+    loop it fed (``transformer_policy.py``, "The estimator") -- the ridge
+    estimator has nothing to shuffle. Dropping the tail of a
+    ``SeedSequence.spawn`` call does not change the children still requested:
+    ``spawn(3)``'s three children are bit-identical to ``spawn(4)``'s first
+    three, so every other stream this function returns is unaffected.
     """
-    congestion_seed, velocity_seed, exploration_seed, learn_seed = np.random.SeedSequence(
-        seed
-    ).spawn(4)
+    congestion_seed, velocity_seed, exploration_seed = np.random.SeedSequence(seed).spawn(3)
     return (
         np.random.default_rng(congestion_seed),
         np.random.default_rng(velocity_seed),
         np.random.default_rng(exploration_seed),
-        np.random.default_rng(learn_seed),
     )
 
 
@@ -82,16 +91,30 @@ def spawn_neural_episode_rngs(seed: int) -> NeuralEpisodeRngs:
 class NeuralPolicyState:
     """The transformer Policy's trainable state, long-lived across Episodes.
 
-    The neural analogue of ``W: NDArray`` — except mutated in place by
-    ``learn`` (an ordinary PyTorch optimizer step) rather than reassigned.
-    Callers keep one instance alive for a whole training run and construct a
-    fresh, lightweight ``TransformerMonteCarloPolicy`` around it every
-    Episode.
+    The neural analogue of ``W: NDArray`` — mutated in place by ``learn``
+    rather than reassigned. Callers keep one instance alive for a whole
+    training run and construct a fresh, lightweight
+    ``TransformerMonteCarloPolicy`` around it every Episode.
+
+    ``optimizer``/``current_lr`` predate ticket 16 and are no longer stepped
+    by anything on the frozen-encoder arm (``learn`` never calls ``.backward()``
+    or ``.step()`` any more — the ridge solve in ``self.ridge`` is the only way
+    ``head.linear``/``head.layer2`` move, and ``encoder``/``head.layer1`` are
+    not moved by this class at all). Kept, rather than removed, for two
+    reasons: spec.md decision 12 (patience -> lr cut -> converged) is
+    unamended by ticket 16, so ``Trainer.train_neural``'s convergence loop
+    still needs a ``current_lr`` to cut on a patience trigger — purely as a
+    stopping heuristic now, decoupled from what is actually being fit; and
+    ticket 17's *trained*-encoder arm ("two timescales",
+    ``transformer_policy.py``'s module docstring) resumes training
+    ``encoder``/``head.layer1`` by SGD on the same residual and will need a
+    real optimizer over exactly these parameters again.
     """
 
     encoder: TokenEncoder
     head: QHead
     optimizer: torch.optim.Optimizer
+    ridge: RidgeAccumulator
     device: torch.device
 
     @property
@@ -108,7 +131,7 @@ class NeuralPolicyState:
 def build_neural_policy_state(
     config: ExperimentConfig, init_rng: np.random.Generator
 ) -> NeuralPolicyState:
-    """Fresh network + optimizer from ``config``'s architecture fields.
+    """Fresh network + ridge accumulator from ``config``'s architecture fields.
 
     ``config.device`` (``"cpu"``, ``"cuda"``, or ``"auto"``) is resolved
     **once** here, via :func:`~stdvrp.policies.torch_support.resolve_device`
@@ -116,6 +139,11 @@ def build_neural_policy_state(
     to agree between calls. The resolved device is carried on the returned
     :class:`NeuralPolicyState` for every later caller (the Trainer's log line,
     the checkpoint, the results record) to read back rather than re-derive.
+
+    The ridge accumulator (ticket 16) is sized from ``head.feature_dim`` --
+    it must match ``QHead``'s own ``linear``/``layer2`` shapes exactly, so it
+    is built here, right after ``head``, rather than independently from the
+    architecture config fields.
     """
     device = resolve_device(config.device)
     encoder = TokenEncoder(
@@ -135,7 +163,14 @@ def build_neural_policy_state(
     optimizer = torch.optim.Adam(
         chain(encoder.parameters(), head.parameters()), lr=config.neural_learning_rate
     )
-    return NeuralPolicyState(encoder=encoder, head=head, optimizer=optimizer, device=device)
+    ridge = RidgeAccumulator.zeros(
+        head.feature_dim,
+        forgetting=config.neural_ridge_gamma,
+        ridge=config.neural_ridge_lambda,
+    )
+    return NeuralPolicyState(
+        encoder=encoder, head=head, optimizer=optimizer, ridge=ridge, device=device
+    )
 
 
 def _build_episode(
@@ -156,7 +191,7 @@ def _build_episode(
     never consults ``epsilon``, only ``decide_train`` does).
     """
     demand = client_generator.generate(seed)
-    congestion_rng, velocity_rng, exploration_rng, learn_rng = spawn_neural_episode_rngs(seed)
+    congestion_rng, velocity_rng, exploration_rng = spawn_neural_episode_rngs(seed)
 
     number_vehicles = demand.vehicle_count
     clients = [client.node for client in demand.clients]
@@ -180,14 +215,10 @@ def _build_episode(
         config.horizon_start_minute,
         policy_state.encoder,
         policy_state.head,
-        policy_state.optimizer,
+        policy_state.ridge,
         exploration_rng=exploration_rng,
-        learn_rng=learn_rng,
-        learn_passes=config.neural_learn_passes,
-        batch_size=config.neural_batch_size,
+        solve_cadence=config.neural_solve_cadence,
         device=policy_state.device,
-        grad_clip_norm=config.neural_grad_clip_norm,
-        huber_delta=config.neural_huber_delta,
     )
     model = Model(
         state,
@@ -238,9 +269,11 @@ def run_neural_training_episode(
 ) -> tuple[EpisodeResult, float]:
     """Run one epsilon-greedy training Episode; mutate ``policy_state`` in place.
 
-    Returns the Episode's cost outcome and the mean training loss ``learn``
-    computed (``TransformerMonteCarloPolicy.last_loss`` — not part of the
-    ``TrainablePolicy`` protocol, read here for the live per-episode report).
+    Returns the Episode's cost outcome and ``learn``'s residual diagnostic
+    (``TransformerMonteCarloPolicy.last_loss`` — not part of the
+    ``TrainablePolicy`` protocol, read here for the live per-episode report;
+    ticket 16 repurposes it from a training loss to the mean squared residual
+    against the entering ``W`` — see that class's module docstring).
     """
     model, policy = _build_episode(
         seed=seed,

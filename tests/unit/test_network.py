@@ -205,9 +205,7 @@ class TestUntrainedQEqualsMyopicBase:
                     torch.ones(1),
                 )
 
-            np.testing.assert_allclose(
-                q.numpy(), expected_client_cost[:, v], atol=1e-5, rtol=1e-5
-            )
+            np.testing.assert_allclose(q.numpy(), expected_client_cost[:, v], atol=1e-5, rtol=1e-5)
             np.testing.assert_allclose(
                 depot_q.numpy(), expected_depot_cost[v : v + 1], atol=1e-5, rtol=1e-5
             )
@@ -559,6 +557,91 @@ class TestClaimedIsWired:
             "claimed never affects Q's gradient even after an optimizer step -- "
             "it may have been dropped from QHead's forward pass"
         )
+
+
+class TestFeaturesAndWVector:
+    """Ticket 16: ``QHead.features``/``w_vector``/``load_w_vector`` -- the
+    decomposition :class:`~stdvrp.policies.ridge_estimator.RidgeAccumulator`
+    regresses onto. The load-bearing claim is
+    ``forward(...) == features(...) @ w_vector()``; everything else here is in
+    service of that identity actually holding, both at init and after the
+    weights it reads have moved.
+    """
+
+    def test_feature_dim_matches_the_head_shape(self) -> None:
+        _, head = build_network(seed=1, n_obs=N_OBS, d_model=16)
+        assert head.feature_dim == head.linear.in_features + head.layer1.out_features + 1
+
+    def test_forward_equals_features_dot_w_vector_at_init(self) -> None:
+        _, head = build_network(seed=2, n_obs=N_OBS, d_model=8)
+        vehicle_embedding = torch.randn(8)
+        client_embeddings = torch.randn(5, 16)
+        claimed = torch.rand(5)
+        is_depot = torch.zeros(5)
+
+        with torch.no_grad():
+            forward_output = head(vehicle_embedding, client_embeddings, claimed, is_depot)
+            phi = head.features(vehicle_embedding, client_embeddings, claimed, is_depot)
+            w = head.w_vector()
+
+        assert phi.shape == (5, head.feature_dim)
+        torch.testing.assert_close(forward_output, phi @ w, atol=1e-6, rtol=1e-6)
+
+    def test_forward_equals_features_dot_w_vector_after_load_w_vector(self) -> None:
+        _, head = build_network(seed=3, n_obs=N_OBS, d_model=8)
+        rng = np.random.default_rng(3)
+        w = torch.from_numpy(rng.normal(size=head.feature_dim).astype(np.float32))
+        head.load_w_vector(w)
+
+        vehicle_embedding = torch.randn(8)
+        client_embeddings = torch.randn(6, 16)
+        claimed = torch.rand(6)
+        is_depot = torch.zeros(6)
+        is_depot[0] = 1.0
+
+        with torch.no_grad():
+            forward_output = head(vehicle_embedding, client_embeddings, claimed, is_depot)
+            phi = head.features(vehicle_embedding, client_embeddings, claimed, is_depot)
+
+        torch.testing.assert_close(forward_output, phi @ w, atol=1e-5, rtol=1e-5)
+
+    def test_load_w_vector_round_trips_through_w_vector(self) -> None:
+        _, head = build_network(seed=4, n_obs=N_OBS, d_model=8)
+        rng = np.random.default_rng(4)
+        w = torch.from_numpy(rng.normal(size=head.feature_dim).astype(np.float32))
+
+        head.load_w_vector(w)
+
+        torch.testing.assert_close(head.w_vector(), w, atol=1e-6, rtol=1e-6)
+
+    def test_load_w_vector_rejects_the_wrong_shape(self) -> None:
+        _, head = build_network(seed=5, n_obs=N_OBS, d_model=8)
+        with pytest.raises(ValueError, match="must have shape"):
+            head.load_w_vector(torch.zeros(head.feature_dim + 1))
+
+    def test_w_vector_is_zero_at_init(self) -> None:
+        """``linear``/``layer2`` are exactly zero at construction (ticket 15) --
+        the combined vector this reads off them must be too."""
+        _, head = build_network(seed=6, n_obs=N_OBS, d_model=8)
+        torch.testing.assert_close(
+            head.w_vector(), torch.zeros(head.feature_dim), atol=0.0, rtol=0.0
+        )
+
+    def test_features_carries_no_gradient_requirement(self) -> None:
+        """The ridge estimator never backpropagates through this -- a plain
+        numeric readout, not part of an autograd graph the caller must
+        remember to detach."""
+        _, head = build_network(seed=7, n_obs=N_OBS, d_model=8)
+        vehicle_embedding = torch.randn(8)
+        client_embeddings = torch.randn(4, 16)
+        claimed = torch.zeros(4)
+        is_depot = torch.zeros(4)
+
+        with torch.no_grad():
+            phi = head.features(vehicle_embedding, client_embeddings, claimed, is_depot)
+
+        assert phi.shape == (4, head.feature_dim)
+        assert torch.isfinite(phi).all()
 
 
 class TestDeviceParity:

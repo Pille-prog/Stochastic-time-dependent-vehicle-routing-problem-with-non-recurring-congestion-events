@@ -36,6 +36,7 @@ from stdvrp.policies.network import (  # noqa: E402
     QHead,
     TokenEncoder,
 )
+from stdvrp.policies.ridge_estimator import RidgeAccumulator  # noqa: E402
 from stdvrp.policies.transformer_policy import TransformerMonteCarloPolicy  # noqa: E402
 
 pytestmark = pytest.mark.neural
@@ -88,11 +89,10 @@ def build_policy(
     init_seed: int = 0,
     epsilon: float = 0.0,
     exploration_seed: int = 1,
-    learn_seed: int = 2,
-    learn_passes: int = 1,
-    batch_size: int = 4,
+    solve_cadence: int = 1,
+    forgetting: float = 1.0,
+    ridge: float = 1.0,
     device: torch.device | None = None,
-    grad_clip_norm: float | None = None,
 ) -> TransformerMonteCarloPolicy:
     rng = np.random.default_rng(init_seed)
     encoder = TokenEncoder(
@@ -104,7 +104,7 @@ def build_policy(
         device=device,
     )
     head = QHead(d_model=D_MODEL, init_rng=rng, device=device)
-    optimizer = torch.optim.Adam(list(encoder.parameters()) + list(head.parameters()), lr=1e-3)
+    accumulator = RidgeAccumulator.zeros(head.feature_dim, forgetting=forgetting, ridge=ridge)
     return TransformerMonteCarloPolicy(
         number_vehicles=number_vehicles,
         geometry=geometry,
@@ -117,13 +117,10 @@ def build_policy(
         horizon_start_minute=HORIZON_START,
         encoder=encoder,
         head=head,
-        optimizer=optimizer,
+        ridge=accumulator,
         exploration_rng=np.random.default_rng(exploration_seed),
-        learn_rng=np.random.default_rng(learn_seed),
-        learn_passes=learn_passes,
-        batch_size=batch_size,
+        solve_cadence=solve_cadence,
         device=device,
-        grad_clip_norm=grad_clip_norm,
     )
 
 
@@ -498,23 +495,37 @@ def make_episode(policy: TransformerMonteCarloPolicy, state: State, length: int)
 
 
 class TestLearn:
-    def test_learn_moves_the_weights(self) -> None:
+    """Ticket 16: ``learn`` folds one Episode into the ridge accumulator and
+    re-solves on cadence -- no optimizer, no loss, no minibatch shuffle, and
+    (on the frozen-encoder arm this ticket ships) no movement of ``encoder``
+    or ``head.layer1`` at all."""
+
+    def test_learn_solves_and_moves_only_head_linear_and_layer2(self) -> None:
         geometry, time_windows, clients = make_world(5, seed=21)
         policy = build_policy(geometry, time_windows, clients, number_vehicles=2, epsilon=0.0)
         state = make_state(2, pending=clients)
         snapshots, actions, rewards = make_episode(policy, state, length=6)
 
-        before = [p.clone() for p in policy.encoder.parameters()] + [
-            p.clone() for p in policy.head.parameters()
-        ]
+        encoder_before = [p.clone() for p in policy.encoder.parameters()]
+        layer1_before = [p.clone() for p in policy.head.layer1.parameters()]
         assert policy.last_loss == 0.0
-        policy.learn(snapshots, actions, rewards)
-        after = list(policy.encoder.parameters()) + list(policy.head.parameters())
 
-        assert any(not torch.equal(b, a) for b, a in zip(before, after, strict=True))
+        policy.learn(snapshots, actions, rewards)
+
+        assert all(
+            torch.equal(before, after)
+            for before, after in zip(encoder_before, policy.encoder.parameters(), strict=True)
+        ), "the frozen-encoder arm must never move the encoder"
+        assert all(
+            torch.equal(before, after)
+            for before, after in zip(layer1_before, policy.head.layer1.parameters(), strict=True)
+        ), "the frozen-encoder arm must never move layer1"
+        w = policy.head.w_vector()
+        assert not torch.equal(w, torch.zeros_like(w)), (
+            "the ridge solve should have moved W off zero"
+        )
+        assert torch.isfinite(w).all()
         assert policy.last_loss > 0.0
-        for param in after:
-            assert torch.isfinite(param).all()
 
     def test_learn_on_empty_episode_is_a_no_op(self) -> None:
         geometry, time_windows, clients = make_world(4, seed=22)
@@ -525,49 +536,60 @@ class TestLearn:
         after = list(policy.encoder.parameters())
 
         assert all(torch.equal(b, a) for b, a in zip(before, after, strict=True))
+        assert policy.ridge.episodes_included == 0
+        assert policy.ridge.episodes_excluded == 0
 
-    def test_learn_is_deterministic_given_the_same_learn_rng_seed(self) -> None:
+    def test_w_matches_the_ridge_accumulators_own_solve(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=24)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2, epsilon=0.0)
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=5)
+
+        policy.learn(snapshots, actions, rewards)
+
+        expected = policy.ridge.solve()
+        np.testing.assert_allclose(policy.head.w_vector().numpy(), expected, atol=1e-5, rtol=1e-5)
+
+    def test_learn_is_deterministic_given_the_same_inputs(self) -> None:
+        """No RNG anywhere in ``learn`` any more (ticket 16): two runs from
+        the same init seed over the same episode must agree bit for bit --
+        there is no ``learn_rng`` seed left to hold fixed."""
         geometry, time_windows, clients = make_world(5, seed=23)
 
-        def run():
-            policy = build_policy(
-                geometry, time_windows, clients, number_vehicles=2, epsilon=0.0, learn_seed=99
-            )
+        def run() -> torch.Tensor:
+            policy = build_policy(geometry, time_windows, clients, number_vehicles=2, epsilon=0.0)
             state = make_state(2, pending=clients)
             snapshots, actions, rewards = make_episode(policy, state, length=5)
             policy.learn(snapshots, actions, rewards)
-            return [p.clone() for p in policy.encoder.parameters()]
+            return policy.head.w_vector().clone()
 
         first = run()
         second = run()
-        for a, b in zip(first, second, strict=True):
-            torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(first, second, atol=0.0, rtol=0.0)
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA GPU on this machine")
-    def test_learn_is_deterministic_on_cuda_with_the_same_seed(self) -> None:
-        """Ticket 12: same-device determinism through a real backward pass on
-        real CUDA hardware -- ticket 05's `use_deterministic_algorithms(True)`
-        requirement (torch_support.resolve_device enables it for any CUDA use),
-        tested against actual hardware for the first time (ticket 05 had none
-        available). Enables it directly here since this test builds the network
-        without going through resolve_device."""
+    def test_learn_is_deterministic_on_cuda(self) -> None:
+        """Ticket 12's ``use_deterministic_algorithms(True)`` still matters
+        here even with no backward pass anywhere in ``learn`` any more:
+        :meth:`TransformerMonteCarloPolicy._replay_joint_features` runs a real
+        forward pass through the encoder on CUDA, and CUDA kernel
+        nondeterminism is not specific to backward passes."""
         geometry, time_windows, clients = make_world(5, seed=23)
         was_enabled = torch.are_deterministic_algorithms_enabled()
 
-        def run() -> list[torch.Tensor]:
+        def run() -> torch.Tensor:
             policy = build_policy(
                 geometry,
                 time_windows,
                 clients,
                 number_vehicles=2,
                 epsilon=0.0,
-                learn_seed=99,
                 device=torch.device("cuda"),
             )
             state = make_state(2, pending=clients)
             snapshots, actions, rewards = make_episode(policy, state, length=5)
             policy.learn(snapshots, actions, rewards)
-            return [p.clone() for p in policy.encoder.parameters()]
+            return policy.head.w_vector().clone()
 
         try:
             torch.use_deterministic_algorithms(True)
@@ -576,98 +598,99 @@ class TestLearn:
         finally:
             torch.use_deterministic_algorithms(was_enabled)
 
-        for a, b in zip(first, second, strict=True):
-            torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(first.cpu(), second.cpu(), atol=0.0, rtol=0.0)
 
 
-class TestGradClip:
-    """``neural_grad_clip_norm`` (ticket 08's stability-sweep lever): ``None``
-    and a never-binding bound are bit-identical to the pre-knob behavior; a
-    tight bound changes the step and stays deterministic."""
+class TestWZeroReproducesTicket15sNull:
+    """Acceptance: "W = 0 before the first solve reproduces ticket 15's null
+    exactly." A ``solve_cadence`` the Episode count never reaches means
+    ``learn`` accumulates but never solves, so accumulated data alone must
+    never move a single decision.
+    """
 
-    def run_learn(self, clip: float | None) -> list[torch.Tensor]:
-        geometry, time_windows, clients = make_world(5, seed=71)
+    def test_w_stays_zero_and_decide_is_unchanged_before_the_first_solve(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=40)
         policy = build_policy(
-            geometry,
-            time_windows,
-            clients,
-            number_vehicles=2,
-            epsilon=0.0,
-            learn_seed=7,
-            grad_clip_norm=clip,
+            geometry, time_windows, clients, number_vehicles=2, epsilon=0.0, solve_cadence=1000
         )
         state = make_state(2, pending=clients)
+
+        policy.action = [DEPOT, DEPOT]
+        before_action = policy.decide(state)
+
+        snapshots, actions, rewards = make_episode(policy, state, length=6)
+        policy.learn(snapshots, actions, rewards)
+
+        assert policy.ridge.episodes_included == 1
+        assert policy.ridge.episodes_since_solve == 1
+        w = policy.head.w_vector()
+        torch.testing.assert_close(w, torch.zeros_like(w), atol=0.0, rtol=0.0)
+
+        policy.action = [DEPOT, DEPOT]
+        after_action = policy.decide(state)
+        assert after_action == before_action
+
+
+class TestSolveCadence:
+    """``ExperimentConfig.neural_solve_cadence`` (``self.solve_cadence``): the
+    re-solve fires only once ``episodes_since_solve`` reaches it, then resets.
+    """
+
+    def test_the_solve_only_fires_every_cadence_episodes(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=41)
+        policy = build_policy(
+            geometry, time_windows, clients, number_vehicles=2, epsilon=0.0, solve_cadence=2
+        )
+        state = make_state(2, pending=clients)
+
         snapshots, actions, rewards = make_episode(policy, state, length=5)
         policy.learn(snapshots, actions, rewards)
-        return [p.clone() for p in policy.encoder.parameters()] + [
-            p.clone() for p in policy.head.parameters()
-        ]
+        w_after_one = policy.head.w_vector().clone()
+        torch.testing.assert_close(w_after_one, torch.zeros_like(w_after_one), atol=0.0, rtol=0.0)
 
-    def test_a_never_binding_bound_is_bit_identical_to_none(self) -> None:
-        unclipped = self.run_learn(None)
-        loose = self.run_learn(1.0e9)
-        for a, b in zip(unclipped, loose, strict=True):
-            torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
-
-    def test_a_tight_bound_changes_the_step_and_is_deterministic(self) -> None:
-        unclipped = self.run_learn(None)
-        tight_1 = self.run_learn(1.0e-6)
-        tight_2 = self.run_learn(1.0e-6)
-        assert any(
-            not torch.equal(a, b) for a, b in zip(unclipped, tight_1, strict=True)
-        ), "a 1e-6 clip should visibly change the optimizer step"
-        for a, b in zip(tight_1, tight_2, strict=True):
-            torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
-
-
-class TestHuberDelta:
-    """``neural_huber_delta`` (ticket 08): the loss's quadratic/linear knee.
-
-    The regression's residuals live around ``1e-2``, so torch's default
-    ``delta=1.0`` puts every one of them in the quadratic branch — the loss is
-    exactly ``0.5 * MSE`` and a truncated episode's terminal penalty enters
-    *squared*. These pin that the knob is actually plumbed through to the loss
-    and that it does what a Huber knee does: bound the gradient of a large
-    residual instead of scaling it."""
-
-    def mean_loss(self, delta: float, target_scale: float) -> float:
-        geometry, time_windows, clients = make_world(5, seed=71)
-        policy = build_policy(
-            geometry, time_windows, clients, number_vehicles=2, epsilon=0.0, learn_seed=7
-        )
-        policy.huber_delta = delta
-        state = make_state(2, pending=clients)
-        snapshots, actions, rewards = make_episode(policy, state, length=4)
-        # One big outlier return, the shape research note F10 describes.
-        rewards = [reward * target_scale for reward in rewards]
         policy.learn(snapshots, actions, rewards)
-        return float(policy.last_loss)
-
-    def test_a_delta_below_the_residual_bounds_the_loss(self) -> None:
-        big = 5000.0
-        assert self.mean_loss(0.01, big) < self.mean_loss(1.0, big), (
-            "a delta under the residual scale must put the outlier in the "
-            "linear branch, which is strictly below the quadratic one there"
+        w_after_two = policy.head.w_vector()
+        assert not torch.equal(w_after_two, w_after_one), (
+            "the second episode should trigger a solve"
         )
+        assert policy.ridge.episodes_since_solve == 0
 
-    def test_the_default_delta_is_indistinguishable_from_having_no_knee(self) -> None:
-        """The measurement behind the knob: at ``delta=1.0`` the loss is the
-        same as at ``delta=1e6`` — *bit for bit*, on a real episode's targets.
-        The default is not a mild Huber, it is plain ``0.5 * MSE``."""
-        geometry, time_windows, clients = make_world(5, seed=71)
 
-        def run(delta: float) -> list[torch.Tensor]:
-            policy = build_policy(
-                geometry, time_windows, clients, number_vehicles=2, epsilon=0.0, learn_seed=7
-            )
-            policy.huber_delta = delta
-            state = make_state(2, pending=clients)
-            snapshots, actions, rewards = make_episode(policy, state, length=4)
-            policy.learn(snapshots, actions, rewards)
-            return [p.clone() for p in policy.head.parameters()]
+class TestAbortedEpisodesAreExcluded:
+    """Ticket 16: an Episode whose final reward carries the abort penalty
+    (research note F10) is excluded from the accumulator outright."""
 
-        for a, b in zip(run(1.0), run(1.0e6), strict=True):
-            torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
+    def test_an_aborted_episode_leaves_the_accumulator_untouched_beyond_forgetting(
+        self,
+    ) -> None:
+        geometry, time_windows, clients = make_world(5, seed=42)
+        policy = build_policy(
+            geometry, time_windows, clients, number_vehicles=2, epsilon=0.0, solve_cadence=1000
+        )
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=6)
+        # Guaranteed over the abort floor for any number of served Clients.
+        rewards[-1] = policy._abort_reward_floor + 1.0
+
+        policy.learn(snapshots, actions, rewards)
+
+        assert policy.ridge.episodes_excluded == 1
+        assert policy.ridge.episodes_included == 0
+        np.testing.assert_array_equal(policy.ridge.A, np.zeros_like(policy.ridge.A))
+        np.testing.assert_array_equal(policy.ridge.b, np.zeros_like(policy.ridge.b))
+
+    def test_a_normal_episode_is_not_misclassified_as_aborted(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=43)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2, epsilon=0.0)
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=6)
+
+        assert not policy._is_aborted(rewards)
+
+        policy.learn(snapshots, actions, rewards)
+
+        assert policy.ridge.episodes_included == 1
+        assert policy.ridge.episodes_excluded == 0
 
 
 # --- calibration_pairs() (ticket 08, Gate A) ------------------------------------
@@ -771,6 +794,66 @@ class TestJointQIsAdditiveOverVehicles:
         after = list(policy.encoder.parameters()) + list(policy.head.parameters())
         assert all(torch.equal(b, a) for b, a in zip(before, after, strict=True))
         assert policy.last_loss == 0.0
+
+
+class TestReplayJointFeaturesMatchesReplayJointQ:
+    """Ticket 16: :meth:`_replay_joint_features` must be the same additive
+    decomposition :meth:`_replay_joint_q` already pins (``TestJointQIsAdditiveOverVehicles``
+    above) -- ``c_sum + phi_sum @ w_vector() == _replay_joint_q(...)`` ties the
+    new feature-accumulation replay to the already-tested Q replay directly,
+    rather than trusting the two implementations to agree by construction."""
+
+    def test_phi_sum_and_c_sum_reconstruct_the_joint_q(self) -> None:
+        geometry, time_windows, clients = make_world(6, seed=37)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=3)
+        state = make_state(3, pending=clients)
+        snapshot = TrainingSnapshot.capture(state)
+        action_row = policy.decide(state)
+
+        with torch.no_grad():
+            joint_q = policy._replay_joint_q(snapshot, action_row).item()
+            phi_sum, c_sum = policy._replay_joint_features(snapshot, action_row)
+            reconstructed = c_sum + float(phi_sum @ policy.head.w_vector())
+
+        assert phi_sum.shape == (policy.head.feature_dim,)
+        assert reconstructed == pytest.approx(joint_q, rel=1e-5)
+
+    def test_phi_sum_matches_a_manual_per_vehicle_sum(self) -> None:
+        geometry, time_windows, clients = make_world(6, seed=38)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=3)
+        state = make_state(3, pending=clients)
+        snapshot = TrainingSnapshot.capture(state)
+        action_row = policy.decide(state)
+
+        with torch.no_grad():
+            phi_sum, c_sum = policy._replay_joint_features(snapshot, action_row)
+
+            from stdvrp.policies.tokenizer import tokenize
+
+            tokens = tokenize(
+                snapshot,
+                geometry,
+                time_windows,
+                horizon_start_minute=HORIZON_START,
+                shift_end_minute=SHIFT_END,
+                episode_end_minute=EPISODE_END,
+            )
+            embeddings = policy.encoder(tokens)
+            pending = list(snapshot.clients_not_visited)
+            claimed = np.zeros(len(pending), dtype=bool)
+            expected_phi = torch.zeros(policy.head.feature_dim)
+            expected_c = 0.0
+            for vehicle in range(3):
+                phi, myopic_base = policy._score_features(embeddings, vehicle, pending, claimed)
+                chosen = action_row[vehicle]
+                index = len(pending) if chosen == DEPOT else pending.index(chosen)
+                expected_phi = expected_phi + phi[index]
+                expected_c += float(myopic_base[index].item())
+                if chosen != DEPOT:
+                    claimed[index] = True
+
+        torch.testing.assert_close(phi_sum, expected_phi, atol=1e-6, rtol=1e-6)
+        assert c_sum == pytest.approx(expected_c, rel=1e-5)
 
 
 # --- monte_carlo.py stays untouched ---------------------------------------------
