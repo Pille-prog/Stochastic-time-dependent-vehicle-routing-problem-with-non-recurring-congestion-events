@@ -213,6 +213,42 @@ five arguments, and the same structural test pins it. The untrained null is
 only, so at init `Q` equals bare `minutes / horizon_length` whatever the cost
 fields hold — Gate A's null model did not move.
 
+### Amendment: the warm start, and the null model it defines (2026-08-01, ticket 08)
+
+The paragraph above ends "Gate A's null model did not move". It moves now, and
+deliberately — **upward**.
+
+`arc_embed` row 0 is the whole of `Q` at initialization, and it was reading
+`minutes` alone while the four projected cost components sat in the same token,
+weighted zero. Ticket 08 measured what that costs: pricing the leg instead
+(`Q = (minutes + earliness + delay + overtime) / horizon_length`, one
+minute-equivalent currency, no free parameter) takes the untrained network from
+**5484 to 3693** over all 50 `evaluation_seeds` — −32.7%, winning 47/50 seeds,
+Wilcoxon `p = 2.5e-14`. The *best block of 650 training episodes* of the
+`minutes` network on the same seed set was 4150. The initialization beats the
+training.
+
+Selected as `neural_warm_start` (`minutes` | `cost`), defaulting to `minutes`;
+`experiments/chengdu/config.yaml` runs `cost`.
+
+**What this does to Gate A, stated plainly rather than buried.** The frozen
+parameters table says "the null is nearest-neighbour, not random", and the
+prose calls the untrained network "a respectable rival". Under `cost` the null
+is no longer nearest-neighbour — it is a cost-greedy dispatcher, and a
+considerably stronger rival. Two things make that legitimate rather than a
+protocol breach:
+
+1. The architecture row of the same table is explicitly *not* frozen — "a
+   starting point, tuned on the evaluation seeds only" — and this was chosen on
+   `evaluation_seeds`, never on `test_seeds`.
+2. It moves the bar **up**. The anti-p-hacking clause exists to stop a
+   criterion being rewritten into one the result can pass; a null model that
+   makes "≥ 5% better than untrained" harder to reach is the opposite of that.
+
+The obligation it creates: **report the null alongside the trained number,
+always, and name which warm start produced it.** A Gate A pass against the 5484
+null and a Gate A pass against the 3693 null are not the same claim.
+
 ## The observability rule, precisely
 
 This is the load-bearing constraint of the effort and it is written as an

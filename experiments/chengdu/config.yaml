@@ -95,3 +95,41 @@ neural_batch_size: 32
 # the lr/clipping stability sweep (evaluation_seeds only) -- not a frozen
 # acceptance parameter.
 neural_grad_clip_norm: null
+
+# Ticket 08. The myopic warm start (network.py, "The warm start"; the weight
+# vectors are tokenizer.WARM_START_WEIGHTS). "minutes" is the bare
+# nearest-feasible-Client initialization; "cost" additionally prices each leg
+# by the three single-Client projected cost components the arc token already
+# carries, in the same 1/horizon_length currency and with no free parameter.
+#
+# Measured over all 50 evaluation_seeds, never test_seeds: "minutes" 5484.25,
+# "cost" 3693.23 -- -32.7%, winning on 47/50 seeds, Wilcoxon p = 2.5e-14. For
+# scale, the best block of 650 training episodes of the "minutes" network on
+# the same seed set was 4150: the initialization beats the training. Adding
+# future_delay to the weight vector is worse (an 8-seed screen put it at 5185
+# at full weight and 3778 at a tenth, against 3421 for this vector).
+#
+# This changes the untrained network, so it changes Gate A's null model -- to a
+# stronger one. Report the null alongside the trained number, always.
+neural_warm_start: cost
+
+# Ticket 08. Huber's quadratic/linear knee, and a MEASURED NEGATIVE RESULT --
+# left at torch's default, which the knob exists to make visible rather than
+# to change.
+#
+# The observation that motivated it stands: at delta=1.0 every residual this
+# regression produces (~1e-2) is in the quadratic branch, so the loss is
+# exactly 0.5 * MSE and a truncated episode's terminal penalty (research note
+# F10) enters squared on all ~400 of that episode's decision epochs. The
+# inference from it did not: on the mini fixture, delta=0.02 -- chosen to sit
+# between a normal residual and an outlier's -- was far *worse*, +90% over the
+# null by episode 90 and +129% by 140, against +0.3% for the same run at 1.0.
+#
+# Why, in hindsight: shrinking delta does not only bound outliers, it makes
+# the loss near-linear for *ordinary* samples too, so their gradients become
+# sign-like and constant-magnitude. Under Adam that is a much larger effective
+# step on exactly the quantity the argmin reads. A useful knee here would have
+# to be well above the normal residual and well below the outlier -- those two
+# scales are ~1e-2 and ~3e-1, so the window is real but narrow, and nothing
+# has measured a value inside it. Do not set this without one.
+neural_huber_delta: 1.0

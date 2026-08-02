@@ -561,6 +561,56 @@ class TestGradClip:
             torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
 
 
+class TestHuberDelta:
+    """``neural_huber_delta`` (ticket 08): the loss's quadratic/linear knee.
+
+    The regression's residuals live around ``1e-2``, so torch's default
+    ``delta=1.0`` puts every one of them in the quadratic branch — the loss is
+    exactly ``0.5 * MSE`` and a truncated episode's terminal penalty enters
+    *squared*. These pin that the knob is actually plumbed through to the loss
+    and that it does what a Huber knee does: bound the gradient of a large
+    residual instead of scaling it."""
+
+    def mean_loss(self, delta: float, target_scale: float) -> float:
+        geometry, time_windows, clients = make_world(5, seed=71)
+        policy = build_policy(
+            geometry, time_windows, clients, number_vehicles=2, epsilon=0.0, learn_seed=7
+        )
+        policy.huber_delta = delta
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=4)
+        # One big outlier return, the shape research note F10 describes.
+        rewards = [reward * target_scale for reward in rewards]
+        policy.learn(snapshots, actions, rewards)
+        return float(policy.last_loss)
+
+    def test_a_delta_below_the_residual_bounds_the_loss(self) -> None:
+        big = 5000.0
+        assert self.mean_loss(0.01, big) < self.mean_loss(1.0, big), (
+            "a delta under the residual scale must put the outlier in the "
+            "linear branch, which is strictly below the quadratic one there"
+        )
+
+    def test_the_default_delta_is_indistinguishable_from_having_no_knee(self) -> None:
+        """The measurement behind the knob: at ``delta=1.0`` the loss is the
+        same as at ``delta=1e6`` — *bit for bit*, on a real episode's targets.
+        The default is not a mild Huber, it is plain ``0.5 * MSE``."""
+        geometry, time_windows, clients = make_world(5, seed=71)
+
+        def run(delta: float) -> list[torch.Tensor]:
+            policy = build_policy(
+                geometry, time_windows, clients, number_vehicles=2, epsilon=0.0, learn_seed=7
+            )
+            policy.huber_delta = delta
+            state = make_state(2, pending=clients)
+            snapshots, actions, rewards = make_episode(policy, state, length=4)
+            policy.learn(snapshots, actions, rewards)
+            return [p.clone() for p in policy.head.parameters()]
+
+        for a, b in zip(run(1.0), run(1.0e6), strict=True):
+            torch.testing.assert_close(a, b, atol=0.0, rtol=0.0)
+
+
 # --- calibration_pairs() (ticket 08, Gate A) ------------------------------------
 
 

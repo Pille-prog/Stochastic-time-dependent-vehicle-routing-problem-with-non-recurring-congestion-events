@@ -125,6 +125,7 @@ def build_neural_policy_state(
         n_observed_velocities=config.n_observed_velocities,
         init_rng=init_rng,
         device=device,
+        warm_start=config.neural_warm_start,
     )
     head = QHead(d_model=config.neural_d_model, init_rng=init_rng, device=device)
     optimizer = torch.optim.Adam(
@@ -182,6 +183,7 @@ def _build_episode(
         batch_size=config.neural_batch_size,
         device=policy_state.device,
         grad_clip_norm=config.neural_grad_clip_norm,
+        huber_delta=config.neural_huber_delta,
     )
     model = Model(
         state,

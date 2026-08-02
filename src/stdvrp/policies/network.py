@@ -95,25 +95,35 @@ The construction, precisely:
    Consequently ``client_context`` (a client token's post-encoder embedding)
    equals its **pre-encoder linear embedding** at init: a plain, transformer-
    untouched function of the client's three base facts.
-2. **The arc embedding's dimension 0 reconstructs ``minutes_from_vehicle``
-   exactly.** ``arc_embed: nn.Linear(ARC_TOKEN_WIDTH, d_model)``'s row 0 is
-   hand-set to ``1.0`` on the ``minutes`` input and ``0.0`` on the other five
-   (``path_length`` and the four cost fields), bias ``0.0`` — so
-   ``arc_embed(arc)[0] == minutes_from_vehicle`` exactly (already ``>= 0``, a
-   travel time, so the head's ``ReLU`` below never clips it). The cost fields
-   therefore contribute **exactly nothing at init** — the untrained network is
-   the same nearest-feasible-Client null model as before the amendment, to the
-   bit of ``Q`` — while their gradient path is live from the very first
-   backward pass (``linear``'s warm-start weight times ``arc_embed`` row 0's
-   cost columns). Every other output dimension of ``arc_embed`` (and every
-   other weight in this module) is Xavier-uniform from ``init_rng``, giving
-   the network real capacity to learn beyond the warm start.
+2. **The arc embedding's dimension 0 is a hand-set readout of the arc token.**
+   ``arc_embed: nn.Linear(ARC_TOKEN_WIDTH, d_model)``'s row 0 is set to
+   :data:`WARM_START_WEIGHTS`\\ ``[warm_start]``, bias ``0.0``, so
+   ``arc_embed(arc)[0]`` is a chosen linear combination of the six arc facts
+   (always ``>= 0``: every field is a duration or a cost). Every other output
+   dimension of ``arc_embed`` (and every other weight in this module) is
+   Xavier-uniform from ``init_rng``, giving the network real capacity to learn
+   beyond the warm start.
+
+   ``"minutes"`` — the default, and the initialization Gate A's frozen null
+   model is written against — puts ``1.0`` on ``minutes`` and ``0.0``
+   everywhere else, so the cost fields contribute **exactly nothing at init**
+   while their gradient path is live from the very first backward pass
+   (``linear``'s warm-start weight times ``arc_embed`` row 0's cost columns).
+   ``"cost"`` additionally prices the leg by the three single-Client
+   components of the simulator's own cost function. **Ticket 08 measured that
+   difference at -28% of episode cost, against -20% for the same architecture
+   after 650 training episodes** (eight ``evaluation_seeds``, real Chengdu
+   data: 4754 for ``"minutes"``, 3421 for ``"cost"``, 3794 for the trained
+   ``"minutes"`` network's best block). The cost components were already in
+   the token and already reachable by a single weight; leaving that weight at
+   zero was asking gradient descent to rediscover, from noisy Monte Carlo
+   returns, an arithmetic identity the tokenizer had already computed.
 3. **``QHead`` is a linear path plus an MLP branch, and the warm start lives
    on the linear path.** ``QHead``'s input row is ``[vehicle | client_context
    | arc | claimed | is_depot]`` (the layout ``TokenEncoder`` builds
    ``Embeddings.clients`` in, plus the two per-candidate scalars), and
 
-       Q = linear(x) + layer2(ReLU(layer1(x)))
+       A = linear(x) + layer2(ReLU(layer1(x)))
 
    ``linear: nn.Linear(3*d_model + 2, 1)`` is zeroed except for a ``1.0`` at
    the column reading ``arc_embed``'s dimension 0 (global index ``2*d_model``)
@@ -121,7 +131,7 @@ The construction, precisely:
    (see "The depot is the last resort at init" below). Bias 0.
 4. **The MLP branch contributes exactly zero at init.** ``layer2:
    nn.Linear(hidden, 1)`` is zeroed weight and bias, so whatever
-   ``ReLU(layer1(x))`` computes is multiplied by zero. Therefore ``Q ==
+   ``ReLU(layer1(x))`` computes is multiplied by zero. Therefore ``A ==
    linear(x) == minutes_from_vehicle_i_to_j`` exactly at construction, for
    every vehicle, every client, every state — not a statistical approximation.
    ``claimed`` is init-inert (by design — the warm start must not depend on
@@ -129,6 +139,57 @@ The construction, precisely:
    and do read it, so it starts affecting ``Q`` as soon as training moves
    ``layer2``'s columns off zero (see the deadlock note below for why
    ``layer1`` must *not* also be zeroed).
+
+## A dueling decomposition of ``Q`` — tried, measured, and rejected (ticket 08)
+
+Recorded so it is not re-tried naively, because the *diagnosis* behind it is
+sound and will suggest it again.
+
+``Q(s, a) = V(s) + A(s, a)``, and **only ``A`` reaches the decision** — the
+per-vehicle ``argmin`` reads differences between candidates of one sweep, so
+any quantity shared by all of them is invisible to it. Training sees only the
+sum: ``learn`` regresses ``sum_v Q(s, v, a_v)`` onto the Monte Carlo return
+``U_t`` (``transformer_policy.py``, "One sample per decision epoch"), one
+scalar per decision epoch. The gradient reaching *every* candidate term of
+that epoch is the same scalar residual, so the loss is completely invariant to
+how a given sum is split between candidates — and the split is the only thing
+the ``argmin`` reads. At 595k parameters the encoder fits ``V(s)`` easily,
+after which the residual is noise and the arc's cost weights are estimated
+from noise.
+
+The standard remedy for that symptom (Wang et al., "Dueling Network
+Architectures", 2016) is to make the split structural:
+
+    Q(s, v, a) = V(s, v) + [A(s, v, a) - mean over this sweep's candidates of A]
+
+It was implemented exactly so — ``V`` an MLP over the candidate-set mean of the
+same input rows, zero-initialised so the null model was provably untouched
+(measured: identical null mean on the mini fixture, ``577.22`` with and
+without) — and it made learning **much worse**. On the mini fixture, 200
+episodes, paired against the same null: mean over 20 blocks ``-2.42%`` →
+``+10.73%``, blocks worse than null 3/20 → 15/20, end of run ``-2.16%`` →
+``+34.00%``. Scaling ``V``'s output by 10 (a per-step speedup on that branch,
+testing whether ``V`` was simply too slow to absorb the level) recovered the
+best single block of any arm measured, ``-7.28%`` at episode 10, but not the
+run: mean ``+2.44%``, end ``+23.76%``.
+
+**Why it backfires, which is the part worth keeping.** The ``argmin`` picks the
+*minimum* candidate, so the chosen action's centred advantage is negative while
+the target ``U_t`` is positive. The residual therefore pushes that advantage
+*up, toward the candidate mean* — it actively un-learns that this action was
+the best one, every step, until ``V`` catches up. Without the centring the same
+pressure raises ``A`` for all candidates near-equally (they share parameters),
+which is a level shift the ``argmin`` cannot see. **The centring removed a
+benign escape valve and converted a level error into ranking damage.** The
+level error is large for a structural reason: ``Q`` starts in "minutes /
+horizon_length" units because of the warm start, and the return lives on an
+unrelated scale, so the optimizer's first job is reconciling two arbitrary
+scales — and it pays for it with the ranking. That is the same "fitted the mean
+and threw the ranking away" signature ``transformer_policy.py`` records under
+"Target scaling", one layer deeper.
+
+Anything that revisits this has to fix the scale mismatch *first*, not add a
+term that makes the mismatch land on the advantage.
 
 ## Why the warm start is on a linear path
 
@@ -274,6 +335,7 @@ from stdvrp.policies.tokenizer import (
     CLIENT_TOKEN_BASE_WIDTH,
     GLOBAL_TOKEN_WIDTH,
     VEHICLE_TOKEN_BASE_WIDTH,
+    WARM_START_WEIGHTS,
     Tokens,
 )
 
@@ -290,6 +352,7 @@ DEPOT_WARM_START_PENALTY = 1.0
 #: Per-candidate scalars ``QHead`` reads alongside the embeddings, in order:
 #: ``claimed`` then ``is_depot``.
 CANDIDATE_FLAG_WIDTH = 2
+
 
 # Type-embedding indices (Embeddings' three token kinds).
 _TYPE_CLIENT = 0
@@ -384,9 +447,16 @@ class TokenEncoder(nn.Module):
         init_rng: np.random.Generator,
         dim_feedforward: int | None = None,
         device: torch.device | None = None,
+        warm_start: str = "minutes",
     ) -> None:
         super().__init__()
+        if warm_start not in WARM_START_WEIGHTS:
+            raise ValueError(
+                f"unknown warm_start {warm_start!r}: expected one of "
+                f"{sorted(WARM_START_WEIGHTS)}"
+            )
         self.d_model = d_model
+        self.warm_start = warm_start
         self.device = device if device is not None else torch.device("cpu")
         dim_feedforward = dim_feedforward if dim_feedforward is not None else 4 * d_model
 
@@ -416,17 +486,18 @@ class TokenEncoder(nn.Module):
             _xavier_uniform_(embed.weight, rng)
             _zero_(embed.bias)
 
-        # arc_embed: row 0 reconstructs minutes_from_vehicle exactly (the warm
-        # start's other load-bearing half lives in QHead._init_weights below) --
-        # 1.0 on the minutes input, 0.0 on path_length and the four cost fields,
-        # so the cost features are init-inert and the untrained null model is
-        # unchanged by them. Every other output dimension is ordinary
-        # Xavier-random capacity.
+        # arc_embed: row 0 IS the warm start (its other load-bearing half lives
+        # in QHead._init_weights below) -- one weight per arc-token field, from
+        # WARM_START_WEIGHTS. Under "minutes" it reconstructs
+        # minutes_from_vehicle exactly and the cost fields are init-inert;
+        # under "cost" the three single-Client cost components join it in the
+        # same 1/horizon_length currency. Every other output dimension is
+        # ordinary Xavier-random capacity.
         _xavier_uniform_(self.arc_embed.weight, rng)
         _zero_(self.arc_embed.bias)
         with torch.no_grad():
-            self.arc_embed.weight[0, :] = 0.0
-            self.arc_embed.weight[0, 0] = 1.0
+            weights = WARM_START_WEIGHTS[self.warm_start]
+            self.arc_embed.weight[0, :] = torch.tensor(weights, dtype=torch.float32)
             self.arc_embed.bias[0] = 0.0
 
         _xavier_uniform_(self.type_embedding, rng)

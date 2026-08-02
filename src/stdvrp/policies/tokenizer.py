@@ -188,6 +188,7 @@ __all__ = [
     "EARLINESS_COST_RATE",
     "OVERTIME_COST_RATE",
     "SERVICE_MINUTES",
+    "WARM_START_WEIGHTS",
     "Tokens",
     "tokenize",
 ]
@@ -205,6 +206,41 @@ SERVICE_MINUTES = 5.0
 EARLINESS_COST_RATE = 0.1
 DELAY_COST_RATE = 1.0
 OVERTIME_COST_RATE = 5 / 6
+
+#: The myopic warm start (ticket 05's F2, extended by ticket 08), as weights
+#: over the six ``arc_tokens`` fields in the order this module emits them:
+#: ``[minutes, length, earliness_cost, delay_cost, future_delay,
+#: overtime_cost]``. ``TokenEncoder`` initialises ``arc_embed`` row 0 with one
+#: of these, and that row is the whole of ``Q`` at init (``network.py``, "The
+#: warm start"); it lives *here*, beside the layout it indexes, so the two can
+#: never drift apart — and because this module needs no torch, which is what
+#: lets ``ExperimentConfig`` validate the name without the optional extra
+#: installed.
+#:
+#: - ``"minutes"`` — ``Q = minutes_from_vehicle / horizon_length``. The
+#:   **nearest-feasible-Client** null model spec.md's Gate A is written
+#:   against; the cost fields are init-inert under it.
+#: - ``"cost"`` — adds the three single-Client projected cost components, each
+#:   already scaled by ``1/horizon_length`` exactly like ``minutes``, so
+#:   ``Q = (minutes + earliness + delay + overtime) / horizon_length``:
+#:   **travel time plus the cost this leg is projected to incur**, one
+#:   minute-equivalent currency, no free parameter. The null model becomes a
+#:   *cost*-greedy dispatcher rather than a distance-greedy one. Measured over
+#:   eight ``evaluation_seeds`` on real Chengdu data (ticket 08): 3421 against
+#:   4754 for ``"minutes"`` — a bigger improvement than 650 episodes of
+#:   training bought the same architecture (3794).
+#:
+#: ``future_delay`` stays at ``0.0`` in both. It is a sum over every other
+#: pending Client, so at full weight it swamps the three terms above and
+#: candidates get priced by the delay they leave behind rather than by their
+#: own cost: 5185 at full weight and 3778 at a tenth, on the same eight seeds.
+#:
+#: Both are ordinary initializations of an ordinary trainable row — a prior,
+#: not a rule, and gradient descent may overwrite either one.
+WARM_START_WEIGHTS: dict[str, tuple[float, float, float, float, float, float]] = {
+    "minutes": (1.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    "cost": (1.0, 0.0, 1.0, 1.0, 0.0, 1.0),
+}
 
 # EpisodeGeometry.build always places the depot at column 0 (its own contract:
 # "columns are depot first, then this Episode's Clients") — relied on already by

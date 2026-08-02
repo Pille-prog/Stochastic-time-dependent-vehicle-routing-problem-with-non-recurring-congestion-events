@@ -174,6 +174,52 @@ class TestWarmStart:
             assert int(torch.argmin(q).item()) == int(np.argmin(minutes_from_vehicle[v]))
 
 
+class TestWarmStartWeights:
+    """Ticket 08: ``arc_embed`` row 0 is one of ``WARM_START_WEIGHTS``."""
+
+    def test_cost_warm_start_prices_the_projected_cost_components(self) -> None:
+        geometry, time_windows, snapshot = make_dense_world(6, 2, N_OBS, seed=17)
+        rng = np.random.default_rng(21)
+        encoder = TokenEncoder(
+            d_model=16,
+            n_layers=3,
+            n_heads=4,
+            n_observed_velocities=N_OBS,
+            init_rng=rng,
+            warm_start="cost",
+        )
+        head = QHead(d_model=16, init_rng=rng)
+        tokens = call_tokenize(geometry, time_windows, snapshot)
+        embeddings = encoder(tokens)
+        n_pending = tokens.client_tokens.shape[0]
+
+        with torch.no_grad():
+            q = head(
+                embeddings.vehicles[0],
+                embeddings.clients[:, 0, :],
+                torch.zeros(n_pending),
+                torch.zeros(n_pending),
+            )
+
+        # Read straight off the arc token: minutes + earliness + delay +
+        # overtime (fields 0, 2, 3, 5), all already in 1/horizon_length units.
+        # future_delay (field 4) is deliberately not priced.
+        arc = tokens.arc_tokens[:, 0, :]
+        expected = arc[:, 0] + arc[:, 2] + arc[:, 3] + arc[:, 5]
+        np.testing.assert_allclose(q.numpy(), expected, atol=1e-5, rtol=1e-5)
+
+    def test_unknown_warm_start_name_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="unknown warm_start"):
+            TokenEncoder(
+                d_model=16,
+                n_layers=3,
+                n_heads=4,
+                n_observed_velocities=N_OBS,
+                init_rng=np.random.default_rng(0),
+                warm_start="distance",
+            )
+
+
 class TestReproducibility:
     """Ticket 05: init draws from an injected generator, never a global."""
 

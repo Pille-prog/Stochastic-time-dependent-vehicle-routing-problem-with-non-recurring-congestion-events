@@ -52,6 +52,8 @@ def valid_values() -> dict:
         "neural_learn_passes": 4,
         "neural_batch_size": 8,
         "neural_grad_clip_norm": None,
+        "neural_warm_start": "minutes",
+        "neural_huber_delta": 1.0,
         "device": "cpu",
     }
 
@@ -157,9 +159,15 @@ def test_omitted_defaulted_keys_take_their_defaults(tmp_path: Path) -> None:
     values = valid_values()
     del values["device"]
     del values["neural_grad_clip_norm"]
+    del values["neural_warm_start"]
+    del values["neural_huber_delta"]
     config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
     assert config.device == "auto"
     assert config.neural_grad_clip_norm is None
+    # The frozen Gate A null model (spec.md): a defaulted config is the
+    # nearest-feasible-Client warm start and torch's own Huber delta.
+    assert config.neural_warm_start == "minutes"
+    assert config.neural_huber_delta == 1.0
 
 
 def test_grad_clip_norm_value_is_accepted(tmp_path: Path) -> None:
@@ -171,6 +179,33 @@ def test_grad_clip_norm_value_is_accepted(tmp_path: Path) -> None:
 def test_nonpositive_grad_clip_norm_is_rejected(tmp_path: Path) -> None:
     values = valid_values() | {"neural_grad_clip_norm": 0}
     with pytest.raises(ValueError, match=r"neural_grad_clip_norm must be positive or null"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
+def test_cost_warm_start_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_warm_start": "cost"}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_warm_start == "cost"
+
+
+def test_unknown_warm_start_is_rejected(tmp_path: Path) -> None:
+    """Caught at config load, not at the first ``TokenEncoder`` construction —
+    a Gate A run that fails four hours in because of a typo in a YAML has
+    burned four hours."""
+    values = valid_values() | {"neural_warm_start": "distance"}
+    with pytest.raises(ValueError, match=r"neural_warm_start must be one of"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
+def test_huber_delta_value_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_huber_delta": 0.02}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_huber_delta == 0.02
+
+
+def test_nonpositive_huber_delta_is_rejected(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_huber_delta": 0}
+    with pytest.raises(ValueError, match=r"neural_huber_delta must be positive"):
         ExperimentConfig.from_yaml(write_config(tmp_path, values))
 
 

@@ -104,9 +104,18 @@ ticket 04's token normalization" (spec.md decision 9): ``learn`` divides the
 Monte Carlo target by ``_return_scale = number_clients * episode_length`` — a
 fixed, per-Episode, config-derived order-of-magnitude for the total accumulated
 cost (a sum of per-Client delay/earliness/overtime terms, each roughly bounded
-by the episode's duration) — before computing the Huber loss, so its default
-``delta=1.0`` sits in a sensible range instead of the raw cost's
-three-to-four-digit scale.
+by the episode's duration) — before computing the Huber loss, instead of
+feeding it the raw cost's three-to-four-digit scale.
+
+That fixes the *range* but not the loss's shape: torch's ``delta=1.0`` is two
+orders of magnitude above every residual this regression produces (targets and
+predictions both land around ``1e-2``), so every sample falls in the quadratic
+branch and ``huber_loss`` is exactly ``0.5 * MSE`` — the robustness the name
+promises never engages, and a truncated episode's terminal penalty (research
+note F10) is squared into every one of that episode's decision epochs. Ticket
+08 made ``delta`` a config knob (``ExperimentConfig.neural_huber_delta``,
+defaulting to torch's 1.0 so the knob alone changes nothing); setting it near
+the residual scale is what turns those episodes into a bounded gradient.
 
 The **prediction is not divided**, and that asymmetry is the whole point: the
 network's output already lives in normalized units, because ticket 05's warm
@@ -169,6 +178,20 @@ between candidates are left to the data instead of being regressed away.
 It is also cheaper: one encoder pass now serves a whole epoch's replay (the
 same economy the acting path has always had), where the per-vehicle version
 re-tokenized and re-encoded the identical snapshot ``m`` times.
+
+**What the joint sum costs, and what has not paid for it (ticket 08).** One
+scalar target per epoch means the gradient reaching every candidate term is
+the same residual, so the loss cannot see *how* a sum is split between
+candidates — and the split is the only thing :meth:`_sweep`'s ``argmin``
+reads. Below ~20 parameters that is survivable (the linear baseline cannot fit
+``V(s)`` well enough for the residual to vanish, so its action columns keep
+receiving signal); at 595k it is not, because the encoder fits ``V(s)`` easily
+and the arc's cost weights are then estimated from noise. **This is the
+standing explanation for why training adds so little here**, and the obvious
+structural remedy for it — a dueling ``V`` plus candidate-centred advantage —
+was implemented, measured, and rejected: see ``network.py``, "A dueling
+decomposition of ``Q`` — tried, measured, and rejected", including *why* it
+made things worse rather than better.
 
 **A tried-and-rejected variant, so it is not re-tried naively:** ticket 08
 measured ~24-33 % of these samples carrying an action the simulator discarded
@@ -257,6 +280,7 @@ class TransformerMonteCarloPolicy(Policy):
         batch_size: int,
         device: torch.device | None = None,
         grad_clip_norm: float | None = None,
+        huber_delta: float = 1.0,
     ) -> None:
         self.number_vehicles = number_vehicles
         self.geometry = geometry
@@ -275,6 +299,12 @@ class TransformerMonteCarloPolicy(Policy):
         # Ticket 08 (stability sweep): optional max L2 norm for one minibatch
         # step's gradient, over encoder+head jointly. None disables clipping.
         self.grad_clip_norm = grad_clip_norm
+        # Ticket 08: where the Huber loss switches from quadratic to linear.
+        # torch's default of 1.0 is far above every residual this regression
+        # produces (see ``learn``), so it is exactly ``0.5 * MSE`` -- see
+        # ``ExperimentConfig.neural_huber_delta``. Kept as the default here so
+        # every direct-construction call site is unchanged.
+        self.huber_delta = huber_delta
         # Ticket 12: this class builds several ad hoc tensors of its own (the
         # infeasible mask, claimed, the depot arc pair, learn's target) that
         # are never part of encoder/head's parameters, so `.to(device)` at
@@ -524,7 +554,7 @@ class TransformerMonteCarloPolicy(Policy):
                     target = torch.tensor(
                         targets[t] / self._return_scale, dtype=torch.float32, device=self.device
                     )
-                    losses.append(functional.huber_loss(q_pred, target))
+                    losses.append(functional.huber_loss(q_pred, target, delta=self.huber_delta))
                 loss = torch.stack(losses).mean()
                 loss.backward()
                 if self.grad_clip_norm is not None:

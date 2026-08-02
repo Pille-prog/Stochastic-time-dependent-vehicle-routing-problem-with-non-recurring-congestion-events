@@ -116,6 +116,24 @@ class ExperimentConfig:
     # ticket's lr/gradient-clipping stability sweep varies on
     # ``evaluation_seeds``; not a frozen acceptance parameter.
     neural_grad_clip_norm: float | None = None
+    # Ticket 08: which myopic warm start ``TokenEncoder`` initialises
+    # ``arc_embed`` row 0 with (``network.WARM_START_WEIGHTS``). ``"minutes"``
+    # (the default) is the nearest-feasible-Client null model spec.md's Gate A
+    # is written against; ``"cost"`` additionally prices the leg by the three
+    # single-Client projected cost components the arc token already carries,
+    # measured at -28% of episode cost against ``"minutes"``. Changing it
+    # changes the untrained network, hence Gate A's null -- to a *harder* one.
+    neural_warm_start: str = "minutes"
+    # Ticket 08: ``delta`` for ``learn``'s Huber loss. torch's own default of
+    # 1.0 is not a neutral choice here -- the standardized target and the
+    # network's output both live around 1e-2, so every residual falls in the
+    # quadratic branch and the loss is exactly ``0.5 * MSE``, robustness never
+    # engaging. One truncated training episode (the 40000-minus-200-per-visit
+    # terminal penalty, research note F10) then lands on *every* decision
+    # epoch's target in that episode, squared. A delta near the residual scale
+    # is what makes those episodes contribute a bounded gradient instead of a
+    # dominating one. Kept at 1.0 by default so the knob alone changes nothing.
+    neural_huber_delta: float = 1.0
     # "cpu", "cuda", or "auto" (ticket 12; amends spec.md decision 7). "auto"
     # is the default: it resolves once per run (torch_support.resolve_device)
     # to "cuda" if available, else "cpu". The old "cpu by default" choice
@@ -213,6 +231,19 @@ class ExperimentConfig:
             raise ValueError("neural_learning_rate must be positive")
         if self.neural_grad_clip_norm is not None and self.neural_grad_clip_norm <= 0:
             raise ValueError("neural_grad_clip_norm must be positive or null")
+        if self.neural_huber_delta <= 0:
+            raise ValueError("neural_huber_delta must be positive")
+        # Imported inside the method, not at module scope: this module is
+        # imported early and by everything, and the weights live next to the
+        # arc-token layout they index (tokenizer.py, which is deliberately
+        # torch-free) -- a deferred import keeps that dependency one-way.
+        from stdvrp.policies.tokenizer import WARM_START_WEIGHTS
+
+        if self.neural_warm_start not in WARM_START_WEIGHTS:
+            raise ValueError(
+                f"neural_warm_start must be one of {sorted(WARM_START_WEIGHTS)}, "
+                f"got {self.neural_warm_start!r}"
+            )
         if self.device not in ("cpu", "cuda", "auto"):
             raise ValueError(f"device must be 'cpu', 'cuda', or 'auto', got {self.device!r}")
 

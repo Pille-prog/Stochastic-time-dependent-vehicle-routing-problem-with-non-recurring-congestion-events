@@ -294,3 +294,164 @@ frozen, no cap overrides, `--device cpu` (ticket 12's measurement), clip off
 (the old `runs/gate_a/` checkpoints hold the pre-amendment architecture,
 `arc_embed` 2-wide, and stay as that run's evidence), log at
 `runs/gate_a_v2/log.txt`. Arms 1-2 after arm 0's picture is readable.
+
+**Interim read at ep ~823** (run still training; the arm's official numbers
+land in `runs/gate_a_v2/results_init0.json` at convergence). The live blocks
+pair against the *linear reference card* on `evaluation_seeds`; the null
+anchor for that seed set, measured by a standalone probe (untrained
+`init_seed=0` network, greedy, 50 seeds): **mean 5484.25** (min 2944, max
+8949). Against it: block @50 `5597` (+2 %), spikes @100 `12160` / @150
+`37179`, oscillation `6-14k` through two patience lr cuts, then **best @650
+`4150` = −24.3 % below the null** — at the lowest lr (2.7e-6) — and back to
+`7-8k` after. Reading: (a) *depth is unlocked* — the previous architecture's
+best-ever was −4.7 % vs null; the amended one reached −24 % at its best
+block, which is what the cost features were for; (b) *stability is not
+solved* — 1 of 16 blocks below the null, training episodes spiking to 54-93k
+with the minibatch loss jumping ~40× (2e-4 → 8.7e-3) in the same stretches,
+and eval means still moving thousands at lr 2.7e-6, so `Q` differences
+between candidates remain razor-thin; (c) the best arriving only after two
+lr cuts says the remaining binding constraint is the *optimization*, not the
+representation — exactly what the announced lr × `neural_grad_clip_norm`
+sweep on `evaluation_seeds` is for.
+
+### 2026-08-01 (fourth) — why it is not learning, measured: one large win, two rejected fixes
+
+The interim read above ends on "the remaining binding constraint is the
+*optimization*". That was wrong, and the measurements below are what corrected
+it. The binding constraint is that **the training objective cannot see the
+quantity the policy decides with** — and the largest improvement available was
+never in the optimizer at all, it was an initialization left at zero.
+
+#### 1. The failure mode, decomposed instead of inferred
+
+A probe over eight `evaluation_seeds` of the real dataset reporting cost
+*components* rather than the total (scratchpad `warm_start_probe.py`):
+
+| policy | total | delay | earliness | overtime | unserved |
+|---|---|---|---|---|---|
+| untrained null (`init_seed=0`) | 4754 | 3191 | 1070 | 8 | 0.0 |
+| `runs/gate_a_v2` best block (@650) | 3794 | 2590 | 318 | 183 | 0.0 |
+| `runs/gate_a_v2` latest (@~850) | 8293 | **6604** | 977 | 64 | 0.2 |
+
+The degraded network serves **everybody** — `unserved` stays at zero. So this
+is not the fleet retiring early, not a depot-masking regression, not a
+simulator effect. It is a *ranking* that got worse: the same Clients, visited
+in a worse order, paying double the delay. That rules out the whole class of
+explanations the previous comment was still entertaining.
+
+#### 2. Why the ranking is what training damages
+
+`learn` regresses `Q_joint(s,a) = sum_v Q(s,v,a_v)` — one scalar per decision
+epoch — onto `U_t`. The gradient reaching every candidate term of that epoch
+is the *same* residual, so the loss is mathematically invariant to how a given
+sum is split across candidates. The per-vehicle `argmin` reads nothing *but*
+that split. The objective and the decision are decoupled.
+
+The linear baseline survives this because 19 weights **cannot** fit `V(s)` well
+enough to kill the residual, so its action columns keep receiving signal. At
+595k parameters the encoder fits `V(s)` easily, the residual becomes noise, and
+the arc's cost weights — the ones the `argmin` reads — random-walk. Loss `1e-4`
+with a policy degrading below its own null is exactly that signature, and it is
+what the log has shown for 950 episodes.
+
+#### 3. What landed: the warm start was pricing the wrong thing
+
+Since the decision-1 amendment the arc token carries the projected cost
+components — and `arc_embed` row 0 was still `[1,0,0,0,0,0]`, so they were
+**init-inert by construction**, and gradient descent was being asked to
+rediscover from noisy Monte Carlo returns an arithmetic identity the tokenizer
+had already computed exactly. Setting that row to price the leg instead:
+
+`Q = (minutes + earliness_cost + delay_cost + overtime_cost) / horizon_length`
+
+— one minute-equivalent currency, every term already scaled the same way, no
+free parameter. Chosen over variants on eight `evaluation_seeds`
+(cost-without-minutes 34601: with no tie-break, the many zero-cost candidates
+are picked arbitrarily far away; `+future_delay` at full weight 5185 and at a
+tenth 3778; `future_delay` alone 5413), then confirmed on the **full 50
+`evaluation_seeds`, never `test_seeds`**:
+
+| warm start | mean over 50 `evaluation_seeds` |
+|---|---|
+| `minutes` (the frozen null) | 5484.25 |
+| **`cost`** | **3693.23 — −32.7%, wins 47/50, Wilcoxon p = 2.5e-14** |
+
+For scale: the *best block of 650 training episodes* on this seed set was 4150
+(−24.3%). **The initialization beats the training, by a wide margin, at zero
+compute.** Shipped as `neural_warm_start` (`config.py`; the weight vectors live
+in `tokenizer.py::WARM_START_WEIGHTS`, beside the arc-token layout they index
+and in the one module that needs no torch); default `minutes`, with
+`experiments/chengdu/config.yaml` set to `cost`.
+
+#### 4. Rejected on measurement: the dueling decomposition
+
+§2 has a standard structural remedy — `Q(s,v,a) = V(s,v) + [A − mean over the
+sweep's candidates of A]` (Wang et al. 2016) — which makes fitting the level
+`V`'s job by construction and identifies the advantage from *within-state*
+contrast. It was implemented with the null model provably preserved
+(subtracting one constant per sweep cannot move an `argmin`; measured —
+identical null means `577.22` and `542.82` with and without it).
+
+It made learning **much worse**, and the reason is worth more than the code
+was. The `argmin` picks the *minimum*, so the chosen action's centred advantage
+is negative while the target is positive; the residual therefore pushes it *up,
+toward the candidate mean* — actively un-learning that this action was the best
+one — every step, until `V` catches up. Without centring, that same pressure
+raises all candidates near-equally (they share parameters): a level shift the
+`argmin` cannot see. **The centring removed a benign escape valve and turned a
+level error into ranking damage.** The level error is large for a structural
+reason: `Q` starts in `minutes/horizon_length` units because of the warm start
+while the return lives on an unrelated scale, so the optimizer's first job is
+reconciling two arbitrary scales — and it pays for it with the ranking. That is
+the "fitted the mean and threw the ranking away" signature already recorded in
+`transformer_policy.py` under "Target scaling", one layer deeper. Anything
+revisiting this must fix the scale mismatch *first*. Reverted; kept in
+`network.py`'s docstring ("A dueling decomposition of `Q` — tried, measured,
+and rejected").
+
+#### 5. Rejected on measurement: the Huber knee
+
+`huber_loss`'s default `delta=1.0` is ~100× every residual this regression
+produces, so it is exactly `0.5 * MSE` — verified twice: against torch's own
+piecewise definition, and by a test showing `delta=1.0` and `delta=1e6` leave
+**bit-identical** parameters after a real episode. The robustness never
+engaged, and a truncated episode's terminal penalty (F10) entered squared on
+all ~400 of that episode's epochs. But `delta=0.02` was far *worse*, not
+better: shrinking the knee also makes *ordinary* samples near-linear, so their
+gradients go sign-like and constant-magnitude, which under Adam is a much
+larger effective step on precisely the quantity the `argmin` reads. Shipped as
+`neural_huber_delta` **defaulted to 1.0** — a knob that records a measurement
+rather than one that changes behaviour.
+
+#### 6. All arms, mini fixture (200 episodes, seeds 100..109, `init_seed=0`, lr 3.0e-5)
+
+| arm | null | best block | mean over blocks | last 5 | end | worse than null |
+|---|---|---|---|---|---|---|
+| control (pre-cost-features) | 577.2 | −5.27% | −1.55% | +0.47% | +2.7% | 5/20 |
+| **+ cost features (committed)** | 577.2 | −5.68% | **−2.42%** | **−1.84%** | **−2.2%** | **3/20** |
+| + dueling | 577.2 | −5.99% | +10.73% | +31.90% | +34.0% | 15/20 |
+| + dueling + `cost` warm start | 542.8 | +0.88% | +19.63% | +58.23% | +27.1% | 20/20 |
+| + dueling + `cost` + huber 0.02 | 542.8 | +0.30% | +53.98% | +107.85% | +73.0% | 15/15 |
+| `cost` warm start, no dueling | 542.8 | −3.94% | +2.57% | +3.37% | +4.9% | 14/20 |
+| dueling, value branch ×10 | 577.2 | **−7.28%** | +2.44% | +15.05% | +23.8% | 9/20 |
+
+Read: the committed learning rule is the most *stable* arm; the `cost` warm
+start gives the best *absolute* policy (its untrained null, 542.8, already
+beats every trained network in the table — the best trained `minutes` block is
+577.2 × (1 − 0.0568) = 544.4); and **no arm shows training reliably adding
+value on top of a good initialization.**
+
+#### 7. What this means for the gate
+
+- The `minutes` arm in `runs/gate_a_v2/` is left running to convergence: it is
+  the record for the **frozen** null, and its numbers belong here as-is. The
+  rejected changes were reverted, so its checkpoints stay loadable.
+- `experiments/chengdu/config.yaml` now carries `neural_warm_start: cost`,
+  which makes Gate A's null the 3693 policy instead of the 5484 one — a
+  **harder** gate, decided on `evaluation_seeds`, which is exactly where
+  spec.md puts architecture tuning. A criterion moved in the direction that
+  makes it harder to pass is not a criterion rewritten to be passable.
+- The honest statement of where this stands: **the network is not yet adding
+  value over its own initialization.** Passing Gate A against the weak null
+  would be true and substantively misleading. Whatever closes this ticket has
+  to say so.

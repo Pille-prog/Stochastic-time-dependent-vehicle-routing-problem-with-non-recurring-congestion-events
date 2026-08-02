@@ -56,3 +56,9 @@ neural_learn_passes: 4
 neural_batch_size: 8
 # See experiments/chengdu/config.yaml: null disables gradient clipping.
 neural_grad_clip_norm: null
+# Ticket 08: left at the defaults deliberately. This fixture is the A/B bench
+# for the warm start and the Huber knee (issue 08's mini-fixture table), so it
+# has to reproduce the *unchanged* behavior; a variant config overrides one
+# knob at a time on top of it.
+neural_warm_start: minutes
+neural_huber_delta: 1.0
