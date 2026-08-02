@@ -583,3 +583,82 @@ the tokenizer was already computing and the warm start was throwing away.
   and the gate is void. Flip it to `cost` for Gate B, not before.
 - Whatever the arms say, Gate B inherits a live question the gate itself does
   not ask: the best *policy* measured here is untrained.
+
+### 2026-08-01 (seventh) — conclusions
+
+Consolidated so the sections above do not have to be re-derived. Every number
+here is on the **50 held-out `test_seeds`**, from
+`runs/gate_a_v2/results_init0.json` and `experiments/chengdu/reference_card.json`
+(`test_seed_costs`, the baseline's own per-seed vector on those same seeds).
+
+#### Where the policy actually stands
+
+| policy | mean cost | vs. the linear baseline |
+|---|---|---|
+| linear baseline, best cell (budget 100, `test_action_count` 40) | **3384.82** | — |
+| neural, untrained, `minutes` warm start (Gate A's null) | 5299.48 | +56.6% |
+| neural, **trained** to convergence, 1150 episodes | 4423.73 | +30.7% |
+| neural, untrained, `cost` warm start — **zero training** | **3811.28** | **+12.6%** |
+
+The linear baseline still wins, on 39 of the 50 seeds against the trained
+network. But the gap went from +56.6% to +12.6%, and **three quarters of that
+came from the warm start, one quarter from 1150 episodes of training.**
+
+#### 1. It learns — that question is closed
+
+Arm 0, converged: +15.49% mean reduction over its own null (median +21.02%),
+cheaper on 39/50 seeds, Wilcoxon p = 6.21e-05, calibration Spearman 0.543
+against −0.349 untrained. Parts 1 and 3 PASS. The `GATE A: FAIL` line means
+"one of three arms has run"; part 2 is unmeasured, not failed.
+
+#### 2. But learning is not where the value was
+
+1150 episodes bought 5299 → 4424. One line of initialization bought
+5299 → 3811. The untrained network beats the trained one by 13.8%.
+
+#### 3. Why, structurally — this is the part worth keeping
+
+`learn` regresses **one scalar per decision epoch** onto the Monte Carlo
+return, so every candidate term of that epoch receives the same residual and
+the loss is invariant to how the sum is split between candidates. That split
+is the only thing the `argmin` reads. Capacity makes this *worse*: the linear
+baseline survives because 19 weights cannot fit `V(s)` well enough to kill the
+residual; at 595k the encoder fits it easily and what remains is noise.
+Compounding it, `Q_joint` starts at 0.3-0.9 against a target of 0.03, so the
+first ~100 episodes are spent walking that gap down with same-signed steps
+that drag the ranking with them.
+
+#### 4. The pattern across four attempts — the strongest evidence here
+
+| attempt | result |
+|---|---|
+| `cost` warm start | **−32.7%** (50 `evaluation_seeds`, p = 2.5e-14) |
+| level gain (a fast home for the level) | better from `minutes`, **worse** from `cost` |
+| dueling `V` + centred advantage | mean over blocks −2.42% → **+10.73%** |
+| Huber knee at 0.02 | **+129%** by episode 140 |
+
+The last three share a property: **each makes the optimizer more effective, and
+each only helps when the starting policy is bad.** From a good starting point
+they accelerate the damage. That is the signature of an objective that is not
+the one we want optimized, and it is stronger evidence than any of the
+theoretical arguments in the sections above — which is why the two rejected
+changes are kept in the docstrings rather than deleted.
+
+#### 5. What this hands to Gate B
+
+- The binding constraint measured here is the **estimator**, not the
+  representation. That points at the research note's ranked #3/#4 —
+  least-squares Monte Carlo / LSTD-Q (removes the learning rate and the
+  scaling pathology at the root), adaptive stepsize, common random numbers —
+  and **not** at #5, which is now done.
+- **Gate B must compare the linear baseline against the untrained `cost`
+  network as well as the trained one.** The spec frames Gate B as trained
+  transformer vs. baseline best cell; on this evidence the best transformer
+  *policy* is untrained, and a comparison that omits it would report the wrong
+  contender. 3811.28 vs 3384.82 is +12.6%; Gate B needs ≥3% the other way.
+
+#### Status
+
+Arms 1 and 2 launched (`runs/gate_a_v2/log_init12.txt` →
+`results_init12.json`). If part 1 holds on both, all three parts are satisfied
+and this ticket closes with the numbers above.
