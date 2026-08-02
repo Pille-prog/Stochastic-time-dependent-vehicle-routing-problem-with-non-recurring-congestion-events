@@ -657,8 +657,27 @@ changes are kept in the docstrings rather than deleted.
   *policy* is untrained, and a comparison that omits it would report the wrong
   contender. 3811.28 vs 3384.82 is +12.6%; Gate B needs ≥3% the other way.
 
-#### Status
+#### Status, and how to pick this up
 
-Arms 1 and 2 launched (`runs/gate_a_v2/log_init12.txt` →
-`results_init12.json`). If part 1 holds on both, all three parts are satisfied
-and this ticket closes with the numbers above.
+Arms 1 and 2 are **running** (`runs/gate_a_v2/log_init12.txt` →
+`results_init12.json`, ~4-6h each, launched 2026-08-01). If part 1 holds on
+both, all three parts are satisfied and this ticket closes with the numbers
+above.
+
+To resume:
+
+1. `tail runs/gate_a_v2/log_init12.txt` — the run prints a Gate A verdict block
+   at the end. If the process died, relaunch with the command in the previous
+   section; there is no auto-resume, and the config must still read
+   `neural_warm_start: minutes` (it does, deliberately — see the YAML comment).
+2. Copy `runs/gate_a_v2/results_init12.json` into
+   `.scratch/neural-policy/results/` beside `gate_a_init0.json`. `runs/` is
+   gitignored, so an artefact left there exists on one machine only.
+3. The raw evidence for **every table in these Comments** is versioned under
+   `.scratch/neural-policy/results/` with its own README — the Gate A arm-0
+   result with its per-seed vectors, the 87-episode `cost` arm log, the ten
+   mini-fixture A/B runs, and the probe scripts. Nothing here has to be taken
+   on trust.
+4. Real-dataset runs need `--data-dir "C:/Users/ferna/OneDrive/Documentos/Mega city"`:
+   the repository moved, so the config's relative `data_dir: ../../..` no
+   longer resolves.
