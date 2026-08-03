@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+import numpy as np
 from scipy import stats
 
 #: Evaluation blocks without an improved best mean before the learning rate
@@ -117,6 +118,34 @@ def paired_wilcoxon_p(a: tuple[float, ...], b: tuple[float, ...]) -> float:
     return float(result.pvalue)
 
 
+def candidate_spread_ratio(pairs: tuple[tuple[float, float], ...]) -> float:
+    """``r = sd_candidates(W.phi) / sd_candidates(c)`` (ticket 17, Gate A''s
+    companion diagnostic, spec.md decision 10's amendment).
+
+    ``pairs`` is one ``(sd_residual, sd_cost)`` per (decision epoch, vehicle)
+    with at least two candidates
+    (``TransformerMonteCarloPolicy.spread_samples``) -- pooled here as the
+    mean residual spread over the mean cost spread, across every sample given.
+    ``NaN`` on no samples, or when the mean cost spread is exactly zero (a
+    degenerate pool where every candidate's myopic base agreed, so the ratio
+    is undefined rather than infinite) -- reported as such rather than
+    crashing a live training report or a gate run over a diagnostic.
+
+    ``r ~= 0``: the learned term never touches the ranking (or `lambda`
+    shrank it away). ``r`` in ``0.1..0.5``: correcting the base without
+    overwriting it -- the target. ``r >> 1``: overwriting ``c(s, a)`` --
+    ticket 08's failure mode, returning.
+    """
+    if not pairs:
+        return float("nan")
+    residual_sds = [residual_sd for residual_sd, _cost_sd in pairs]
+    cost_sds = [cost_sd for _residual_sd, cost_sd in pairs]
+    mean_cost_sd = float(np.mean(cost_sds))
+    if mean_cost_sd == 0.0:
+        return float("nan")
+    return float(np.mean(residual_sds)) / mean_cost_sd
+
+
 @dataclass(frozen=True, slots=True)
 class EvaluationReport:
     """One evaluation block, paired seed-by-seed against the reference card.
@@ -128,6 +157,14 @@ class EvaluationReport:
     ``RidgeAccumulator.episodes_excluded``). Both default to ``0`` so a
     caller building a report without them (every test predating ticket 16)
     keeps working unchanged, at :attr:`exclusion_rate` ``0.0``.
+
+    ``spread_samples`` (ticket 17) is every evaluation Episode's
+    candidate-spread pairs this block ran, pooled
+    (``TransformerMonteCarloPolicy.spread_samples`` from every
+    ``evaluation_seeds`` Episode -- ``Trainer._run_neural_evaluation_block``).
+    Defaults to ``()`` so a report built without it (every test predating
+    ticket 17) keeps working unchanged, at :attr:`candidate_spread_ratio`
+    ``NaN``.
     """
 
     episodes_completed: int
@@ -135,6 +172,7 @@ class EvaluationReport:
     reference_seed_costs: tuple[float, ...]
     training_episodes: int = 0
     excluded_episodes: int = 0
+    spread_samples: tuple[tuple[float, float], ...] = ()
 
     def __post_init__(self) -> None:
         if len(self.seed_costs) != len(self.reference_seed_costs):
@@ -156,6 +194,12 @@ class EvaluationReport:
         if self.training_episodes == 0:
             return 0.0
         return self.excluded_episodes / self.training_episodes
+
+    @property
+    def candidate_spread_ratio(self) -> float:
+        """``r`` (ticket 17, Gate A''s companion diagnostic) over this block's
+        pooled ``spread_samples`` -- see :func:`candidate_spread_ratio`."""
+        return candidate_spread_ratio(self.spread_samples)
 
     @property
     def mean_cost(self) -> float:
@@ -355,6 +399,14 @@ def format_evaluation_block(report: EvaluationReport, state: ConvergenceState) -
             f"              excluded {report.excluded_episodes}/{report.training_episodes} "
             f"training episodes ({report.exclusion_rate * 100:.1f}%)"
         )
+    # Ticket 17's companion diagnostic (spec.md decision 10's amendment):
+    # "reported every block", not gated -- only printed once there is at
+    # least one candidate-spread sample to pool (every real evaluation block;
+    # pre-ticket-17 reports built for other tests omit it, at its NaN default).
+    if report.spread_samples:
+        r_value = report.candidate_spread_ratio
+        r_display = "nan" if r_value != r_value else f"{r_value:.3f}"  # NaN != NaN
+        lines.append(f"              r = sd(W.phi)/sd(c) = {r_display}")
     lines.append(_BLOCK_RULE)
     return "\n".join(lines)
 

@@ -94,16 +94,24 @@ class SeedDeterministicTrainingStub:
         return episode_result(500.0 - (seed % 100)), 0.01 * (seed % 7)
 
 
+#: A stub evaluation runner's return shape since ticket 17: cost plus this
+#: Episode's candidate-spread samples (``TransformerMonteCarloPolicy.spread_samples``).
+#: Every stub below returns no samples -- these tests exercise the live
+#: report's cost/convergence machinery, not the r diagnostic
+#: (``test_neural_report.py`` covers that directly).
+_NO_SPREAD_SAMPLES: tuple[tuple[float, float], ...] = ()
+
+
 class SeedDeterministicEvaluationStub:
     """Cost purely a function of ``seed`` -- same property, for the resume test."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    def __call__(self, **kwargs: Any) -> EpisodeResult:
+    def __call__(self, **kwargs: Any) -> tuple[EpisodeResult, tuple[tuple[float, float], ...]]:
         self.calls.append(kwargs)
         seed = kwargs["seed"]
-        return episode_result(500.0 + (seed % 5))
+        return episode_result(500.0 + (seed % 5)), _NO_SPREAD_SAMPLES
 
 
 class ScriptedEvaluationStub:
@@ -114,12 +122,12 @@ class ScriptedEvaluationStub:
         self.n_seeds = n_seeds
         self.block_means = block_means
 
-    def __call__(self, **kwargs: Any) -> EpisodeResult:
+    def __call__(self, **kwargs: Any) -> tuple[EpisodeResult, tuple[tuple[float, float], ...]]:
         self.calls.append(kwargs)
         index = len(self.calls) - 1
         block = min(index // self.n_seeds, len(self.block_means) - 1)
         within_block = index % self.n_seeds
-        return episode_result(self.block_means[block] + (within_block % 3) - 1)
+        return episode_result(self.block_means[block] + (within_block % 3) - 1), _NO_SPREAD_SAMPLES
 
 
 class ExclusionStub:
@@ -206,6 +214,75 @@ class TestLiveReport:
         requested_seeds = [call["seed"] for call in evaluation_stub.calls]
         assert requested_seeds == list(config.evaluation_seeds)
         assert result.evaluations[0].episodes_completed == 4
+
+    def test_spread_samples_are_pooled_across_every_seed_of_a_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ticket 17: each evaluation seed's own ``spread_samples`` must all
+        land in the same block's ``EvaluationReport``, not just the last
+        seed's."""
+        config = make_config(evaluation_seed_count=3)
+        n_seeds = len(config.evaluation_seeds)
+
+        def evaluation(**kwargs: Any) -> tuple[EpisodeResult, tuple[tuple[float, float], ...]]:
+            seed = kwargs["seed"]
+            return episode_result(400.0), ((float(seed), 1.0),)
+
+        patch_runners(monkeypatch, ConstantTrainingStub(), evaluation)
+        trainer = Trainer(make_world(config), log=lambda _m: None)
+
+        result = trainer.train_neural(
+            reference_card=make_reference_card(config),
+            checkpoint_path=tmp_path / "ckpt.pt",
+            max_episodes=4,
+            evaluation_cadence_minimum=4,
+        )
+
+        assert len(result.evaluations[0].spread_samples) == n_seeds
+        assert {residual for residual, _cost in result.evaluations[0].spread_samples} == set(
+            float(seed) for seed in config.evaluation_seeds
+        )
+
+
+class TestTrainEncoderArm:
+    """Ticket 17: ``train_neural(train_encoder=...)`` reaches
+    ``build_neural_policy_state`` -- the only place it changes anything
+    (which parameters ``policy_state.optimizer`` covers)."""
+
+    def test_defaults_to_the_frozen_arm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = make_config()
+        evaluation = ScriptedEvaluationStub(len(config.evaluation_seeds), [400.0])
+        patch_runners(monkeypatch, ConstantTrainingStub(), evaluation)
+        trainer = Trainer(make_world(config), log=lambda _m: None)
+
+        result = trainer.train_neural(
+            reference_card=make_reference_card(config),
+            checkpoint_path=tmp_path / "ckpt.pt",
+            max_episodes=4,
+            evaluation_cadence_minimum=4,
+        )
+
+        assert result.policy_state.train_encoder is False
+
+    def test_train_encoder_true_is_carried_onto_the_policy_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = make_config()
+        evaluation = ScriptedEvaluationStub(len(config.evaluation_seeds), [400.0])
+        patch_runners(monkeypatch, ConstantTrainingStub(), evaluation)
+        trainer = Trainer(make_world(config), log=lambda _m: None)
+
+        result = trainer.train_neural(
+            reference_card=make_reference_card(config),
+            checkpoint_path=tmp_path / "ckpt.pt",
+            max_episodes=4,
+            evaluation_cadence_minimum=4,
+            train_encoder=True,
+        )
+
+        assert result.policy_state.train_encoder is True
 
 
 class TestConvergence:

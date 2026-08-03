@@ -17,14 +17,18 @@ network's weights do: an accumulator rebuilt fresh every Episode would never
 accumulate anything *across* them, which is the whole point of ticket 16.
 
 **RNG state, and why the checkpoint does not need to persist it.** Every
-stochastic stream this module uses — congestion, velocity and exploration —
-is spawned fresh from the Episode's own ``seed`` (:func:`spawn_neural_episode_rngs`,
+stochastic stream this module uses — congestion, velocity, exploration and
+(since ticket 17) the trained-encoder arm's minibatch shuffle — is spawned
+fresh from the Episode's own ``seed`` (:func:`spawn_neural_episode_rngs`,
 extending ticket 13's ``_spawn_episode_rngs``), never carried over from the
 previous Episode. Resuming a run therefore needs only the next episode
 *index* (which determines every subsequent Episode's seed and hence its
 streams) — there is no separate generator state to serialize. Ticket 16
-retires the fourth stream this module used to spawn (``learn_rng``, the
-per-episode minibatch shuffle) — the ridge estimator shuffles nothing.
+retired the fourth stream this module used to spawn (``learn_rng``, the
+per-episode minibatch shuffle) — the ridge estimator shuffles nothing; ticket
+17 brings it back for the trained-encoder arm's own SGD minibatch shuffle,
+which the frozen arm still has no use for (built regardless, at negligible
+cost, so both arms share the same per-episode stream layout).
 """
 
 from __future__ import annotations
@@ -43,7 +47,11 @@ from stdvrp.network.shortest_path_cache import ShortestPathCache
 from stdvrp.policies.network import QHead, TokenEncoder
 from stdvrp.policies.ridge_estimator import RidgeAccumulator
 from stdvrp.policies.torch_support import resolve_device
-from stdvrp.policies.transformer_policy import CalibrationPair, TransformerMonteCarloPolicy
+from stdvrp.policies.transformer_policy import (
+    CalibrationPair,
+    ResidualCalibrationPair,
+    TransformerMonteCarloPolicy,
+)
 from stdvrp.simulation.episode import EpisodeResult
 from stdvrp.simulation.model import Model
 from stdvrp.simulation.state import State, TrainingSnapshot
@@ -54,15 +62,23 @@ __all__ = [
     "build_neural_policy_state",
     "run_neural_calibration_episode",
     "run_neural_evaluation_episode",
+    "run_neural_residual_calibration_episode",
     "run_neural_training_episode",
     "spawn_neural_episode_rngs",
 ]
 
-NeuralEpisodeRngs = tuple[np.random.Generator, np.random.Generator, np.random.Generator]
+#: candidate-spread pairs (ticket 17): ``(sd_candidates(W.phi), sd_candidates(c))``
+#: per (decision epoch, vehicle) -- the r diagnostic's raw material
+#: (``TransformerMonteCarloPolicy.spread_samples``).
+SpreadSamples = tuple[tuple[float, float], ...]
+
+NeuralEpisodeRngs = tuple[
+    np.random.Generator, np.random.Generator, np.random.Generator, np.random.Generator
+]
 
 
 def spawn_neural_episode_rngs(seed: int) -> NeuralEpisodeRngs:
-    """Three independent per-Episode streams: congestion, velocity, exploration.
+    """Four independent per-Episode streams: congestion, velocity, exploration, learn.
 
     Extends :func:`stdvrp.simulation.episode._spawn_episode_rngs` (ticket 13,
     ADR-0001 phase 2) with a third child for epsilon-greedy exploration — a
@@ -71,19 +87,24 @@ def spawn_neural_episode_rngs(seed: int) -> NeuralEpisodeRngs:
     for the same reason ``episode.py`` itself stays untouched: this file
     predicts a zero self-golden diff by never editing the pinned baseline.
 
-    A fourth stream (``learn_rng``, the per-episode minibatch shuffle)
-    existed here through ticket 15; ticket 16 retires it along with the SGD
-    loop it fed (``transformer_policy.py``, "The estimator") -- the ridge
-    estimator has nothing to shuffle. Dropping the tail of a
-    ``SeedSequence.spawn`` call does not change the children still requested:
-    ``spawn(3)``'s three children are bit-identical to ``spawn(4)``'s first
-    three, so every other stream this function returns is unaffected.
+    A fourth stream (``learn_rng``, the per-episode minibatch shuffle) existed
+    here through ticket 15; ticket 16 retired it along with the SGD loop it
+    fed (the ridge estimator has nothing to shuffle) and confirmed that
+    dropping it left the first three streams unaffected (``spawn(3)``'s
+    children are bit-identical to ``spawn(4)``'s first three). Ticket 17
+    brings it back unconditionally for the trained-encoder arm's own SGD
+    minibatch shuffle (``transformer_policy.py``, "The two arms") — the
+    frozen arm simply never reads it, at the cost of one unused
+    ``default_rng`` construction per Episode.
     """
-    congestion_seed, velocity_seed, exploration_seed = np.random.SeedSequence(seed).spawn(3)
+    congestion_seed, velocity_seed, exploration_seed, learn_seed = np.random.SeedSequence(
+        seed
+    ).spawn(4)
     return (
         np.random.default_rng(congestion_seed),
         np.random.default_rng(velocity_seed),
         np.random.default_rng(exploration_seed),
+        np.random.default_rng(learn_seed),
     )
 
 
@@ -105,10 +126,11 @@ class NeuralPolicyState:
     unamended by ticket 16, so ``Trainer.train_neural``'s convergence loop
     still needs a ``current_lr`` to cut on a patience trigger — purely as a
     stopping heuristic now, decoupled from what is actually being fit; and
-    ticket 17's *trained*-encoder arm ("two timescales",
-    ``transformer_policy.py``'s module docstring) resumes training
-    ``encoder``/``head.layer1`` by SGD on the same residual and will need a
-    real optimizer over exactly these parameters again.
+    (ticket 17) the *trained*-encoder arm resumes training ``encoder``/
+    ``head.layer1`` by SGD on the same residual with exactly this optimizer,
+    scoped to only those two parameter groups (never ``head.linear``/
+    ``head.layer2``, which stay exclusively the ridge's to move) --
+    see :func:`build_neural_policy_state`.
     """
 
     encoder: TokenEncoder
@@ -116,6 +138,10 @@ class NeuralPolicyState:
     optimizer: torch.optim.Optimizer
     ridge: RidgeAccumulator
     device: torch.device
+    # Ticket 17: which arm this state belongs to (transformer_policy.py, "The
+    # two arms"). False (the default) is the frozen-encoder arm ticket 16
+    # shipped -- every existing call site keeps building that arm unchanged.
+    train_encoder: bool = False
 
     @property
     def current_lr(self) -> float:
@@ -129,7 +155,7 @@ class NeuralPolicyState:
 
 
 def build_neural_policy_state(
-    config: ExperimentConfig, init_rng: np.random.Generator
+    config: ExperimentConfig, init_rng: np.random.Generator, *, train_encoder: bool = False
 ) -> NeuralPolicyState:
     """Fresh network + ridge accumulator from ``config``'s architecture fields.
 
@@ -144,6 +170,14 @@ def build_neural_policy_state(
     it must match ``QHead``'s own ``linear``/``layer2`` shapes exactly, so it
     is built here, right after ``head``, rather than independently from the
     architecture config fields.
+
+    ``train_encoder`` (ticket 17) scopes ``optimizer`` to ``encoder.parameters()``
+    plus ``head.layer1.parameters()`` **only** — never ``head.linear``/
+    ``head.layer2``, which the ridge solve exclusively owns on both arms
+    (``head.load_w_vector``). Building the same restricted optimizer
+    regardless of ``train_encoder`` (rather than only when the trained arm
+    asks for it) keeps this function's return shape uniform and costs
+    nothing: the frozen arm never calls ``.step()`` on it, exactly as before.
     """
     device = resolve_device(config.device)
     encoder = TokenEncoder(
@@ -161,7 +195,7 @@ def build_neural_policy_state(
         level_gain=config.neural_level_gain,
     )
     optimizer = torch.optim.Adam(
-        chain(encoder.parameters(), head.parameters()), lr=config.neural_learning_rate
+        chain(encoder.parameters(), head.layer1.parameters()), lr=config.neural_learning_rate
     )
     ridge = RidgeAccumulator.zeros(
         head.feature_dim,
@@ -169,7 +203,12 @@ def build_neural_policy_state(
         ridge=config.neural_ridge_lambda,
     )
     return NeuralPolicyState(
-        encoder=encoder, head=head, optimizer=optimizer, ridge=ridge, device=device
+        encoder=encoder,
+        head=head,
+        optimizer=optimizer,
+        ridge=ridge,
+        device=device,
+        train_encoder=train_encoder,
     )
 
 
@@ -188,10 +227,14 @@ def _build_episode(
 
     ``depot`` and ``config.epsilon`` reach the built ``TransformerMonteCarloPolicy``
     unconditionally (harmless for the two read-only runners: greedy ``decide``
-    never consults ``epsilon``, only ``decide_train`` does).
+    never consults ``epsilon``, only ``decide_train`` does). ``learn_rng`` is
+    always spawned and always passed through (ticket 17): the frozen arm's
+    ``TransformerMonteCarloPolicy`` simply never reads it (``train_encoder=False``
+    there), matching how ``config.epsilon`` reaches the read-only runners
+    unconditionally too.
     """
     demand = client_generator.generate(seed)
-    congestion_rng, velocity_rng, exploration_rng = spawn_neural_episode_rngs(seed)
+    congestion_rng, velocity_rng, exploration_rng, learn_rng = spawn_neural_episode_rngs(seed)
 
     number_vehicles = demand.vehicle_count
     clients = [client.node for client in demand.clients]
@@ -219,6 +262,12 @@ def _build_episode(
         exploration_rng=exploration_rng,
         solve_cadence=config.neural_solve_cadence,
         device=policy_state.device,
+        train_encoder=policy_state.train_encoder,
+        encoder_optimizer=policy_state.optimizer if policy_state.train_encoder else None,
+        learn_rng=learn_rng if policy_state.train_encoder else None,
+        learn_passes=config.neural_learn_passes,
+        batch_size=config.neural_batch_size,
+        grad_clip_norm=config.neural_grad_clip_norm,
     )
     model = Model(
         state,
@@ -300,9 +349,20 @@ def run_neural_evaluation_episode(
     policy_state: NeuralPolicyState,
     config: ExperimentConfig,
     depot: int = 0,
-) -> EpisodeResult:
-    """Run one greedy evaluation Episode; reads ``policy_state``, never mutates it."""
-    model, _policy = _build_episode(
+) -> tuple[EpisodeResult, SpreadSamples]:
+    """Run one greedy evaluation Episode; reads ``policy_state``, never mutates it.
+
+    Also returns this Episode's candidate-spread samples (ticket 17:
+    ``TransformerMonteCarloPolicy.spread_samples``, accumulated by every
+    ``decide()`` call this Episode made) -- Gate A''s ``r`` diagnostic's raw
+    material, and spec.md's live per-block report (``neural_report.py``,
+    ``EvaluationReport.candidate_spread_ratio``). Purely additive
+    instrumentation over ticket 16's return shape: it does not change which
+    decision this Episode's ``policy`` makes, only what gets read back off it
+    afterwards, so every existing caller needs updating for the new element,
+    not for a changed cost.
+    """
+    model, policy = _build_episode(
         seed=seed,
         client_generator=client_generator,
         travel_time_model=travel_time_model,
@@ -314,7 +374,7 @@ def run_neural_evaluation_episode(
     )
     model.run_evaluation_episode()
 
-    return _episode_result(model)
+    return _episode_result(model), tuple(policy.spread_samples)
 
 
 def run_neural_calibration_episode(
@@ -367,3 +427,59 @@ def run_neural_calibration_episode(
 
     pairs = policy.calibration_pairs(snapshots, actions, rewards)
     return _episode_result(model), pairs
+
+
+def run_neural_residual_calibration_episode(
+    *,
+    seed: int,
+    client_generator: ClientGenerator,
+    travel_time_model: TravelTimeModel,
+    shortest_path_cache: ShortestPathCache,
+    congestion_generator: CongestionGenerator,
+    policy_state: NeuralPolicyState,
+    config: ExperimentConfig,
+    depot: int = 0,
+) -> tuple[EpisodeResult, list[ResidualCalibrationPair], SpreadSamples]:
+    """Run one greedy Episode for Gate A' (ticket 17): cost, residual
+    calibration pairs and candidate-spread samples, in one pass.
+
+    Gate A' redefines the calibration check onto the residual the network is
+    actually regressed onto (``W . phi`` against ``y~``), because
+    ``rho(Q, U_t)`` -- ticket 08's original pairing, :func:`run_neural_calibration_episode`
+    below -- passes at ``W = 0`` with no parameter having moved (spec.md,
+    "Part 3 is redefined"). A sibling of that function, not a replacement:
+    ``gate_a.py`` and :func:`run_neural_calibration_episode` stay untouched
+    for ticket 08's own history, and this duplicates their capture loop
+    (module docstring precedent: ``transformer_policy.py``'s
+    ``_already_acquired_cost``) rather than coupling the historical gate's
+    code path to this one's.
+
+    Never mutates ``policy_state``: greedy ``decide`` (not ``decide_train``),
+    and ``TransformerMonteCarloPolicy.residual_calibration_pairs`` builds no
+    gradient and moves no parameter, exactly like ``calibration_pairs``.
+    """
+    model, policy = _build_episode(
+        seed=seed,
+        client_generator=client_generator,
+        travel_time_model=travel_time_model,
+        shortest_path_cache=shortest_path_cache,
+        congestion_generator=congestion_generator,
+        policy_state=policy_state,
+        config=config,
+        depot=depot,
+    )
+
+    snapshots: list[TrainingSnapshot] = []
+    actions: list[list[int]] = []
+    rewards: list[float] = [0.0]
+    while not model.state.terminal:
+        action = policy.decide(model.state)
+        snapshots.append(TrainingSnapshot.capture(model.state))
+        actions.append(list(action))
+        reward = model.transition_function(action)
+        rewards.append(reward)
+        model.total_state_counter += 1
+    model.velocities.release()
+
+    pairs = policy.residual_calibration_pairs(snapshots, actions, rewards)
+    return _episode_result(model), pairs, tuple(policy.spread_samples)

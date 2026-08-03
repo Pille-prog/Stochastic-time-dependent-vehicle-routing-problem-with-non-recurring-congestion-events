@@ -23,6 +23,7 @@ from stdvrp.training.neural_report import (
     ConvergenceAction,
     ConvergenceState,
     EvaluationReport,
+    candidate_spread_ratio,
     evaluation_cadence,
     exclusion_rate_stop_signal,
     format_episode_line,
@@ -58,6 +59,7 @@ def make_report(
     *,
     training_episodes: int = 0,
     excluded_episodes: int = 0,
+    spread_samples: tuple[tuple[float, float], ...] = (),
 ) -> EvaluationReport:
     return EvaluationReport(
         episodes_completed=episodes,
@@ -65,7 +67,28 @@ def make_report(
         reference_seed_costs=reference_seed_costs,
         training_episodes=training_episodes,
         excluded_episodes=excluded_episodes,
+        spread_samples=spread_samples,
     )
+
+
+class TestCandidateSpreadRatio:
+    """Ticket 17's companion diagnostic: r = sd_candidates(W.phi) / sd_candidates(c)."""
+
+    def test_no_samples_is_nan(self) -> None:
+        assert math.isnan(candidate_spread_ratio(()))
+
+    def test_pools_the_mean_of_each_half(self) -> None:
+        pairs = ((1.0, 10.0), (3.0, 10.0))  # mean residual sd 2.0, mean cost sd 10.0
+        assert candidate_spread_ratio(pairs) == pytest.approx(0.2)
+
+    def test_zero_mean_cost_spread_is_nan_not_a_crash(self) -> None:
+        assert math.isnan(candidate_spread_ratio(((1.0, 0.0), (2.0, 0.0))))
+
+    def test_ratio_near_zero_means_the_ranking_was_never_touched(self) -> None:
+        assert candidate_spread_ratio(((0.001, 5.0),)) == pytest.approx(0.0002)
+
+    def test_ratio_much_greater_than_one_means_overwriting_the_base(self) -> None:
+        assert candidate_spread_ratio(((50.0, 5.0),)) == pytest.approx(10.0)
 
 
 class TestEvaluationReport:
@@ -106,6 +129,15 @@ class TestEvaluationReport:
     def test_empty_block_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="at least one"):
             EvaluationReport(episodes_completed=1, seed_costs=(), reference_seed_costs=())
+
+    def test_candidate_spread_ratio_defaults_to_nan_when_omitted(self) -> None:
+        report = make_report((1.0,), (2.0,))
+        assert report.spread_samples == ()
+        assert math.isnan(report.candidate_spread_ratio)
+
+    def test_candidate_spread_ratio_reads_the_pooled_samples(self) -> None:
+        report = make_report((1.0,), (2.0,), spread_samples=((1.0, 10.0), (3.0, 10.0)))
+        assert report.candidate_spread_ratio == pytest.approx(0.2)
 
 
 class TestExclusionRate:
@@ -324,6 +356,31 @@ class TestFormatting:
         text = format_evaluation_block(report, state)
 
         assert "excluded" not in text
+
+    def test_evaluation_block_reports_r_when_spread_samples_are_present(self) -> None:
+        report = make_report(
+            (10.0,) * 50,
+            (20.0,) * 50,
+            episodes=350,
+            spread_samples=((1.0, 10.0), (3.0, 10.0)),
+        )
+        state = ConvergenceState(current_lr=3.0e-4)
+        update_convergence(state, report)
+
+        text = format_evaluation_block(report, state)
+
+        assert "r = sd(W.phi)/sd(c) = 0.200" in text
+
+    def test_evaluation_block_omits_the_r_line_when_absent(self) -> None:
+        """Reports built without any candidate-spread samples (every test
+        predating ticket 17) must not print a NaN line every block."""
+        report = make_report((10.0,) * 50, (20.0,) * 50, episodes=350)
+        state = ConvergenceState(current_lr=3.0e-4)
+        update_convergence(state, report)
+
+        text = format_evaluation_block(report, state)
+
+        assert "sd(W.phi)" not in text
 
 
 class TestOpenTrainingLog:

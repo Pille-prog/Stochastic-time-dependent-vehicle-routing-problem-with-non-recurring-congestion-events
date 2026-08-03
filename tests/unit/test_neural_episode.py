@@ -25,6 +25,7 @@ from stdvrp.training.neural_episode import (  # noqa: E402
     build_neural_policy_state,
     run_neural_calibration_episode,
     run_neural_evaluation_episode,
+    run_neural_residual_calibration_episode,
     run_neural_training_episode,
     spawn_neural_episode_rngs,
 )
@@ -64,36 +65,40 @@ class TestSpawnNeuralEpisodeRngs:
         for rng_a, rng_b in zip(a, b, strict=True):
             assert not np.array_equal(rng_a.random(10), rng_b.random(10))
 
-    def test_the_three_streams_are_mutually_independent(self) -> None:
+    def test_the_four_streams_are_mutually_independent(self) -> None:
         streams = spawn_neural_episode_rngs(42)
         draws = [rng.random(20) for rng in streams]
         for i in range(len(draws)):
             for j in range(i + 1, len(draws)):
                 assert not np.array_equal(draws[i], draws[j])
 
-    def test_returns_three_streams(self) -> None:
-        assert len(spawn_neural_episode_rngs(0)) == 3
+    def test_returns_four_streams(self) -> None:
+        assert len(spawn_neural_episode_rngs(0)) == 4
 
-    def test_dropping_the_fourth_stream_does_not_change_the_first_three(self) -> None:
-        """Ticket 16 retires the fourth (``learn_rng``) stream this function
-        used to spawn -- confirms the module docstring's claim that the
-        remaining three are unaffected: ``SeedSequence.spawn(3)``'s children
-        are positionally identical to ``spawn(4)``'s first three."""
-        congestion, velocity, exploration = spawn_neural_episode_rngs(7)
+    def test_matches_spawn_four_directly(self) -> None:
+        """Ticket 17 brings the fourth (``learn_rng``) stream back for the
+        trained-encoder arm's own SGD minibatch shuffle (ticket 16 had
+        retired it, since the ridge estimator shuffles nothing) -- every one
+        of the four streams this function returns must match
+        ``SeedSequence(seed).spawn(4)``'s children positionally."""
+        congestion, velocity, exploration, learn = spawn_neural_episode_rngs(7)
         (
-            old_congestion_seed,
-            old_velocity_seed,
-            old_exploration_seed,
-            _old_learn_seed,
+            expected_congestion_seed,
+            expected_velocity_seed,
+            expected_exploration_seed,
+            expected_learn_seed,
         ) = np.random.SeedSequence(7).spawn(4)
         np.testing.assert_array_equal(
-            congestion.random(10), np.random.default_rng(old_congestion_seed).random(10)
+            congestion.random(10), np.random.default_rng(expected_congestion_seed).random(10)
         )
         np.testing.assert_array_equal(
-            velocity.random(10), np.random.default_rng(old_velocity_seed).random(10)
+            velocity.random(10), np.random.default_rng(expected_velocity_seed).random(10)
         )
         np.testing.assert_array_equal(
-            exploration.random(10), np.random.default_rng(old_exploration_seed).random(10)
+            exploration.random(10), np.random.default_rng(expected_exploration_seed).random(10)
+        )
+        np.testing.assert_array_equal(
+            learn.random(10), np.random.default_rng(expected_learn_seed).random(10)
         )
 
 
@@ -146,6 +151,31 @@ class TestBuildNeuralPolicyState:
         state = build_neural_policy_state(config, np.random.default_rng(0))
         assert state.current_lr == pytest.approx(1.5e-3)
 
+    def test_train_encoder_defaults_to_false(self) -> None:
+        config = make_config()
+        state = build_neural_policy_state(config, np.random.default_rng(0))
+        assert state.train_encoder is False
+
+    def test_train_encoder_flag_is_carried_on_the_state(self) -> None:
+        config = make_config()
+        state = build_neural_policy_state(config, np.random.default_rng(0), train_encoder=True)
+        assert state.train_encoder is True
+
+    def test_optimizer_covers_only_encoder_and_layer1_never_linear_or_layer2(self) -> None:
+        """Ticket 17: head.linear/head.layer2 are exclusively the ridge
+        solve's to move, on both arms -- the optimizer must never be able to
+        step them, regardless of train_encoder."""
+        config = make_config()
+        state = build_neural_policy_state(config, np.random.default_rng(0), train_encoder=True)
+        optimized = {id(p) for group in state.optimizer.param_groups for p in group["params"]}
+
+        for p in state.encoder.parameters():
+            assert id(p) in optimized
+        for p in state.head.layer1.parameters():
+            assert id(p) in optimized
+        for p in [*state.head.linear.parameters(), *state.head.layer2.parameters()]:
+            assert id(p) not in optimized
+
 
 class TestEpisodeRunners:
     """Real episodes against the mini fixture -- the wiring, not the Policy's own logic."""
@@ -189,7 +219,7 @@ class TestEpisodeRunners:
         state = build_neural_policy_state(config, np.random.default_rng(0))
         before = [p.clone() for p in state.encoder.parameters()]
 
-        result = run_neural_evaluation_episode(
+        result, spread_samples = run_neural_evaluation_episode(
             seed=100000,
             client_generator=world.client_generator,
             travel_time_model=world.travel_time_model,
@@ -200,6 +230,7 @@ class TestEpisodeRunners:
         )
 
         assert result.total_cost >= 0
+        assert isinstance(spread_samples, tuple)
         assert all(
             torch.equal(b, a) for b, a in zip(before, state.encoder.parameters(), strict=True)
         )
@@ -210,7 +241,7 @@ class TestEpisodeRunners:
         state = build_neural_policy_state(config, np.random.default_rng(3))
 
         def run() -> float:
-            return run_neural_evaluation_episode(
+            result, _spread_samples = run_neural_evaluation_episode(
                 seed=100001,
                 client_generator=world.client_generator,
                 travel_time_model=world.travel_time_model,
@@ -218,9 +249,41 @@ class TestEpisodeRunners:
                 congestion_generator=world.congestion_generator,
                 policy_state=state,
                 config=config,
-            ).total_cost
+            )
+            return result.total_cost
 
         assert run() == run()
+
+    def test_trained_encoder_arm_moves_the_encoder_and_layer1(self) -> None:
+        """Ticket 17: with ``train_encoder=True``, ``learn`` additionally runs
+        SGD over ``encoder``/``head.layer1`` after the ridge fold/solve --
+        the opposite of the frozen arm's own guarantee just above."""
+        config = make_config()
+        world = self._world(config)
+        state = build_neural_policy_state(config, np.random.default_rng(0), train_encoder=True)
+        encoder_before = [p.clone() for p in state.encoder.parameters()]
+        layer1_before = [p.clone() for p in state.head.layer1.parameters()]
+
+        result, loss = run_neural_training_episode(
+            seed=1000,
+            client_generator=world.client_generator,
+            travel_time_model=world.travel_time_model,
+            shortest_path_cache=world.shortest_path_cache,
+            congestion_generator=world.congestion_generator,
+            policy_state=state,
+            config=config,
+        )
+
+        assert result.total_cost >= 0
+        assert loss >= 0
+        assert any(
+            not torch.equal(b, a)
+            for b, a in zip(encoder_before, state.encoder.parameters(), strict=True)
+        ), "the trained-encoder arm must move the encoder"
+        assert any(
+            not torch.equal(b, a)
+            for b, a in zip(layer1_before, state.head.layer1.parameters(), strict=True)
+        ), "the trained-encoder arm must move layer1"
 
 
 class TestSeed1131Regression:
@@ -293,7 +356,7 @@ class TestRunNeuralCalibrationEpisode:
         world = self._world(config)
         state = build_neural_policy_state(config, np.random.default_rng(4))
 
-        evaluation_cost = run_neural_evaluation_episode(
+        evaluation_result, _spread_samples = run_neural_evaluation_episode(
             seed=100002,
             client_generator=world.client_generator,
             travel_time_model=world.travel_time_model,
@@ -301,7 +364,8 @@ class TestRunNeuralCalibrationEpisode:
             congestion_generator=world.congestion_generator,
             policy_state=state,
             config=config,
-        ).total_cost
+        )
+        evaluation_cost = evaluation_result.total_cost
         calibration_cost, _ = run_neural_calibration_episode(
             seed=100002,
             client_generator=world.client_generator,
@@ -321,6 +385,104 @@ class TestRunNeuralCalibrationEpisode:
 
         def run() -> list[tuple[float, float]]:
             _, pairs = run_neural_calibration_episode(
+                seed=100003,
+                client_generator=world.client_generator,
+                travel_time_model=world.travel_time_model,
+                shortest_path_cache=world.shortest_path_cache,
+                congestion_generator=world.congestion_generator,
+                policy_state=state,
+                config=config,
+            )
+            return pairs
+
+        assert run() == run()
+
+
+class TestRunNeuralResidualCalibrationEpisode:
+    """Ticket 17 (Gate A'): (W.phi, y~) pairs, a sibling of ticket 08's
+    (Q_predicted, U_t) source above -- neither replaces the other."""
+
+    def _world(self, config: ExperimentConfig) -> EpisodeWorld:
+        return EpisodeWorld.load(config)
+
+    def test_does_not_mutate_the_policy_state(self) -> None:
+        config = make_config()
+        world = self._world(config)
+        state = build_neural_policy_state(config, np.random.default_rng(0))
+        before = [p.clone() for p in state.encoder.parameters()]
+
+        result, pairs, spread_samples = run_neural_residual_calibration_episode(
+            seed=100000,
+            client_generator=world.client_generator,
+            travel_time_model=world.travel_time_model,
+            shortest_path_cache=world.shortest_path_cache,
+            congestion_generator=world.congestion_generator,
+            policy_state=state,
+            config=config,
+        )
+
+        assert result.total_cost >= 0
+        assert len(pairs) > 0
+        assert isinstance(spread_samples, tuple)
+        assert all(
+            torch.equal(b, a) for b, a in zip(before, state.encoder.parameters(), strict=True)
+        )
+
+    def test_cost_matches_the_plain_evaluation_runner(self) -> None:
+        """``decide`` is greedy and deterministic, so both runners must agree."""
+        config = make_config()
+        world = self._world(config)
+        state = build_neural_policy_state(config, np.random.default_rng(4))
+
+        evaluation_result, _spread_samples = run_neural_evaluation_episode(
+            seed=100002,
+            client_generator=world.client_generator,
+            travel_time_model=world.travel_time_model,
+            shortest_path_cache=world.shortest_path_cache,
+            congestion_generator=world.congestion_generator,
+            policy_state=state,
+            config=config,
+        )
+        residual_result, _pairs, _spread = run_neural_residual_calibration_episode(
+            seed=100002,
+            client_generator=world.client_generator,
+            travel_time_model=world.travel_time_model,
+            shortest_path_cache=world.shortest_path_cache,
+            congestion_generator=world.congestion_generator,
+            policy_state=state,
+            config=config,
+        )
+
+        assert residual_result.total_cost == evaluation_result.total_cost
+
+    def test_at_w_zero_the_predicted_residual_is_identically_zero(self) -> None:
+        """The guaranteed non-PASS spec.md's redefinition needs: at W = 0
+        (an untrained network, before any ridge solve) the predicted half of
+        every pair is exactly 0, whatever the residual target holds."""
+        config = make_config()
+        world = self._world(config)
+        state = build_neural_policy_state(config, np.random.default_rng(6))
+
+        _result, pairs, _spread = run_neural_residual_calibration_episode(
+            seed=100004,
+            client_generator=world.client_generator,
+            travel_time_model=world.travel_time_model,
+            shortest_path_cache=world.shortest_path_cache,
+            congestion_generator=world.congestion_generator,
+            policy_state=state,
+            config=config,
+        )
+
+        assert len(pairs) > 0
+        assert all(predicted == 0.0 for predicted, _target in pairs)
+
+    def test_same_seed_gives_bit_identical_pairs(self) -> None:
+        config = make_config()
+        world = self._world(config)
+        state = build_neural_policy_state(config, np.random.default_rng(5))
+
+        def run() -> list[tuple[float, float]]:
+            _, pairs, _spread = run_neural_residual_calibration_episode(
                 seed=100003,
                 client_generator=world.client_generator,
                 travel_time_model=world.travel_time_model,

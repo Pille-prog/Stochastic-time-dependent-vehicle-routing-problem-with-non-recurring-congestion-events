@@ -426,7 +426,7 @@ from stdvrp.simulation.state import is_parked_at_depot
 if TYPE_CHECKING:
     from stdvrp.simulation.state import State, TrainingSnapshot
 
-__all__ = ["CalibrationPair", "TransformerMonteCarloPolicy"]
+__all__ = ["CalibrationPair", "ResidualCalibrationPair", "TransformerMonteCarloPolicy"]
 
 
 class CalibrationPair(NamedTuple):
@@ -440,6 +440,24 @@ class CalibrationPair(NamedTuple):
 
     predicted_q: float
     realised_u: float
+
+
+class ResidualCalibrationPair(NamedTuple):
+    """One decision epoch's residual calibration sample (ticket 17, Gate A').
+
+    Gate A' redefines the calibration check onto the residual the network is
+    actually regressed onto: ``rho(Q, U_t)`` (:class:`CalibrationPair`, ticket
+    08's original pairing) passes at ``W = 0`` with no parameter having moved
+    -- ``Q`` still correlates with the return through ``c`` alone (spec.md,
+    "Part 3 is redefined"), a guaranteed false PASS under the residual
+    decomposition. Pairing ``predicted_residual`` (``W . phi(s, a)``, the
+    *learned* term only) against ``residual_target`` (``y_t = targets[t] /
+    return_scale - sum_v c(s, v, a_v)`` -- :meth:`TransformerMonteCarloPolicy.learn`'s
+    own ridge target) is the check that cannot be faked that way.
+    """
+
+    predicted_residual: float
+    residual_target: float
 
 
 # Legacy cost factors MonteCarloPolicy hardcodes (see this module's docstring,
@@ -469,6 +487,24 @@ class TransformerMonteCarloPolicy(Policy):
     array). Since ticket 16, ``encoder``/``head.layer1`` are never mutated by
     this class at all on the frozen-encoder arm -- only ``head.linear``/
     ``head.layer2``, and only by :meth:`learn`'s ridge solve.
+
+    ## The two arms (ticket 17)
+
+    ``train_encoder=False`` (the default) is the frozen-encoder arm exactly as
+    ticket 16 shipped it: ``learn`` only ever folds a decision epoch into
+    ``self.ridge`` and (on cadence) writes the closed-form solve onto
+    ``head.linear``/``head.layer2`` -- no gradient of any kind. ``train_encoder=
+    True`` is the trained-encoder arm ("two timescales", spec.md decision 9's
+    amendment): after the ridge fold/solve above, :meth:`_train_encoder_step`
+    additionally runs ``neural_learn_passes`` shuffled minibatch passes of SGD
+    over ``encoder``/``head.layer1`` — never ``head.linear``/``head.layer2``,
+    which stay exclusively ridge-governed — minimizing the same residual
+    target the ridge solve regresses onto, with the *current* solved ``W``
+    held fixed (a plain readout, ``head.w_vector()``, already detached). This
+    needs ``encoder_optimizer`` (scoped to exactly those two parameter groups —
+    see :func:`~stdvrp.training.neural_episode.build_neural_policy_state`) and
+    ``learn_rng`` (the per-episode minibatch shuffle); both are required
+    whenever ``train_encoder`` is ``True`` and unused otherwise.
     """
 
     def __init__(
@@ -489,6 +525,12 @@ class TransformerMonteCarloPolicy(Policy):
         exploration_rng: np.random.Generator,
         solve_cadence: int = 1,
         device: torch.device | None = None,
+        train_encoder: bool = False,
+        encoder_optimizer: torch.optim.Optimizer | None = None,
+        learn_rng: np.random.Generator | None = None,
+        learn_passes: int = 1,
+        batch_size: int = 32,
+        grad_clip_norm: float | None = None,
     ) -> None:
         self.number_vehicles = number_vehicles
         self.geometry = geometry
@@ -521,11 +563,29 @@ class TransformerMonteCarloPolicy(Policy):
 
         # Ticket 13 discipline (ADR-0001 phase 2): one injected Generator per
         # stochastic concern, never a global. ``exploration_rng`` is
-        # decide_train's epsilon gate and exploratory pick. Ticket 16 retires
+        # decide_train's epsilon gate and exploratory pick. Ticket 16 retired
         # the second stream this class used to need (``learn_rng``, the
-        # per-episode minibatch shuffle) -- the ridge solve has no shuffling
-        # of anything to do.
+        # per-episode minibatch shuffle) -- the ridge solve has no shuffling of
+        # anything to do; ticket 17's trained-encoder arm brings it back (below)
+        # for its own SGD minibatch shuffle, which the frozen arm still has no
+        # use for.
         self.exploration_rng = exploration_rng
+
+        # Ticket 17: the trained-encoder arm ("two timescales", class
+        # docstring). ``encoder_optimizer``/``learn_rng`` are required
+        # whenever ``train_encoder`` is True -- there is no sensible default
+        # optimizer or RNG to fall back on silently, and a caller that asked
+        # for this arm without providing either almost certainly has a wiring
+        # bug worth failing loudly on, not a frozen-arm run that happens to
+        # ignore them.
+        if train_encoder and (encoder_optimizer is None or learn_rng is None):
+            raise ValueError("train_encoder=True needs both encoder_optimizer and learn_rng")
+        self.train_encoder = train_encoder
+        self.encoder_optimizer = encoder_optimizer
+        self.learn_rng = learn_rng
+        self.learn_passes = learn_passes
+        self.batch_size = batch_size
+        self.grad_clip_norm = grad_clip_norm
 
         self._episode_length = float(episode_end_minute - horizon_start_minute)
         self._return_scale = float(number_clients) * self._episode_length
@@ -571,6 +631,19 @@ class TransformerMonteCarloPolicy(Policy):
         # estimator") -- left untouched on an aborted or empty Episode. 0.0
         # before the first contributing learn() call.
         self.last_loss = 0.0
+
+        # Ticket 17: Gate A''s companion diagnostic, r = sd_candidates(W.phi) /
+        # sd_candidates(c) (spec.md decision 10's amendment) -- not part of the
+        # TrainablePolicy protocol, read separately by callers exactly like
+        # ``last_loss``. One ``(sd_residual, sd_myopic_base)`` pair per
+        # (decision epoch, vehicle) with >= 2 candidates, appended by
+        # :meth:`_sweep`'s greedy branch -- "decide()-time candidate spread"
+        # (ticket 16's own words), so this fills during both `decide` (always
+        # greedy) and `decide_train` (greedy whenever the epsilon gate does not
+        # fire). Starts empty every Episode: a fresh Policy wraps the same
+        # long-lived encoder/head every Episode (this class's own docstring),
+        # so this list is this Episode's own, never carried over from the last.
+        self.spread_samples: list[tuple[float, float]] = []
 
     # --- Acting ------------------------------------------------------------
 
@@ -654,7 +727,9 @@ class TransformerMonteCarloPolicy(Policy):
                 chosen_id = int(rng.choice(candidates))
             else:
                 claimed_mask = np.isin(pending_array, forbidden_ids)
-                q = self._score(embeddings, vehicle, pending, claimed_mask)
+                q, residual, myopic_base = self._score_with_components(
+                    embeddings, vehicle, pending, claimed_mask
+                )
                 allowed = torch.zeros(n_pending + 1, dtype=torch.bool, device=self.device)
                 for candidate in candidates:
                     index = n_pending if candidate == self.depot else pending_index[candidate]
@@ -663,6 +738,18 @@ class TransformerMonteCarloPolicy(Policy):
                 masked[~allowed] = float("inf")
                 winner = int(torch.argmin(masked).item())
                 chosen_id = self.depot if winner == n_pending else pending[winner]
+
+                # Ticket 17's r diagnostic: the spread *among this decision's
+                # actual candidates* (`allowed`), not every scored pending
+                # Client -- the argmin only ever reads the former. Undefined
+                # (and uninformative either way) with fewer than two
+                # candidates, which every vehicle always has at least one of
+                # (module docstring's depot fallback), so this only ever skips
+                # the single-candidate case.
+                if int(allowed.sum().item()) >= 2:
+                    residual_sd = float(residual[allowed].std(unbiased=False).item())
+                    cost_sd = float(myopic_base[allowed].std(unbiased=False).item())
+                    self.spread_samples.append((residual_sd, cost_sd))
 
             self.action[vehicle] = chosen_id
 
@@ -715,13 +802,41 @@ class TransformerMonteCarloPolicy(Policy):
         """``Q(vehicle, candidate) == c(s, v, candidate) + QHead(...)`` over every
         pending Client plus the depot, in that order (ticket 15, ``network.py``,
         "The myopic base") -- the addition ``QHead`` itself never performs.
+
+        A thin wrapper over :meth:`_score_with_components` (ticket 17): kept as
+        its own method, rather than folded away, because several direct
+        callers only ever want the combined ``q`` — ``_sweep``'s own
+        epsilon-exploration branch aside, ``test_transformer_policy.py``'s
+        ``TestDepotMyopicBase``/``TestJointQIsAdditiveOverVehicles`` call
+        ``policy._score(...)`` directly at this exact signature, and rewriting
+        them to unpack a triple they do not need would add noise for no
+        benefit.
+        """
+        q, _residual, _myopic_base = self._score_with_components(
+            embeddings, vehicle, pending, claimed_mask
+        )
+        return q
+
+    def _score_with_components(
+        self,
+        embeddings: Embeddings,
+        vehicle: int,
+        pending: list[int],
+        claimed_mask: np.ndarray,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """``(q, residual, myopic_base)`` over every pending Client plus the
+        depot -- :meth:`_score`'s own computation, split apart so
+        :meth:`_sweep` can read the residual/myopic-base halves separately for
+        ticket 17's ``r`` diagnostic (``spec.md`` decision 10's amendment:
+        ``r = sd_candidates(W.phi) / sd_candidates(c)``) without recomputing
+        either.
         """
         augmented, myopic_base, claimed, is_depot = self._candidate_rows(
             embeddings, vehicle, pending, claimed_mask
         )
         residual = self.head(embeddings.vehicles[vehicle], augmented, claimed, is_depot)
         q: torch.Tensor = myopic_base + residual
-        return q
+        return q, residual, myopic_base
 
     def _score_features(
         self,
@@ -757,6 +872,15 @@ class TransformerMonteCarloPolicy(Policy):
         Episodes (:meth:`_is_aborted`) from the accumulator, but not from its
         forgetting -- the accumulated memory still ages by one Episode either
         way.
+
+        Ticket 17: on the trained-encoder arm (``self.train_encoder``),
+        :meth:`_train_encoder_step` additionally runs after the ridge fold/
+        solve below, using whatever ``W`` the ridge holds at that point --
+        "held at its last solve" (spec.md's "Two timescales"). An aborted
+        Episode is skipped by the SGD step too, for the identical reason the
+        ridge accumulator excludes it (module docstring, "The heavy tail"):
+        the terminal penalty carries no ranking information to buy a gradient
+        step with either.
         """
         T = len(actions)
         if T == 0:
@@ -787,6 +911,59 @@ class TransformerMonteCarloPolicy(Policy):
             solved = self.ridge.solve()
             self.head.load_w_vector(torch.from_numpy(solved.astype(np.float32)).to(self.device))
 
+        if self.train_encoder and not aborted:
+            self._train_encoder_step(snapshots, actions, targets)
+
+    def _train_encoder_step(
+        self,
+        snapshots: list[TrainingSnapshot],
+        actions: list[list[int]],
+        targets: list[float],
+    ) -> None:
+        """Ticket 17's trained-encoder arm: ``self.learn_passes`` shuffled
+        minibatch passes of SGD over ``encoder``/``head.layer1`` only --
+        ``head.linear``/``head.layer2`` never receive a gradient here, since
+        they are exclusively the ridge solve's to move (class docstring,
+        "The two arms"; ``encoder_optimizer`` is scoped to exactly the two
+        parameter groups that may move, see
+        :func:`~stdvrp.training.neural_episode.build_neural_policy_state`).
+
+        The loss is the *same* residual target the ridge accumulator regresses
+        onto (``y_t = targets[t] / return_scale - c_sum``), evaluated against
+        the *current* solved ``W`` held fixed (a plain, detached readout,
+        ``head.w_vector()``) -- "held at its last solve" (spec.md's "Two
+        timescales"). Each decision epoch costs one encoder forward pass
+        (:meth:`_joint_features`, called *without* ``torch.no_grad()`` so a
+        real graph reaches ``encoder``/``head.layer1``); a minibatch's samples
+        share one ``backward()`` call, which accumulates their gradients onto
+        the same leaf parameters exactly as a batch of any other variable-shape
+        input would.
+        """
+        assert self.encoder_optimizer is not None
+        assert self.learn_rng is not None
+        T = len(actions)
+        w = self.head.w_vector()  # detached (QHead.w_vector's own contract)
+        indices = np.arange(T)
+        for _ in range(self.learn_passes):
+            self.learn_rng.shuffle(indices)
+            for start in range(0, T, self.batch_size):
+                batch = indices[start : start + self.batch_size]
+                self.encoder_optimizer.zero_grad()
+                losses = []
+                for t in batch:
+                    phi_sum, c_sum = self._joint_features(snapshots[t], actions[t])
+                    y_t = targets[t] / self._return_scale - c_sum
+                    predicted_residual = phi_sum @ w
+                    losses.append((predicted_residual - y_t) ** 2)
+                loss = torch.stack(losses).mean()
+                loss.backward()
+                if self.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        [*self.encoder.parameters(), *self.head.layer1.parameters()],
+                        self.grad_clip_norm,
+                    )
+                self.encoder_optimizer.step()
+
     def _is_aborted(self, rewards: list[float]) -> bool:
         """Whether this Episode ended by hitting ``CLOCK_CEILING`` (research
         note F10; module docstring, "The estimator") -- read off the final
@@ -807,11 +984,32 @@ class TransformerMonteCarloPolicy(Policy):
         estimator"). Mirrors :meth:`_replay_joint_q`'s replay exactly (one
         encoder pass, the same incremental ``claimed_mask`` seeded fresh per
         epoch) but sums :meth:`_score_features`'s ``phi`` instead of scoring
-        through ``QHead.forward`` -- no gradient is ever built, since the
-        estimator is solved in closed form. Every vehicle contributes a term,
-        including one whose action the simulator will discard, for the same
-        reason :meth:`_replay_joint_q` does (module docstring, "A
+        through ``QHead.forward`` -- no gradient is ever built here, since the
+        ridge estimator is solved in closed form. Every vehicle contributes a
+        term, including one whose action the simulator will discard, for the
+        same reason :meth:`_replay_joint_q` does (module docstring, "A
         tried-and-rejected variant").
+
+        A thin ``torch.no_grad()`` wrapper over :meth:`_joint_features`
+        (ticket 17): the trained-encoder arm's own SGD step
+        (:meth:`_train_encoder_step`) calls that same core *without* the
+        wrapper, so a real autograd graph reaches ``encoder``/``head.layer1``
+        -- the one thing this method must never do, since every other caller
+        (``learn``'s ridge fold, ``calibration_pairs``/``residual_calibration_pairs``)
+        needs a plain readout, not a graph to hold onto.
+        """
+        with torch.no_grad():
+            return self._joint_features(snapshot, action_row)
+
+    def _joint_features(
+        self, snapshot: TrainingSnapshot, action_row: list[int]
+    ) -> tuple[torch.Tensor, float]:
+        """Gradient-transparent core of :meth:`_replay_joint_features` (ticket
+        17): identical computation, but never wrapped in ``torch.no_grad()``
+        itself, so a caller outside any no-grad context gets a real autograd
+        graph from ``phi_sum`` back through ``encoder``/``head.layer1`` --
+        exactly what :meth:`_train_encoder_step` needs and everything else
+        that reaches this method (through the wrapper above) must not get.
         """
         tokens = tokenize(
             snapshot,
@@ -821,26 +1019,25 @@ class TransformerMonteCarloPolicy(Policy):
             shift_end_minute=self.shift_end_minute,
             episode_end_minute=self.episode_end_minute,
         )
-        with torch.no_grad():
-            embeddings = self.encoder(tokens)
+        embeddings = self.encoder(tokens)
 
-            pending = list(snapshot.clients_not_visited)
-            n_pending = len(pending)
-            index_of = {client: index for index, client in enumerate(pending)}
-            claimed_mask = np.zeros(n_pending, dtype=np.bool_)
+        pending = list(snapshot.clients_not_visited)
+        n_pending = len(pending)
+        index_of = {client: index for index, client in enumerate(pending)}
+        claimed_mask = np.zeros(n_pending, dtype=np.bool_)
 
-            phi_sum = torch.zeros(self.head.feature_dim, dtype=torch.float32, device=self.device)
-            c_sum = 0.0
-            for vehicle in range(self.number_vehicles):
-                phi, myopic_base = self._score_features(embeddings, vehicle, pending, claimed_mask)
-                chosen = action_row[vehicle]
-                if chosen == self.depot:
-                    index = n_pending
-                else:
-                    index = index_of[chosen]
-                    claimed_mask[index] = True
-                phi_sum = phi_sum + phi[index]
-                c_sum += float(myopic_base[index].item())
+        phi_sum = torch.zeros(self.head.feature_dim, dtype=torch.float32, device=self.device)
+        c_sum = 0.0
+        for vehicle in range(self.number_vehicles):
+            phi, myopic_base = self._score_features(embeddings, vehicle, pending, claimed_mask)
+            chosen = action_row[vehicle]
+            if chosen == self.depot:
+                index = n_pending
+            else:
+                index = index_of[chosen]
+                claimed_mask[index] = True
+            phi_sum = phi_sum + phi[index]
+            c_sum += float(myopic_base[index].item())
         return phi_sum, c_sum
 
     def calibration_pairs(
@@ -874,6 +1071,45 @@ class TransformerMonteCarloPolicy(Policy):
             for t in range(T):
                 q_pred = float(self._replay_joint_q(snapshots[t], actions[t]).item())
                 pairs.append(CalibrationPair(predicted_q=q_pred, realised_u=targets[t]))
+        return pairs
+
+    def residual_calibration_pairs(
+        self,
+        snapshots: list[TrainingSnapshot],
+        actions: list[list[int]],
+        rewards: list[float],
+    ) -> list[ResidualCalibrationPair]:
+        """``(W . phi(s, a), y_t)`` once per decision epoch -- Gate A' 's (ticket
+        17) calibration primitive, replacing :meth:`calibration_pairs`'
+        ``(Q, U_t)`` pairing for the reason :class:`ResidualCalibrationPair`
+        documents: ``rho(Q, U_t)`` passes at ``W = 0`` with no parameter having
+        moved, since ``Q == c`` there regardless of the return. Pairing the
+        learned term against the residual it is actually regressed onto
+        (``learn``'s own ``y_t = targets[t] / return_scale - sum_v c(s, v,
+        a_v)``) is the check that cannot be faked that way -- at ``W = 0`` the
+        predicted half is identically zero while ``y_t`` still varies with the
+        return, so the correlation reads ~0 exactly as it should.
+
+        Read-only: no gradient is built, no parameter or RNG stream is
+        touched -- the same discipline :meth:`calibration_pairs` follows.
+        """
+        T = len(actions)
+        if T == 0:
+            return []
+
+        targets = self._backward_returns(snapshots, actions, rewards)
+        pairs: list[ResidualCalibrationPair] = []
+        with torch.no_grad():
+            w = self.head.w_vector()
+            for t in range(T):
+                phi_sum, c_sum = self._replay_joint_features(snapshots[t], actions[t])
+                y_t = targets[t] / self._return_scale - c_sum
+                predicted_residual = float((phi_sum @ w).item())
+                pairs.append(
+                    ResidualCalibrationPair(
+                        predicted_residual=predicted_residual, residual_target=y_t
+                    )
+                )
         return pairs
 
     def _replay_joint_q(self, snapshot: TrainingSnapshot, action_row: list[int]) -> torch.Tensor:

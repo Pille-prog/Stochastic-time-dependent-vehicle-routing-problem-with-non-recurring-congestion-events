@@ -454,6 +454,7 @@ class Trainer:
         max_hours: float | None = None,
         evaluation_cadence_minimum: int | None = None,
         init_seed: int | None = None,
+        train_encoder: bool = False,
     ) -> NeuralTrainingResult:
         """Ticket 07: train the transformer Policy to convergence, watchably and resumably.
 
@@ -488,6 +489,15 @@ class Trainer:
         Episodes get trained on between runs. Reported back on the result
         (``NeuralTrainingResult.init_seed``) so a caller running several arms
         can tell which trained network came from which seed.
+
+        ``train_encoder`` (ticket 17): ``False`` (the default) is the
+        frozen-encoder arm ticket 16 shipped -- every other call site's
+        unchanged behavior. ``True`` is the trained-encoder arm (spec.md's
+        "Two timescales"): ``encoder``/``head.layer1`` additionally move by
+        SGD every ``learn()`` call, on top of the ridge solve both arms share.
+        Forwarded to :func:`~stdvrp.training.neural_episode.build_neural_policy_state`,
+        which is the only place this actually changes anything (which
+        parameters ``policy_state.optimizer`` covers).
         """
         # Deferred imports: torch is an optional extra (ticket 03); only
         # calling this method should ever require it (see the TYPE_CHECKING
@@ -544,10 +554,12 @@ class Trainer:
                 [config.first_train_seed, _INIT_SEED_SALT]
             ).spawn(1)
             policy_state = build_neural_policy_state(
-                config, np.random.default_rng(default_init_seed)
+                config, np.random.default_rng(default_init_seed), train_encoder=train_encoder
             )
         else:
-            policy_state = build_neural_policy_state(config, np.random.default_rng(init_seed))
+            policy_state = build_neural_policy_state(
+                config, np.random.default_rng(init_seed), train_encoder=train_encoder
+            )
         # Ticket 12: config.device may be "auto", so the config alone no
         # longer pins which device this run actually used -- print the
         # resolved device once, up front, so the run's own log records it.
@@ -621,13 +633,14 @@ class Trainer:
                 if episodes_completed < next_eval_at:
                     continue
 
-                seed_costs = self._run_neural_evaluation_block(policy_state)
+                seed_costs, spread_samples = self._run_neural_evaluation_block(policy_state)
                 report = EvaluationReport(
                     episodes_completed=episodes_completed,
                     seed_costs=seed_costs,
                     reference_seed_costs=reference_seed_costs,
                     training_episodes=episodes_completed - episodes_at_last_block,
                     excluded_episodes=policy_state.ridge.episodes_excluded - excluded_at_last_block,
+                    spread_samples=spread_samples,
                 )
                 episodes_at_last_block = episodes_completed
                 excluded_at_last_block = policy_state.ridge.episodes_excluded
@@ -736,13 +749,21 @@ class Trainer:
             config=self.config,
         )
 
-    def _run_neural_evaluation_block(self, policy_state: NeuralPolicyState) -> tuple[float, ...]:
-        """Greedy evaluation over every ``evaluation_seeds`` seed, in that order."""
+    def _run_neural_evaluation_block(
+        self, policy_state: NeuralPolicyState
+    ) -> tuple[tuple[float, ...], tuple[tuple[float, float], ...]]:
+        """Greedy evaluation over every ``evaluation_seeds`` seed, in that order.
+
+        Also pools every seed's candidate-spread samples (ticket 17) for the
+        block report's ``r`` diagnostic -- see
+        :func:`~stdvrp.training.neural_episode.run_neural_evaluation_episode`.
+        """
         from stdvrp.training.neural_episode import run_neural_evaluation_episode
 
         costs = []
+        spread_samples: list[tuple[float, float]] = []
         for seed in self.config.evaluation_seeds:
-            result = run_neural_evaluation_episode(
+            result, seed_spread_samples = run_neural_evaluation_episode(
                 seed=seed,
                 client_generator=self.world.client_generator,
                 travel_time_model=self.world.travel_time_model,
@@ -752,7 +773,8 @@ class Trainer:
                 config=self.config,
             )
             costs.append(result.total_cost)
-        return tuple(costs)
+            spread_samples.extend(seed_spread_samples)
+        return tuple(costs), tuple(spread_samples)
 
 
 def _copy_w(w: W) -> W:

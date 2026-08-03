@@ -93,6 +93,11 @@ def build_policy(
     forgetting: float = 1.0,
     ridge: float = 1.0,
     device: torch.device | None = None,
+    train_encoder: bool = False,
+    learn_seed: int = 2,
+    learn_passes: int = 1,
+    batch_size: int = 32,
+    grad_clip_norm: float | None = None,
 ) -> TransformerMonteCarloPolicy:
     rng = np.random.default_rng(init_seed)
     encoder = TokenEncoder(
@@ -105,6 +110,11 @@ def build_policy(
     )
     head = QHead(d_model=D_MODEL, init_rng=rng, device=device)
     accumulator = RidgeAccumulator.zeros(head.feature_dim, forgetting=forgetting, ridge=ridge)
+    encoder_optimizer = (
+        torch.optim.Adam([*encoder.parameters(), *head.layer1.parameters()], lr=1e-3)
+        if train_encoder
+        else None
+    )
     return TransformerMonteCarloPolicy(
         number_vehicles=number_vehicles,
         geometry=geometry,
@@ -121,6 +131,12 @@ def build_policy(
         exploration_rng=np.random.default_rng(exploration_seed),
         solve_cadence=solve_cadence,
         device=device,
+        train_encoder=train_encoder,
+        encoder_optimizer=encoder_optimizer,
+        learn_rng=np.random.default_rng(learn_seed) if train_encoder else None,
+        learn_passes=learn_passes,
+        batch_size=batch_size,
+        grad_clip_norm=grad_clip_norm,
     )
 
 
@@ -215,24 +231,31 @@ class TestSelfNodeNotACandidate:
     def test_greedy_excludes_the_vehicle_s_own_node_even_when_it_scores_lowest(self) -> None:
         """A hard mask, not a hope that the network never prefers it.
 
-        ``_score`` is rigged to make the self-node candidate the global
-        minimum -- if the exclusion were merely incidental (the network
-        happening not to prefer it), this would expose that immediately.
+        ``_sweep`` (via ``_score_with_components``, ticket 17) is rigged to
+        make the self-node candidate the global minimum -- if the exclusion
+        were merely incidental (the network happening not to prefer it),
+        this would expose that immediately. Rigs ``_score_with_components``
+        directly (what ``_sweep`` actually calls) rather than ``_score`` --
+        the thin ``(embeddings, vehicle, pending, claimed_mask) -> q`` wrapper
+        ``_sweep`` no longer calls internally, kept only for direct callers
+        elsewhere in this file.
         """
         geometry, time_windows, clients = make_world(4, seed=44)
         policy = build_policy(geometry, time_windows, clients, number_vehicles=1)
         own_node = clients[0]
         state = make_state(1, pending=clients, positions=[own_node])
 
-        original_score = policy._score
+        original_score_with_components = policy._score_with_components
 
-        def rigged_score(embeddings, vehicle, pending, claimed_mask):
-            q = original_score(embeddings, vehicle, pending, claimed_mask)
+        def rigged_score_with_components(embeddings, vehicle, pending, claimed_mask):
+            q, residual, myopic_base = original_score_with_components(
+                embeddings, vehicle, pending, claimed_mask
+            )
             q = q.clone()
             q[pending.index(own_node)] = -1e9
-            return q
+            return q, residual, myopic_base
 
-        policy._score = rigged_score
+        policy._score_with_components = rigged_score_with_components
 
         action = policy.decide(state)
 
@@ -479,6 +502,104 @@ class TestDepotMyopicBase:
         assert action[0] == nearest
 
 
+# --- _score_with_components() / spread_samples (ticket 17, Gate A') -------------
+
+
+class TestScoreWithComponents:
+    """``_score`` is a thin wrapper over ``_score_with_components`` (ticket 17):
+    same signature, same return, just split apart so ``_sweep`` can read the
+    residual/myopic-base halves for the ``r`` diagnostic without recomputing
+    either."""
+
+    def test_score_equals_the_q_component_of_score_with_components(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=70)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        state = make_state(2, pending=clients)
+
+        from stdvrp.policies.tokenizer import tokenize
+
+        tokens = tokenize(
+            state,
+            geometry,
+            time_windows,
+            horizon_start_minute=HORIZON_START,
+            shift_end_minute=SHIFT_END,
+            episode_end_minute=EPISODE_END,
+        )
+        with torch.no_grad():
+            embeddings = policy.encoder(tokens)
+            pending = list(state.clients_not_visited)
+            claimed = np.zeros(len(pending), dtype=bool)
+
+            q = policy._score(embeddings, 0, pending, claimed)
+            q_component, residual, myopic_base = policy._score_with_components(
+                embeddings, 0, pending, claimed
+            )
+
+        torch.testing.assert_close(q, q_component)
+        torch.testing.assert_close(q_component, myopic_base + residual)
+
+
+class TestSpreadSamples:
+    """Ticket 17's ``r`` diagnostic raw material: ``(sd_candidates(W.phi),
+    sd_candidates(c))``, accumulated by every greedy ``_sweep`` call
+    (``decide()``, always greedy; ``decide_train()`` whenever the epsilon gate
+    does not fire), restricted to the vehicle's actual candidate set."""
+
+    def test_decide_appends_one_sample_per_vehicle(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=71)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=3)
+        state = make_state(3, pending=clients)
+
+        assert policy.spread_samples == []
+        policy.decide(state)
+
+        assert len(policy.spread_samples) == 3
+        for residual_sd, cost_sd in policy.spread_samples:
+            assert residual_sd >= 0.0
+            assert cost_sd >= 0.0
+
+    def test_spread_samples_reset_every_fresh_policy_instance(self) -> None:
+        """A fresh ``TransformerMonteCarloPolicy`` wraps the same long-lived
+        network every Episode (class docstring) -- ``spread_samples`` must
+        never leak across that boundary."""
+        geometry, time_windows, clients = make_world(4, seed=72)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        state = make_state(2, pending=clients)
+        policy.decide(state)
+        assert policy.spread_samples
+
+        fresh_policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        assert fresh_policy.spread_samples == []
+
+    def test_no_sample_when_only_one_candidate_survives(self) -> None:
+        """Undefined (and uninformative) with fewer than two candidates --
+        this vehicle's only legal move is the depot (past the 350 cutoff,
+        parked, module docstring "ADR-0011")."""
+        geometry, time_windows, clients = make_world(4, seed=73)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=1)
+        state = make_state(1, pending=clients, positions=[DEPOT])
+        state.vehicle_standing = [True]
+        state.tau_episode = 351.0  # branch 1's literal cutoff: depot-only
+
+        policy.decide(state)
+
+        assert policy.spread_samples == []
+
+    def test_decide_train_greedy_branch_also_appends_samples(self) -> None:
+        """epsilon=0 forces every vehicle through the greedy branch of
+        ``_sweep``, exactly like ``decide`` -- "decide()-time candidate
+        spread" (ticket 16's own words) is not literally limited to the
+        ``decide`` method, only to the greedy code path."""
+        geometry, time_windows, clients = make_world(5, seed=74)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2, epsilon=0.0)
+        state = make_state(2, pending=clients)
+
+        policy.decide_train(state)
+
+        assert len(policy.spread_samples) == 2
+
+
 # --- learn() -------------------------------------------------------------------
 
 
@@ -693,6 +814,160 @@ class TestAbortedEpisodesAreExcluded:
         assert policy.ridge.episodes_excluded == 0
 
 
+# --- the trained-encoder arm (ticket 17, "Two timescales") ---------------------
+
+
+class TestTrainedEncoderArm:
+    """``train_encoder=True``: after the ridge fold/solve every arm shares,
+    ``learn`` additionally runs SGD over ``encoder``/``head.layer1`` --
+    ``head.linear``/``head.layer2`` stay exclusively the ridge's to move."""
+
+    def test_constructing_directly_without_optimizer_raises(self) -> None:
+        geometry, time_windows, clients = make_world(4, seed=80)
+        rng = np.random.default_rng(0)
+        encoder = TokenEncoder(
+            d_model=D_MODEL, n_layers=2, n_heads=4, n_observed_velocities=N_OBS, init_rng=rng
+        )
+        head = QHead(d_model=D_MODEL, init_rng=rng)
+        accumulator = RidgeAccumulator.zeros(head.feature_dim, forgetting=1.0, ridge=1.0)
+        with pytest.raises(ValueError, match="train_encoder"):
+            TransformerMonteCarloPolicy(
+                number_vehicles=2,
+                geometry=geometry,
+                time_windows=time_windows,
+                number_clients=len(clients),
+                epsilon=0.0,
+                depot=DEPOT,
+                shift_end_minute=SHIFT_END,
+                episode_end_minute=EPISODE_END,
+                horizon_start_minute=HORIZON_START,
+                encoder=encoder,
+                head=head,
+                ridge=accumulator,
+                exploration_rng=np.random.default_rng(1),
+                train_encoder=True,
+                encoder_optimizer=None,
+                learn_rng=np.random.default_rng(2),
+            )
+
+    def test_constructing_directly_without_learn_rng_raises(self) -> None:
+        geometry, time_windows, clients = make_world(4, seed=80)
+        rng = np.random.default_rng(0)
+        encoder = TokenEncoder(
+            d_model=D_MODEL, n_layers=2, n_heads=4, n_observed_velocities=N_OBS, init_rng=rng
+        )
+        head = QHead(d_model=D_MODEL, init_rng=rng)
+        accumulator = RidgeAccumulator.zeros(head.feature_dim, forgetting=1.0, ridge=1.0)
+        optimizer = torch.optim.Adam([*encoder.parameters(), *head.layer1.parameters()], lr=1e-3)
+        with pytest.raises(ValueError, match="train_encoder"):
+            TransformerMonteCarloPolicy(
+                number_vehicles=2,
+                geometry=geometry,
+                time_windows=time_windows,
+                number_clients=len(clients),
+                epsilon=0.0,
+                depot=DEPOT,
+                shift_end_minute=SHIFT_END,
+                episode_end_minute=EPISODE_END,
+                horizon_start_minute=HORIZON_START,
+                encoder=encoder,
+                head=head,
+                ridge=accumulator,
+                exploration_rng=np.random.default_rng(1),
+                train_encoder=True,
+                encoder_optimizer=optimizer,
+                learn_rng=None,
+            )
+
+    def test_learn_moves_encoder_and_layer1_but_w_still_matches_the_ridge_solve(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=81)
+        policy = build_policy(
+            geometry, time_windows, clients, number_vehicles=2, epsilon=0.0, train_encoder=True
+        )
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=6)
+
+        encoder_before = [p.clone() for p in policy.encoder.parameters()]
+        layer1_before = [p.clone() for p in policy.head.layer1.parameters()]
+
+        policy.learn(snapshots, actions, rewards)
+
+        assert any(
+            not torch.equal(before, after)
+            for before, after in zip(encoder_before, policy.encoder.parameters(), strict=True)
+        ), "the trained-encoder arm must move the encoder"
+        assert any(
+            not torch.equal(before, after)
+            for before, after in zip(layer1_before, policy.head.layer1.parameters(), strict=True)
+        ), "the trained-encoder arm must move layer1"
+        # head.linear/head.layer2 are still exclusively the ridge's: whatever
+        # the SGD step above did to the encoder/layer1, the *combined* weight
+        # vector must still equal a fresh solve of the (now-updated) ridge
+        # accumulator -- no optimizer step ever touches linear/layer2 directly.
+        expected = policy.ridge.solve()
+        np.testing.assert_allclose(policy.head.w_vector().numpy(), expected, atol=1e-5, rtol=1e-5)
+
+    def test_frozen_arm_never_builds_an_optimizer_step_even_if_one_is_injected(self) -> None:
+        """``train_encoder=False`` (the default): even a caller that hands in
+        an optimizer/learn_rng anyway must see it go unused -- only
+        ``self.train_encoder`` gates the SGD step, not "an optimizer happens
+        to be present"."""
+        geometry, time_windows, clients = make_world(5, seed=82)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2, epsilon=0.0)
+        assert policy.train_encoder is False
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=6)
+        encoder_before = [p.clone() for p in policy.encoder.parameters()]
+
+        policy.learn(snapshots, actions, rewards)
+
+        assert all(
+            torch.equal(before, after)
+            for before, after in zip(encoder_before, policy.encoder.parameters(), strict=True)
+        )
+
+    def test_aborted_episode_skips_the_sgd_step_too(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=83)
+        policy = build_policy(
+            geometry, time_windows, clients, number_vehicles=2, epsilon=0.0, train_encoder=True
+        )
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=6)
+        rewards[-1] = policy._abort_reward_floor + 1.0
+        encoder_before = [p.clone() for p in policy.encoder.parameters()]
+
+        policy.learn(snapshots, actions, rewards)
+
+        assert all(
+            torch.equal(before, after)
+            for before, after in zip(encoder_before, policy.encoder.parameters(), strict=True)
+        ), "an aborted Episode carries no ranking information to buy a gradient step with"
+
+    def test_learn_is_deterministic_given_the_same_learn_rng_seed(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=84)
+
+        def run() -> torch.Tensor:
+            policy = build_policy(
+                geometry,
+                time_windows,
+                clients,
+                number_vehicles=2,
+                epsilon=0.0,
+                train_encoder=True,
+                learn_seed=7,
+                learn_passes=2,
+                batch_size=2,
+            )
+            state = make_state(2, pending=clients)
+            snapshots, actions, rewards = make_episode(policy, state, length=6)
+            policy.learn(snapshots, actions, rewards)
+            return next(policy.encoder.parameters()).clone()
+
+        first = run()
+        second = run()
+        torch.testing.assert_close(first, second, atol=0.0, rtol=0.0)
+
+
 # --- calibration_pairs() (ticket 08, Gate A) ------------------------------------
 
 
@@ -739,6 +1014,95 @@ class TestCalibrationPairs:
             with torch.no_grad():
                 expected = policy._replay_joint_q(snapshots[t], actions[t]).item()
             assert pairs[t].predicted_q == pytest.approx(expected)
+
+
+class TestResidualCalibrationPairs:
+    """(W.phi, y~) once per decision epoch -- Gate A' 's (ticket 17) calibration
+    primitive, a sibling of ``TestCalibrationPairs`` above pairing the learned
+    term against the residual it is actually regressed onto, not Q against
+    the raw return (which passes at W=0 with nothing learned)."""
+
+    def test_one_pair_per_decision_epoch(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=31)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=6)
+
+        pairs = policy.residual_calibration_pairs(snapshots, actions, rewards)
+
+        assert len(pairs) == 6
+
+    def test_empty_episode_returns_no_pairs(self) -> None:
+        geometry, time_windows, clients = make_world(4, seed=32)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+
+        assert policy.residual_calibration_pairs([], [], [0.0]) == []
+
+    def test_at_w_zero_the_predicted_residual_is_identically_zero(self) -> None:
+        """The guaranteed non-PASS spec.md's redefinition needs: an untrained
+        network (W = 0, before any ridge solve) predicts a residual of
+        exactly 0 for every candidate, so ``predicted_residual`` never varies
+        with the return -- the correlation this class exists to make honest."""
+        geometry, time_windows, clients = make_world(5, seed=33)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=4)
+
+        pairs = policy.residual_calibration_pairs(snapshots, actions, rewards)
+
+        assert len(pairs) == 4
+        assert all(pair.predicted_residual == 0.0 for pair in pairs)
+
+    def test_residual_target_matches_the_ridge_s_own_y_formula(self) -> None:
+        """``y_t = targets[t] / return_scale - sum_v c(s, v, a_v)`` -- exactly
+        ``learn``'s own regression target (module docstring, "The estimator"),
+        recomputed here directly from ``_replay_joint_features`` rather than
+        trusted to agree by construction."""
+        geometry, time_windows, clients = make_world(5, seed=35)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=4)
+        targets = policy._backward_returns(snapshots, actions, rewards)
+
+        pairs = policy.residual_calibration_pairs(snapshots, actions, rewards)
+
+        for t in range(4):
+            with torch.no_grad():
+                _phi_sum, c_sum = policy._replay_joint_features(snapshots[t], actions[t])
+            expected_y = targets[t] / policy._return_scale - c_sum
+            assert pairs[t].residual_target == pytest.approx(expected_y)
+
+    def test_predicted_half_matches_phi_dot_w(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=36)
+        policy = build_policy(
+            geometry, time_windows, clients, number_vehicles=2, solve_cadence=1000
+        )
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=4)
+        # Force a nonzero W so the predicted half is not trivially zero.
+        policy.head.load_w_vector(torch.ones(policy.head.feature_dim) * 0.01)
+
+        pairs = policy.residual_calibration_pairs(snapshots, actions, rewards)
+
+        for t in range(4):
+            with torch.no_grad():
+                phi_sum, _c_sum = policy._replay_joint_features(snapshots[t], actions[t])
+                expected = float((phi_sum @ policy.head.w_vector()).item())
+            assert pairs[t].predicted_residual == pytest.approx(expected)
+
+    def test_does_not_mutate_the_network(self) -> None:
+        geometry, time_windows, clients = make_world(5, seed=37)
+        policy = build_policy(geometry, time_windows, clients, number_vehicles=2)
+        state = make_state(2, pending=clients)
+        snapshots, actions, rewards = make_episode(policy, state, length=4)
+        before = [p.clone() for p in policy.encoder.parameters()] + [
+            p.clone() for p in policy.head.parameters()
+        ]
+
+        policy.residual_calibration_pairs(snapshots, actions, rewards)
+
+        after = list(policy.encoder.parameters()) + list(policy.head.parameters())
+        assert all(torch.equal(b, a) for b, a in zip(before, after, strict=True))
 
 
 class TestJointQIsAdditiveOverVehicles:
