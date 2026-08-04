@@ -502,6 +502,10 @@ class Model:
                     fleet.route[vehicle] = shortest_path
 
                 fleet.destination[vehicle] = action[vehicle]
+                # Mirrors onto State (restored legacy ``vehicles_direction``,
+                # ADR-0005) so the Policy's own feature extraction can read its
+                # last routing decision without reaching into FleetRoutes.
+                self.state.vehicle_destination[vehicle] = action[vehicle]
 
     def begin_arc(self, vehicle: int) -> None:
         """Ports ``create_and_actualize_state_velocity``: start travelling the next arc."""

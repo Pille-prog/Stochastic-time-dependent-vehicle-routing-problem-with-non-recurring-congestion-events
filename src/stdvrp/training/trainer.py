@@ -311,7 +311,10 @@ class Trainer:
             w = result.w
             w_trajectory.append(_copy_w(result.w))
             episodes_completed = index + 1
-            self._log(f"train episode {episodes_completed} (seed {seed}) done")
+            self._log(
+                f"train episode {episodes_completed} (seed {seed}) done   "
+                f"cost {result.episode.total_cost:.4f}"
+            )
 
             if episodes_completed % config.test_frequency == 0:
                 newest_w = _copy_w(w)
@@ -326,13 +329,20 @@ class Trainer:
                     seed_costs=tuple(episode.total_cost for episode in episodes),
                 )
                 evaluations.append(block)
+                is_new_best = block.mean_cost < best_mean_cost
+                if is_new_best:
+                    best_mean_cost = block.mean_cost
+                    best_w = newest_w
                 self._log(
                     f"evaluation after {episodes_completed} episodes: "
                     f"mean cost {block.mean_cost:.4f}"
+                    f"{'  (new best)' if is_new_best else ''}"
                 )
-                if block.mean_cost < best_mean_cost:
-                    best_mean_cost = block.mean_cost
-                    best_w = newest_w
+                self._log(f"  theta (this evaluation): {_format_w(newest_w)}")
+                self._log(
+                    f"  theta (best so far, mean cost {best_mean_cost:.4f}): "
+                    f"{_format_w(best_w)}"
+                )
 
         return TrainingResult(
             w_trajectory=tuple(w_trajectory),
@@ -779,6 +789,13 @@ class Trainer:
 
 def _copy_w(w: W) -> W:
     return np.array(w, dtype=np.float64, copy=True)
+
+
+def _format_w(w: W | None) -> str:
+    """Render a weight vector for the log: one line, fixed precision, no truncation."""
+    if w is None:
+        return "unset"
+    return "[" + ", ".join(f"{value:.6g}" for value in w) + "]"
 
 
 def _mean_and_std(values: list[float]) -> tuple[float, float]:

@@ -12,7 +12,9 @@ recorded *"did not converge"*, which is not a Gate A result); and
 run, and its Client filter changes every decision, so any Gate A number
 gathered before it lands is void)
 
-**Status:** open
+**Status:** **closed — INCOMPLETE.** One of three arms ran. Part 2
+(reproducibility) was never measured, so this ticket's "it learns" result
+stands at **n = 1**. See the closing comment, 2026-08-02.
 
 ## The three parts
 
@@ -681,3 +683,121 @@ To resume:
 4. Real-dataset runs need `--data-dir "C:/Users/ferna/OneDrive/Documentos/Mega city"`:
    the repository moved, so the config's relative `data_dir: ../../..` no
    longer resolves.
+
+### 2026-08-02 — CLOSED INCOMPLETE. Arms 1-2 killed; the learning rule is being replaced
+
+Arms 1 and 2 were stopped at episode 162 and this ticket closes with **one of
+three arms measured**. What follows is the correction of this ticket's own
+headline and the diagnosis that replaced it; the plan it hands to is tickets
+13-17.
+
+#### 1. What this ticket actually established, restated honestly
+
+Section "conclusions" above opens with *"It learns — that question is closed"*.
+**It is not closed. It rests on `n = 1`**, and part 2 exists precisely to catch
+a lucky init. Every downstream claim that leans on arm 0's +15.49% — including
+"the binding constraint measured here is the estimator, not the
+representation" — inherits that `n = 1` and must be cited with it.
+
+What survives at full strength is the *comparison*, because it is between
+policies rather than between runs: on the 50 `test_seeds`, untrained `cost`
+**3811.28** against trained `minutes` **4423.73**. The untrained cost-greedy
+initialization is 13.8% cheaper than the fully trained network. That number
+needed no reproducibility arm.
+
+#### 2. Why the arms were killed rather than left to finish
+
+At episode 162 arm 1 read `eval @150 mean 23897.9`, `wins on 0/50`, best block
+`+128.5% @ep50`, with `loss 5.7e-05` on an episode costing 4421 and `7.3e-03`
+on one costing 75 760.
+
+That is not a diverging run, it is the diagnosed failure in progress, and it
+put a number on it that had been missing: `loss 5.7e-05` is Huber `= 0.5·MSE`,
+so **RMSE ≈ 0.011 in normalized units, against candidate-to-candidate `Q`
+differences of ≈ 0.03** (measured earlier in this ticket). *The residual noise
+of the value fit is about a third of the entire signal the argmin reads.* A
+falling loss and a collapsing policy are not in tension; they are the same
+fact.
+
+Arm 0's trajectory was equally chaotic at episode 150 and still found its best
+block at 650, so **part 2 was not failing — it was unfinished.** It was stopped
+because it was ~14 h of CPU spent measuring the reproducibility of a learning
+rule that had already been replaced. Recorded as a choice, not as a result.
+`runs/gate_a_v2/gate_a_init1.pt` and `log_init12.txt` stay on disk as evidence
+that the arm ran and where it was cut.
+
+#### 3. The defect this ticket never named: the unit of estimation
+
+Every diagnosis above — the joint sum's invisible split, capacity fitting
+`V(s)`, the level term, the candidate count — is downstream of one thing that
+went unexamined:
+
+> `learn` receives one Episode's ~400 epochs, runs 4 passes in minibatches of
+> 32 (~50 gradient steps), and **discards the batch**. There is no buffer
+> across Episodes. Within one Episode `U_t` is a *suffix sum* — monotone in `t`
+> — and `_already_acquired_cost` is too, while the global token carries
+> `tau_episode` and `clients_not_visited`. **With 595k parameters `U_t` is
+> fitted almost perfectly by reading the clock, and the action carries no
+> incremental explanatory power within a single Episode.** The action→return
+> signal exists only *across* Episodes.
+
+It reconciles everything this ticket measured separately: `loss 1e-4` beside a
+degrading policy (each Episode's suffix sum is being fitted, ~50 steps at a
+time); why 19 linear weights survive the identical target (they cannot overfit
+one Episode, and `W` is carried across all of them, which is stochastic
+approximation over the whole distribution); and why §4's four attempts share
+their signature — **dueling, the Huber knee, the level gain and the `cost` warm
+start each make the optimizer more effective, and a more effective optimizer
+overfits one Episode faster.** Helpful from a bad start, damaging from a good
+one, every time.
+
+#### 4. The action set, and a hypothesis that was measured and killed
+
+**What holds.** The candidate count is worth **12.68%** to the linear baseline
+— `m+40` 2168.39 against `m+2` 2483.24 over the 50 `evaluation_seeds`, 36/50,
+Wilcoxon p = 8.24e-05 (`results/baseline_null_50.py`). On `test_seeds` the same
+axis reads 2.1%. That is this ticket's own "the likely cause is the candidate
+count", confirmed from the linear side, and it is what ticket 14 acts on.
+
+**What did not hold.** `MonteCarloPolicy._create_W` is `np.zeros(19)`, so it
+was argued that `W = 0` must be "go to the nearest allowed Client" — every
+candidate scores 0, `argmin` takes index 0, `_closest_allowed_clients` orders
+nearest-first — and hence that most of the baseline's advantage was the
+candidate heuristic rather than the learned weights. **Measured, `W = 0` @
+`m+2` scores 30 791.43.** Branch 3 runs `list(set(possible_actions))` *after*
+the sort, node ids are arbitrary ints, and the dedup returns hash-table order:
+`W = 0` picks an **arbitrary** feasible Client. The preserved quirk eats the
+tie-break, and the linear baseline has no cheap myopic null either — the same
+trap this ticket fell into at 81 701.
+
+So the attribution stands unresolved, not reversed: comparing baseline@`m+2`
+with cost-greedy@151 varies the action set *and* the ranking rule at once.
+Ticket 14's 2×2 is the first place the two separate.
+
+#### 4b. A finding that outlives this ticket: the winner's curse is policy-dependent
+
+| policy | `evaluation_seeds` | `test_seeds` | ratio |
+|---|---|---|---|
+| linear `best_w` @ `m+40` — **selected on `evaluation_seeds`** | 2168.39 | 3384.82 | **×1.56** |
+| neural cost-greedy — no selected parameters | 3693.23 | 3811.28 | **×1.03** |
+
+F12, measured. The selection set flatters a *fitted* `W` by ~36% and an
+arithmetic rule by ~3%. Consequence for anyone comparing across the two sets:
+**"the gap to the baseline" is 41.3% on selection data and 11.2% on verdict
+data**, and neither is "the gap". A Gate A′ threshold defined as that gap was
+drafted, and reverted on this table.
+
+#### 5. What is handed on
+
+| # | |
+|---|---|
+| 13 | Extract the action set to shared code (self-golden zero is the proof) |
+| 14 | The Policy adopts the **identical** set, `m+2`/`m+2`. **Reverses ADR-0007.** Closes this ticket's open `claimed_mask` defect as a side effect |
+| 15 | `c(s, a)` leaves the network — structurally unreachable by the gradient |
+| 16 | Accumulated least squares with forgetting; aborted Episodes excluded |
+| 17 | Gate A′ — threshold as a rule on `evaluation_seeds`, part 3 on the residual, `r` diagnostic, two encoder arms |
+
+Still open and carried forward: ~24-33% of samples carrying an action the
+simulator discarded (the naive filter was measured worse — see the rejected row
+above; the additive-consistency argument that explains why still applies under
+the residual decomposition).

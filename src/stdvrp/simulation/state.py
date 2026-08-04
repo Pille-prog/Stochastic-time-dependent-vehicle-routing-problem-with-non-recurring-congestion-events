@@ -57,6 +57,18 @@ class State:
         # ``vehicle_standing`` below, not this field (ticket 04, ADR-0005).
         self.last_node_reached: list[float] = [depot for _ in range(number_vehicles)]
 
+        # The Client or depot this vehicle is currently routed toward — the
+        # Policy's own most recent decision for it, mirrored from
+        # ``Model``'s ``FleetRoutes.destination`` at the same site that sets
+        # it (``_reroute_for``). Restored: the legacy ``vehicles_direction``
+        # was removed here as apparently write-only (see the module docstring
+        # below), but it is read — by the feature that detects realised
+        # congestion (docs/simulator-review.md B4's "computed and discarded"
+        # ``mean_velocities``, compared against this vehicle's next-arc
+        # historical speed). That audit measured against a synthetic fixture,
+        # not the legacy source, and missed this reader.
+        self.vehicle_destination: list[float] = [depot for _ in range(number_vehicles)]
+
         # The very list handed in — the legacy aliased and mutated it in place.
         self.clients_not_visited = clients
 
@@ -117,6 +129,10 @@ class TrainingSnapshot:
     reads it (hence the previous five being "exactly right"), but ticket 04's
     tokenizer will, replaying off the same snapshots. Copied, like the rest —
     ``State`` mutates this list in place too.
+
+    ``vehicle_destination`` restores the legacy ``vehicles_direction`` (see
+    ``State``'s own field): ``FeatureExtractor``'s congestion-detection
+    general feature reads it during training replay exactly as it does live.
     """
 
     tau_episode: float
@@ -125,6 +141,7 @@ class TrainingSnapshot:
     vehicle_standing: tuple[bool, ...]
     observed_velocity: tuple[tuple[float, ...], ...]
     vehicle_completing_service: tuple[float, ...]
+    vehicle_destination: tuple[float, ...]
 
     @classmethod
     def capture(cls, state: State) -> TrainingSnapshot:
@@ -136,4 +153,5 @@ class TrainingSnapshot:
             vehicle_standing=tuple(state.vehicle_standing),
             observed_velocity=tuple(tuple(v) for v in state.observed_velocity),
             vehicle_completing_service=tuple(state.vehicle_completing_service),
+            vehicle_destination=tuple(state.vehicle_destination),
         )

@@ -88,6 +88,9 @@ def make_dense_world(
         vehicle_standing=standing,
         observed_velocity=observed_velocity,
         vehicle_completing_service=completing_service,
+        # Irrelevant to tokenize()/the network (neither reads this field) --
+        # same value as last_node_reached is a shape-correct, neutral filler.
+        vehicle_destination=positions,
     )
     return geometry, time_windows, snapshot
 

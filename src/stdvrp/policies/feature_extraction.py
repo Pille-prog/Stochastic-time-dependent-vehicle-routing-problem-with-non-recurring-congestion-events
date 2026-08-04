@@ -1,4 +1,4 @@
-"""FeatureExtractor: the Policy's 19-component feature vector as array arithmetic.
+"""FeatureExtractor: the Policy's 24-component feature vector as array arithmetic.
 
 Simulation-performance ticket 05 (ADR-0003, "arrays inside, OO outside"): the
 three feature routines that dominated episode time — ``clasify_delayed_clients``,
@@ -41,36 +41,63 @@ columns flagged in :attr:`StateFeatures.active`.
   threads it in as ``episode_end_minute``, the same configurable hard stop
   :class:`~stdvrp.simulation.model.Model` now uses instead of its own hardcoded
   constant;
-- ``mean_velocities``, computed by the general-state routine and never appended as
-  a feature. Nothing reads it; it is carried on :class:`StateFeatures` rather than
-  dropped because deleting legacy computation is a Tier-3 decision, not this
-  ticket's. **If a future modeling effort connects it (B4):** it averages
-  ``State.observed_velocity``, a recency window over the last
-  ``n_observed_velocities`` decision epochs, not the last N *distinct* arcs
-  (simulator-correctness ticket 09, B18) — arguably the better congestion proxy
-  of the two, since a congestion event lasts tens of minutes and a time window
-  captures that where a distinct-arc window would not.
+- ``mean_velocities``, computed by the general-state routine and carried on
+  :class:`StateFeatures` for callers other than the general features themselves
+  (the realised-congestion feature below is now one).
 
 **Float reassociation (Tier 2).** The four state-action cost sums are re-associated
 as "the other vehicles' terms, then the decided vehicle's", and the future-delay
 feature multiplies each Client's contribution by its duplicate-append multiplicity
 instead of adding it once per duplicate. (The Policy's ``X @ W`` over the batch is a
-third such site — a BLAS ``gemv`` rather than 19-term dot products.) The
+third such site — a BLAS ``gemv`` rather than 24-term dot products.) The
 general-state features stay bit-exact: their only sum is over time-window starts,
 which are integers. See the ticket ``## Comments`` for what this measures out to on
 the committed fixture.
 
 **B10 fixed (simulator-correctness ticket 06).** The legacy's fourth earliness
-bin (``general[10]``) was never assigned, so it was identically zero and
-``W[10]`` never trained. :meth:`FeatureExtractor._general_features` now assigns
+bin (``general[13]``) was never assigned, so it was identically zero and
+``W[13]`` never trained. :meth:`FeatureExtractor._general_features` now assigns
 it as *whatever the first three bins leave uncounted* — not redefined as "a
 Client whose window opens at minute 600 or later", because a bin also drops to
 zero once ``tau`` passes its own gate (e.g. bin 0 once ``tau >= 400``) while its
 Clients are still pending. Bin 3 absorbs those too. This keeps the invariant
 the four bins exist to satisfy: they partition pending demand, at every
-``tau`` — the four fractions in ``general[7:11]`` always sum to
+``tau`` — the four fractions in ``general[10:14]`` always sum to
 ``len(clients_not_visited) / number_clients``. The bin *boundaries*
 (400/500/600) are unchanged; only the bin that was missing is filled in.
+
+**Restored, not preserved (this ticket): three depot-distance features and one
+realised-congestion feature.** Comparison against the legacy source
+(``Main_Chengdu_Sirve_2_Acciones.py`` — its ``sys.argv`` order, vehicle-ratio
+table and congestion formula all match what ``ExperimentConfig`` already
+documents as the port's source) found its live ``extract_general_state_features``
+carries 16 general features, not 12, and its live ``extract_state_action_features``
+carries 8 state-action features, not 7 — this module's 19 was short by exactly
+the five below. None are hand-engineering added after the fact: they were
+already in the vector the thesis's published numbers were trained against, and
+dropping them during the port was an oversight, not a decision.
+
+- **Depot-distance features** (``general[7:10]``): mean/min/max haversine
+  distance from the depot to every pending Client, from ``node_coordinates``
+  (``TravelTimeModel.node_coordinates`` — already loaded, previously unused
+  downstream of the Policy). Ports ``DataCalculations.calculate_distance_metrics_to_depot``,
+  including its call-site swap of the ``haversine_distance`` staticmethod's
+  argument order — every call passes ``(lat, lon, lat, lon)`` against a
+  signature declared ``(lon1, lat1, lon2, lat2)``, so the formula's ``cos(lat)``
+  correction term evaluates ``cos(longitude)`` instead. Preserved exactly
+  (ADR-0001): this is the arithmetic the historical constants (2100, 12.9, 29)
+  were fit against, not a bug to fix here.
+- **The realised-congestion feature** (``general[15]``): restores the legacy
+  ``vehicles_direction`` field, removed from ``State`` in ticket 04
+  (simulator-correctness, ADR-0005) as apparently write-only — see
+  ``stdvrp.simulation.state``'s module docstring for where it comes back. The
+  feature counts the fraction of the fleet whose recent observed velocity
+  (``mean_velocities`` above — an Episode's own vehicles' own readings,
+  ADR-0006) falls below a congestion-scaled historical-average threshold for
+  the arc each is about to enter next. Both the observability rule and the
+  legacy formula are unchanged.
+- **The squared future-delay term** (state-action index 6 below): ports the
+  legacy's ``norm_future**2``, appended immediately after ``norm_future`` itself.
 """
 
 from __future__ import annotations
@@ -86,12 +113,16 @@ from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.simulation.state import is_parked_at_depot
 
 if TYPE_CHECKING:
+    from stdvrp.network.shortest_path_cache import ShortestPathCache
     from stdvrp.simulation.state import State, TrainingSnapshot
+
+NodeCoordinates = dict[int, list[float]]
+TravelData = dict[tuple[int, int, int], tuple[float, float]]
 
 TimeWindows = dict[int, tuple[int, int]]
 
-GENERAL_STATE_FEATURES = 12
-STATE_ACTION_FEATURES = 7
+GENERAL_STATE_FEATURES = 16
+STATE_ACTION_FEATURES = 8
 FEATURE_COUNT = GENERAL_STATE_FEATURES + STATE_ACTION_FEATURES
 
 # The legacy's depot-idle cutoff for the closest-vehicle classifier: a vehicle
@@ -99,26 +130,33 @@ FEATURE_COUNT = GENERAL_STATE_FEATURES + STATE_ACTION_FEATURES
 # with the 350 used by candidate selection — preserved, not reconciled (ADR-0001).
 _DEPOT_IDLE_CUTOFF = 310
 
+# The realised-congestion general feature (module docstring, "Restored, not
+# preserved"): a vehicle is only checked once it has been under way a few
+# minutes, and the threshold it is checked against scales the historical mean
+# speed by the run's own congestion_upper_bound. Both literal to the legacy.
+_CONGESTION_FEATURE_MIN_TAU = 304
+_CONGESTION_FEATURE_SATURATION_DEPTH_0_FACTOR = 0.78
+
 
 @dataclass(frozen=True, slots=True)
 class StateFeatures:
     """One State, arranged for the feature arithmetic of a single decision.
 
-    Its headline is :attr:`general`: the twelve general-state features that open
-    every candidate's 19-component vector. The rest are the per-State quantities
-    the seven state-action features are computed against — all in the column space
+    Its headline is :attr:`general`: the sixteen general-state features that open
+    every candidate's 24-component vector. The rest are the per-State quantities
+    the eight state-action features are computed against — all in the column space
     described in the module docstring — plus :attr:`delayed_clients`, which is not
     a feature at all but the classification the Policy's candidate selection reads.
     """
 
     general: NDArray[np.float64]
-    """The twelve general-state features (``X_general_state`` in the legacy)."""
+    """The sixteen general-state features (``X_general_state`` in the legacy)."""
 
     delayed_clients: tuple[tuple[int, ...], ...]
     """Per vehicle, at most two Clients whose due time its closest-Client list breaches."""
 
     mean_velocities: tuple[float, ...]
-    """Computed by the legacy's general-state routine and never used (see module docstring)."""
+    """Computed by the legacy's general-state routine; also feeds ``general[15]``."""
 
     tau: float
     active: NDArray[np.bool_]
@@ -154,6 +192,10 @@ class FeatureExtractor:
         delay_cost_factor: float,
         earliness_cost_factor: float,
         overtime_cost_factor: float,
+        node_coordinates: NodeCoordinates | None = None,
+        travel_data: TravelData | None = None,
+        shortest_path_cache: ShortestPathCache | None = None,
+        congestion_upper_bound: float | None = None,
     ) -> None:
         self._geometry = geometry
         self._number_vehicles = number_vehicles
@@ -165,6 +207,21 @@ class FeatureExtractor:
         self._delay_cost_factor = delay_cost_factor
         self._earliness_cost_factor = earliness_cost_factor
         self._overtime_cost_factor = overtime_cost_factor
+        # Restored features (module docstring, "Restored, not preserved"):
+        # depot-distance needs node coordinates, the congestion feature needs
+        # the historical per-arc-minute speed table and a next-hop lookup.
+        # Optional, not merely defaulted: MonteCarloPolicy (episode.py) always
+        # supplies real values -- this Policy's feature vector was always 24
+        # wide. TransformerMonteCarloPolicy's own FeatureExtractor never reads
+        # ``general`` (only ``delayed_clients``/``active``/``late``, for the
+        # shared action set) and has no route to these four sources through
+        # its own constructor, so it is not this ticket's job to thread them
+        # there; ``None`` here makes both restored features read as zero
+        # rather than crash, leaving that Policy's behavior unchanged.
+        self._node_coordinates = node_coordinates
+        self._travel_data = travel_data
+        self._shortest_path_cache = shortest_path_cache
+        self._congestion_upper_bound = congestion_upper_bound
 
         self._column_nodes = geometry.columns
         self._column_count = len(self._column_nodes)
@@ -198,13 +255,14 @@ class FeatureExtractor:
         counts, delayed = self._classify_closest_clients(
             tau, active, vehicle_minutes, positions, state.vehicle_standing
         )
+        mean_velocities = tuple(
+            sum(velocities) / len(velocities) for velocities in state.observed_velocity
+        )
 
         return StateFeatures(
-            general=self._general_features(tau, len(remaining), active),
+            general=self._general_features(state, tau, len(remaining), active, mean_velocities),
             delayed_clients=delayed,
-            mean_velocities=tuple(
-                sum(velocities) / len(velocities) for velocities in state.observed_velocity
-            ),
+            mean_velocities=mean_velocities,
             tau=tau,
             active=active,
             late=tau > self._due,
@@ -214,12 +272,21 @@ class FeatureExtractor:
         )
 
     def _general_features(
-        self, tau: float, remaining_count: int, active: NDArray[np.bool_]
+        self,
+        state: State | TrainingSnapshot,
+        tau: float,
+        remaining_count: int,
+        active: NDArray[np.bool_],
+        mean_velocities: tuple[float, ...],
     ) -> NDArray[np.float64]:
-        """Ports the live ``extract_general_state_features`` (12 features), bit-exactly.
+        """Ports the live ``extract_general_state_features`` (16 features), bit-exactly.
 
-        The only sum here is over time-window starts — integers, exactly
-        representable — so vectorizing it reorders nothing observable.
+        Most of this is a pure function of ``tau``/``remaining_count``/``active``
+        and vectorizes cleanly (the only sum is over time-window starts — integers,
+        exactly representable, so reordering it is not observable). The restored
+        congestion feature (``general[15]``) is inherently a small per-vehicle
+        loop reading ``state`` directly, matching ``_classify_shortest_distance_clients``'s
+        own precedent for staying scalar at fleet-sized N.
         """
         clients_left = remaining_count / 150
 
@@ -231,6 +298,10 @@ class FeatureExtractor:
             time = 0.0
 
         earliness = self._earliness[active]
+
+        depot_distance_total, depot_distance_min, depot_distance_max = (
+            self._depot_distance_features(active, remaining_count)
+        )
 
         # The legacy's elif chain over disjoint earliness bands, with the tau test
         # hoisted out of the per-Client loop: the bands cannot overlap, so an
@@ -264,9 +335,76 @@ class FeatureExtractor:
         general[4] = (clients_left**2) * time
         general[5] = (time**2) * clients_left
         general[6] = (time**2) * (clients_left**2)
-        general[7:11] = [count / self._number_clients for count in counts_earliness]
-        general[11] = mean_earliness_diff
+        general[7] = depot_distance_total
+        general[8] = depot_distance_min
+        general[9] = depot_distance_max
+        general[10:14] = [count / self._number_clients for count in counts_earliness]
+        general[14] = mean_earliness_diff
+        general[15] = self._congestion_signal(state, tau, mean_velocities)
         return general
+
+    def _depot_distance_features(
+        self, active: NDArray[np.bool_], remaining_count: int
+    ) -> tuple[float, float, float]:
+        """Ports ``calculate_distance_metrics_to_depot`` (module docstring, "Restored").
+
+        Legacy returns all-zero for 0 or 1 pending Clients rather than a
+        degenerate mean/min/max over one point — preserved, not just avoided.
+        """
+        if remaining_count <= 1 or self._node_coordinates is None:
+            return 0.0, 0.0, 0.0
+        depot_lat, depot_lon = self._node_coordinates[self._depot]
+        distances = [
+            _legacy_haversine_km(depot_lat, depot_lon, *self._node_coordinates[node])
+            for node in np.asarray(self._column_nodes)[active]
+        ]
+        mean_distance = sum(distances) / len(distances)
+        total_distance_normalized = (mean_distance * remaining_count) / 2100.0
+        return total_distance_normalized, min(distances) / 12.9, max(distances) / 29.0
+
+    def _congestion_signal(
+        self, state: State | TrainingSnapshot, tau: float, mean_velocities: tuple[float, ...]
+    ) -> float:
+        """Ports the legacy's realised-congestion general feature (module docstring).
+
+        A vehicle counts as "congested" when its own recent observed velocity
+        (``mean_velocities`` — an Episode's own readings, ADR-0006) falls short
+        of the historical mean speed for the arc it is about to enter, scaled by
+        this run's ``congestion_upper_bound`` — the same scaling
+        ``congestion/generator.py`` uses for its own depth-0 propagation factor
+        (B8, docs/simulator-review.md), hence dividing by that factor's 0.78
+        rather than an independent constant.
+        """
+        if (
+            tau <= _CONGESTION_FEATURE_MIN_TAU
+            or self._shortest_path_cache is None
+            or self._travel_data is None
+            or self._congestion_upper_bound is None
+        ):
+            return 0.0
+        destination = state.vehicle_destination
+        positions = state.last_node_reached
+        congested = 0
+        state_tau = int(tau)
+        if state_tau % 2 == 1:
+            state_tau -= 1
+        for vehicle in range(self._number_vehicles):
+            target = destination[vehicle]
+            position = positions[vehicle]
+            if target == self._depot or target == position or position == self._depot:
+                continue
+            next_node = self._shortest_path_cache.path_between(position, target).nodes[1]
+            # Node ids are floats-that-hold-integer-values once a vehicle has
+            # travelled (state.py's own docstring: "float and int ids hash and
+            # compare equal, so lookups work") -- same rationale as the
+            # ``time_windows.get(node)`` ignore above.
+            historical_speed = self._travel_data[(position, next_node, state_tau)][1]  # type: ignore[index]
+            threshold = (
+                self._congestion_upper_bound / _CONGESTION_FEATURE_SATURATION_DEPTH_0_FACTOR
+            ) * historical_speed
+            if mean_velocities[vehicle] < threshold:
+                congested += 1
+        return congested / self._number_vehicles
 
     def _classify_closest_clients(
         self,
@@ -373,7 +511,7 @@ class FeatureExtractor:
         vehicle: int,
         candidates: Sequence[int],
     ) -> NDArray[np.float64]:
-        """One 19-component feature row per candidate action of ``vehicle``.
+        """One 24-component feature row per candidate action of ``vehicle``.
 
         Ports the live ``extract_state_action_features`` for the whole candidate
         set at once: ``action`` supplies the other vehicles' fixed targets and each
@@ -451,14 +589,18 @@ class FeatureExtractor:
 
         X = np.empty((candidate_count, FEATURE_COUNT), dtype=np.float64)
         X[:, :GENERAL_STATE_FEATURES] = features.general
-        X[:, 12] = late_count / 13
-        # The preserved permanently-zero feature: it is what pads W to 19.
-        X[:, 13] = 0.0
-        X[:, 14] = total_distance / 100.0
-        X[:, 15] = earliness_cost / 60.0
-        X[:, 16] = delay_cost / 60.0
-        X[:, 17] = future_delay / 2500.0
-        X[:, 18] = overtime_cost / 180.0
+        X[:, 16] = late_count / 13
+        # The preserved permanently-zero feature: it is what pads W to 24.
+        X[:, 17] = 0.0
+        X[:, 18] = total_distance / 100.0
+        X[:, 19] = earliness_cost / 60.0
+        X[:, 20] = delay_cost / 60.0
+        future_delay_normalized = future_delay / 2500.0
+        X[:, 21] = future_delay_normalized
+        # Restored (module docstring, "Restored, not preserved"): the legacy's
+        # ``norm_future**2``, dropped during the port.
+        X[:, 22] = future_delay_normalized**2
+        X[:, 23] = overtime_cost / 180.0
         return X
 
     def _arrival_costs(
@@ -550,3 +692,23 @@ def _column_mask(column_count: int, columns: NDArray[np.intp]) -> NDArray[np.boo
     mask = np.zeros(column_count, dtype=np.bool_)
     mask[columns] = True
     return mask
+
+
+def _legacy_haversine_km(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
+    """Ports ``DataCalculations.haversine_distance`` exactly as its one call site uses it.
+
+    Module docstring, "Restored, not preserved": the legacy staticmethod is
+    declared ``haversine_distance(lon1, lat1, lon2, lat2)`` but its only caller
+    passes ``(lat, lon, lat, lon)`` — every argument one position off from its
+    name. The formula below is that call, arithmetically inlined: not the
+    textbook haversine (its ``cos`` correction term ends up evaluating
+    longitude, not latitude), and deliberately not corrected — the historical
+    normalization constants at the call site were fit against this exact
+    arithmetic.
+    """
+    lat_a, lon_a, lat_b, lon_b = (np.radians(value) for value in (lat_a, lon_a, lat_b, lon_b))
+    a = np.sin((lon_b - lon_a) / 2.0) ** 2 + np.cos(lon_a) * np.cos(lon_b) * np.sin(
+        (lat_b - lat_a) / 2.0
+    ) ** 2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(max(1.0 - a, 0.0)))
+    return float(6371.0 * c)

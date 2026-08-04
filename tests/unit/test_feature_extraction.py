@@ -14,12 +14,20 @@ the same one-line fix as :class:`~stdvrp.policies.feature_extraction.FeatureExtr
 rather than reproducing that bug. Both sides must move together, or this file
 would stop testing that the vectorization matches the (corrected) definition.
 
+The five restored features (``feature_extraction.py``'s own module docstring,
+"Restored, not preserved") are the same kind of deliberate move: ``LoopReference``
+carries a loop-style transcription of each, and ``Scenario`` now wires real
+(synthetic) ``node_coordinates``/``travel_data``/``shortest_path_cache`` and a
+per-vehicle ``vehicle_destination`` into every generated State, so the parity
+checks below exercise the restored features rather than their None-guarded
+zero fallback.
+
 Two tolerances, deliberately:
 
 * ``rtol=0`` (bit-exact) for the general-state features, the delayed-Client
   classification and the closest-Client multiplicities — those are integer or
   order-independent computations that the vectorization must not perturb.
-* ``rtol=1e-12`` for the seven state-action features, whose per-vehicle and
+* ``rtol=1e-12`` for the eight state-action features, whose per-vehicle and
   per-multiplicity sums are re-associated (Tier 2, see the ticket ``## Comments``).
 """
 
@@ -42,13 +50,41 @@ HORIZON_END = 780
 EPISODE_END = 1150
 
 
+def _loop_haversine_km(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
+    """Independent transcription of the legacy's mislabeled haversine call.
+
+    Deliberately not imported from ``feature_extraction._legacy_haversine_km``:
+    this file's whole point is an independent second implementation to check
+    the real one against (module docstring). See that function's own
+    docstring for why the arithmetic below is not the textbook haversine.
+    """
+    lat_a, lon_a, lat_b, lon_b = (np.radians(v) for v in (lat_a, lon_a, lat_b, lon_b))
+    a = np.sin((lon_b - lon_a) / 2.0) ** 2 + np.cos(lon_a) * np.cos(lon_b) * np.sin(
+        (lat_b - lat_a) / 2.0
+    ) ** 2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(max(1.0 - a, 0.0)))
+    return float(6371.0 * c)
+
+
 # --- the oracle: the loop bodies this ticket replaces, copied verbatim ----------
 
 
 class LoopReference:
     """The pre-ticket-05 feature loops, transcribed unchanged."""
 
-    def __init__(self, geometry, time_windows, number_vehicles, number_clients, depot):
+    def __init__(
+        self,
+        geometry,
+        time_windows,
+        number_vehicles,
+        number_clients,
+        depot,
+        *,
+        node_coordinates,
+        travel_data,
+        shortest_path_cache,
+        congestion_upper_bound,
+    ):
         self.geometry = geometry
         self.time_windows = time_windows
         self.number_vehicles = number_vehicles
@@ -59,6 +95,12 @@ class LoopReference:
         self.overtime_cost = 5 / 6
         self.service_time = 5
         self.end_of_horizon = HORIZON_END
+        # The five restored features (feature_extraction.py's own module
+        # docstring, "Restored, not preserved").
+        self.node_coordinates = node_coordinates
+        self.travel_data = travel_data
+        self.shortest_path_cache = shortest_path_cache
+        self.congestion_upper_bound = congestion_upper_bound
 
     def classify_delayed_clients(self, state):
         self.state = state
@@ -119,6 +161,23 @@ class LoopReference:
         self.X_general_state.append((time**2) * clients_left)
         self.X_general_state.append((time**2) * (clients_left**2))
 
+        # Restored (feature_extraction.py's module docstring, "Restored, not
+        # preserved"): mean/min/max haversine distance from the depot to every
+        # pending Client.
+        remaining = list(self.state.clients_not_visited)
+        if len(remaining) <= 1:
+            self.X_general_state.extend([0.0, 0.0, 0.0])
+        else:
+            depot_lat, depot_lon = self.node_coordinates[self.depot]
+            distances = [
+                _loop_haversine_km(depot_lat, depot_lon, *self.node_coordinates[node])
+                for node in remaining
+            ]
+            mean_distance = sum(distances) / len(distances)
+            self.X_general_state.append((mean_distance * len(remaining)) / 2100.0)
+            self.X_general_state.append(min(distances) / 12.9)
+            self.X_general_state.append(max(distances) / 29.0)
+
         client_earliness_value = []
         for client in self.state.clients_not_visited:
             client_earliness, _ = self.time_windows[client]
@@ -156,6 +215,29 @@ class LoopReference:
                     mean_earliness_diff = (mean_earliness - self.state.tau_episode) / 120
 
         self.X_general_state.append(mean_earliness_diff)
+
+        # Restored: the realised-congestion feature (feature_extraction.py's
+        # module docstring). Ported straight from the legacy formula, not from
+        # FeatureExtractor's vectorized version.
+        congested = 0
+        if self.state.tau_episode > 304:
+            state_tau = int(self.state.tau_episode)
+            if state_tau % 2 == 1:
+                state_tau -= 1
+            for vehicle in range(self.number_vehicles):
+                target = self.state.vehicle_destination[vehicle]
+                position = self.state.last_node_reached[vehicle]
+                if target == self.depot or target == position or position == self.depot:
+                    continue
+                next_node = self.shortest_path_cache.path_between(position, target).nodes[1]
+                historical_speed = self.travel_data[(position, next_node, state_tau)][1]
+                threshold = (self.congestion_upper_bound / 0.78) * historical_speed
+                mean_velocity = sum(self.state.observed_velocity[vehicle]) / len(
+                    self.state.observed_velocity[vehicle]
+                )
+                if mean_velocity < threshold:
+                    congested += 1
+        self.X_general_state.append(congested / self.number_vehicles)
         return self.X_general_state
 
     def extract_state_action_features(self, state, action, vehicle_to_clients):
@@ -214,7 +296,11 @@ class LoopReference:
                     if est > due_tw:
                         future_delay += (est - max(due_tw, tau)) * delay_fact
 
-        features.append(future_delay / 2500.0)
+        future_delay_normalized = future_delay / 2500.0
+        features.append(future_delay_normalized)
+        # Restored: the squared future-delay term (feature_extraction.py's
+        # module docstring).
+        features.append(future_delay_normalized**2)
 
         overtime_cost = 0.0
         for i, a in enumerate(action):
@@ -239,6 +325,11 @@ class LoopReference:
 class Scenario:
     """One randomized world plus a State to evaluate both implementations on."""
 
+    # Fixed, not drawn from the scenario's own rng: it plays the same role as
+    # ExperimentConfig.congestion_upper_bound, a run-level knob, not per-world
+    # randomness.
+    CONGESTION_UPPER_BOUND = 0.4
+
     def __init__(self, seed: int, *, number_vehicles: int = 4, number_clients: int = 9):
         rng = np.random.default_rng(seed)
         node_count = number_clients + 6
@@ -261,7 +352,28 @@ class Scenario:
                 entries[(node, client)] = ShortestPath(
                     [float(node), float(client)], minutes, length
                 )
-        self.geometry = EpisodeGeometry.build(ShortestPathCache(entries), self.clients, DEPOT)
+        self.cache = ShortestPathCache(entries)
+        self.geometry = EpisodeGeometry.build(self.cache, self.clients, DEPOT)
+
+        # Restored features' sources (feature_extraction.py's module
+        # docstring, "Restored, not preserved"): synthetic but real-shaped, so
+        # the parity tests exercise the restored features instead of their
+        # None-guarded zero fallback.
+        self.node_coordinates = {
+            node: [float(rng.uniform(10.0, 50.0)), float(rng.uniform(70.0, 130.0))]
+            for node in range(node_count)
+        }
+        # Every even minute in [300, 800] covers every tau this module uses
+        # (TAUS below, rounded down to even) regardless of which node pair the
+        # congestion feature happens to look up.
+        self.travel_data = {
+            (node, client, minute): (
+                path.length,
+                path.length / path.average_minutes if path.average_minutes > 0 else 1.0,
+            )
+            for (node, client), path in entries.items()
+            for minute in range(300, 802, 2)
+        }
 
         self.number_vehicles = number_vehicles
         self.number_clients = number_clients
@@ -276,6 +388,14 @@ class Scenario:
             for _ in range(self.number_vehicles - depot_vehicles)
         ]
         state.last_node_reached = [float(p) for p in positions]
+        # Restored (module docstring): a destination independent of position,
+        # so the realised-congestion feature's "actually travelling" branch is
+        # exercised rather than trivially skipped every time.
+        destinations = [DEPOT, *self.clients]
+        state.vehicle_destination = [
+            float(destinations[int(self._rng.integers(0, len(destinations)))])
+            for _ in range(self.number_vehicles)
+        ]
         return state
 
     def extractor(self) -> FeatureExtractor:
@@ -291,11 +411,23 @@ class Scenario:
             delay_cost_factor=1,
             earliness_cost_factor=0.1,
             overtime_cost_factor=5 / 6,
+            node_coordinates=self.node_coordinates,
+            travel_data=self.travel_data,
+            shortest_path_cache=self.cache,
+            congestion_upper_bound=self.CONGESTION_UPPER_BOUND,
         )
 
     def reference(self) -> LoopReference:
         return LoopReference(
-            self.geometry, self.time_windows, self.number_vehicles, self.number_clients, DEPOT
+            self.geometry,
+            self.time_windows,
+            self.number_vehicles,
+            self.number_clients,
+            DEPOT,
+            node_coordinates=self.node_coordinates,
+            travel_data=self.travel_data,
+            shortest_path_cache=self.cache,
+            congestion_upper_bound=self.CONGESTION_UPPER_BOUND,
         )
 
 
@@ -369,14 +501,14 @@ class TestGeneralStateFeatureParity:
         expected = scenario.reference().extract_general_state_features(state)
         produced = scenario.extractor().state_features(state).general
 
-        assert produced.shape == (12,)
+        assert produced.shape == (16,)
         np.testing.assert_array_equal(produced, np.array(expected, dtype=np.float64))
 
 
 class TestEarlinessBinPartition:
     """B10: the four earliness bins partition pending demand, at every tau.
 
-    ``general[7:11]`` are ``count / number_clients`` for the four earliness
+    ``general[10:14]`` are ``count / number_clients`` for the four earliness
     bins; their sum must equal ``len(clients_not_visited) / number_clients``
     regardless of which of the tau-gated bins is open, so that no pending
     Client is ever counted by zero bins.
@@ -386,7 +518,7 @@ class TestEarlinessBinPartition:
     def test_the_four_bins_sum_to_pending_clients(self, scenario, state):
         features = scenario.extractor().state_features(state)
 
-        produced = float(np.sum(features.general[7:11]))
+        produced = float(np.sum(features.general[10:14]))
         expected = len(state.clients_not_visited) / scenario.number_clients
 
         assert produced == pytest.approx(expected, abs=1e-9)
@@ -403,9 +535,9 @@ class TestStateActionFeatureParity:
             expected = reference.extract_state_action_features(state, action, vehicle_to_clients)
             produced = scenario.extractor().action_features(features, action)
 
-            assert produced.shape == (19,)
+            assert produced.shape == (24,)
             np.testing.assert_allclose(
-                produced[12:], np.array(expected, dtype=np.float64), rtol=1e-12, atol=1e-12
+                produced[16:], np.array(expected, dtype=np.float64), rtol=1e-12, atol=1e-12
             )
 
     @pytest.mark.parametrize("scenario, state", ALL_SCENARIOS)
@@ -421,7 +553,7 @@ class TestStateActionFeatureParity:
 
         batched = extractor.candidate_features(features, action, vehicle, candidates)
 
-        assert batched.shape == (len(candidates), 19)
+        assert batched.shape == (len(candidates), 24)
         for row, candidate in enumerate(candidates):
             current_action = list(action)
             current_action[vehicle] = candidate
@@ -429,18 +561,18 @@ class TestStateActionFeatureParity:
                 state, current_action, vehicle_to_clients
             )
             np.testing.assert_allclose(
-                batched[row, 12:], np.array(expected, dtype=np.float64), rtol=1e-12, atol=1e-12
+                batched[row, 16:], np.array(expected, dtype=np.float64), rtol=1e-12, atol=1e-12
             )
-            np.testing.assert_array_equal(batched[row, :12], features.general)
+            np.testing.assert_array_equal(batched[row, :16], features.general)
 
 
 class TestFeatureExtractorShape:
-    def test_the_permanently_zero_feature_keeps_w_at_nineteen_components(self):
+    def test_the_permanently_zero_feature_keeps_w_at_twenty_four_components(self):
         scenario, state = ALL_SCENARIOS[0]
         extractor = scenario.extractor()
         features = extractor.state_features(state)
 
         row = extractor.action_features(features, [DEPOT] * scenario.number_vehicles)
 
-        assert row.shape == (19,)
-        assert row[13] == 0.0
+        assert row.shape == (24,)
+        assert row[17] == 0.0

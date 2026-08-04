@@ -39,7 +39,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from stdvrp.congestion import CongestionGenerator
+from stdvrp.congestion import ArcProbabilityCongestionGenerator, CongestionGenerator
 from stdvrp.demand.client_generator import ClientGenerator
 from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPathCache
@@ -65,6 +65,21 @@ def _spawn_episode_rngs(seed: int) -> EpisodeRngs:
         np.random.default_rng(velocity_seed),
         np.random.default_rng(exploration_seed),
     )
+
+
+def _congestion_upper_bound_of(congestion_generator: CongestionGenerator) -> float | None:
+    """The bound MonteCarloPolicy's restored congestion feature scales its threshold by.
+
+    ``congestion_upper_bound`` lives on ``ArcProbabilityCongestionGenerator``
+    (a dataclass field), not the abstract ``CongestionGenerator`` these episode
+    runners are typed against, so this reads it only when the concrete type
+    actually has it — ``None`` for any other implementation, which
+    ``FeatureExtractor`` already treats as "feature reads zero" rather than a
+    crash (its own module docstring, "Restored, not preserved").
+    """
+    if isinstance(congestion_generator, ArcProbabilityCongestionGenerator):
+        return congestion_generator.congestion_upper_bound
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +148,10 @@ def run_evaluation_episode(
         episode_end_minute,
         W,
         exploration_rng=exploration_rng,
+        node_coordinates=travel_time_model.node_coordinates,
+        travel_data=travel_time_model.travel_data,
+        shortest_path_cache=shortest_path_cache,
+        congestion_upper_bound=_congestion_upper_bound_of(congestion_generator),
     )
     model = Model(
         state,
@@ -236,6 +255,10 @@ def run_training_episode(
         episode_end_minute,
         W,
         exploration_rng=exploration_rng,
+        node_coordinates=travel_time_model.node_coordinates,
+        travel_data=travel_time_model.travel_data,
+        shortest_path_cache=shortest_path_cache,
+        congestion_upper_bound=_congestion_upper_bound_of(congestion_generator),
         number_actions_train=number_actions,
         learning_rate=learning_rate,
     )

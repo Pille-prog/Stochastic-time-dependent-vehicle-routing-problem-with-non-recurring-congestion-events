@@ -69,8 +69,8 @@ HORIZON_START, HORIZON_END = 300, 780
 EMERGENCY_HORIZON = 1150
 # The generator draws event durations from ``uniform(30, max_congestion_duration)``.
 MIN_EVENT_DURATION = 30
-# 12 general-state + 7 state-action features (see the MonteCarloPolicy docstring).
-FEATURE_COUNT = 19
+# 16 general-state + 8 state-action features (see the MonteCarloPolicy docstring).
+FEATURE_COUNT = 24
 
 FIXTURE_DEMAND = dict(
     mean_number_clients=20,

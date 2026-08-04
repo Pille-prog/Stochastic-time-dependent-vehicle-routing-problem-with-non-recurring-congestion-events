@@ -62,6 +62,14 @@ earliness bins) are part of the feature definition and stay literal; only the va
 the legacy read from argv or hardcoded as *experiment* knobs (horizon end, action
 pool size, epsilon) are injected.
 
+**The update-time feature clip** (:data:`UPDATE_FEATURE_CEILING`). The legacy's
+``actualize_W`` clips the assembled feature vector at 3 before it computes
+``Q_pred`` or the gradient, and *only* there — the argmin in
+``generate_best_Q_pred_for_1_vehicle`` prices candidates raw. That asymmetry is
+load-bearing, not incidental: it is what the reference script is named for
+("Con_Clip"), and dropping it during the port is what made this Policy stop
+learning. See the constant's own comment for the measurement.
+
 Preserved legacy quirks (do not fix before Phase 2; ADR-0001) — the feature-side
 ones now live in ``feature_extraction`` and the candidate-set ones now live in
 ``action_set``, and are documented there:
@@ -87,15 +95,35 @@ from stdvrp.policies.action_set import select_vehicle_possible_actions
 from stdvrp.policies.base import Policy
 from stdvrp.policies.feature_extraction import (
     FeatureExtractor,
+    NodeCoordinates,
     StateFeatures,
     TimeWindows,
+    TravelData,
 )
 from stdvrp.simulation.state import is_parked_at_depot
 
 if TYPE_CHECKING:
+    from stdvrp.network.shortest_path_cache import ShortestPathCache
     from stdvrp.simulation.state import State, TrainingSnapshot
 
-__all__ = ["MonteCarloPolicy", "TimeWindows"]
+__all__ = ["UPDATE_FEATURE_CEILING", "MonteCarloPolicy", "TimeWindows"]
+
+# The legacy's ``actualize_W`` clips the assembled feature vector at 3 before it
+# computes ``Q_pred`` or the gradient (``Main_Chengdu_Sirve_Con_Clip.py`` line
+# 4374, the "Con_Clip" the file is named for) and nowhere else -- decisions are
+# taken on raw features. Dropping it during the port is what made this Policy
+# stop learning: several components are unbounded by construction, so an
+# unclipped update multiplies a residual of thousands by a feature of tens and W
+# walks away. Measured over 1312 real update rows, the ceiling binds on two
+# components, not one -- ``X[22] = norm_future**2`` (max 11.2, over the ceiling
+# on 12.4% of rows) and ``X[16] = late_count / 13`` (max 3.85, 8.5%), with
+# ``X[21] = norm_future`` a distant third (0.2%). Dropping ``X[22]`` alone would
+# therefore not have restored learning; the clip itself is what does.
+#
+# Measured on the real Chengdu data, 25 training Episodes at lr 1e-3:
+# ||W|| = 16_104_725 without the clip, 4_375 with it; evaluation mean cost
+# 57_357 without, 6_940 with, and falling to 4_311 by episode 150.
+UPDATE_FEATURE_CEILING = 3
 
 
 class MonteCarloPolicy(Policy):
@@ -116,6 +144,10 @@ class MonteCarloPolicy(Policy):
         W: NDArray[np.float64] | None,
         *,
         exploration_rng: np.random.Generator,
+        node_coordinates: NodeCoordinates | None = None,
+        travel_data: TravelData | None = None,
+        shortest_path_cache: ShortestPathCache | None = None,
+        congestion_upper_bound: float | None = None,
         number_actions_train: int | None = None,
         learning_rate: float = 0.0,
     ) -> None:
@@ -156,6 +188,10 @@ class MonteCarloPolicy(Policy):
             delay_cost_factor=self.delay_cost_factor,
             earliness_cost_factor=self.earliness_cost_factor,
             overtime_cost_factor=self.overtime_cost,
+            node_coordinates=node_coordinates,
+            travel_data=travel_data,
+            shortest_path_cache=shortest_path_cache,
+            congestion_upper_bound=congestion_upper_bound,
         )
 
         # Legacy constructor behavior: a random initial action (one
@@ -239,6 +275,7 @@ class MonteCarloPolicy(Policy):
             X = self.feature_extractor.action_features(
                 self.feature_extractor.state_features(snapshot), actions[t]
             )
+            X = np.clip(X, a_min=None, a_max=UPDATE_FEATURE_CEILING)
             assert self.W is not None
 
             Q_pred = np.dot(X, self.W)

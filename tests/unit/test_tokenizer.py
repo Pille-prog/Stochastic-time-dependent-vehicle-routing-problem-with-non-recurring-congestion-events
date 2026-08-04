@@ -69,6 +69,9 @@ def make_snapshot(
         vehicle_standing=standing,
         observed_velocity=observed_velocity,
         vehicle_completing_service=completing_service,
+        # Irrelevant to tokenize() (it never reads this field) -- same value as
+        # last_node_reached is a shape-correct, semantically neutral filler.
+        vehicle_destination=positions,
     )
 
 
