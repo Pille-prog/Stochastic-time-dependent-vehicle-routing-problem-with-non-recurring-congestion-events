@@ -32,10 +32,19 @@ Model for routing.
 Ticket 07 builds the first vectorized *reader* of those matrices:
 ``_closest_allowed_clients`` picks a vehicle's candidate actions with one row
 slice and one ``np.lexsort`` instead of one lookup per remaining Client plus
-``heapq.nsmallest`` — same ordering to the last tie (see its docstring). The
-endgame classifier ``_classify_shortest_distance_clients`` deliberately stays
-scalar: with one or two Clients left its arrays are too short to pay numpy's
-per-call overhead (measured 2x slower vectorized, ticket 07 Comments).
+``heapq.nsmallest`` — same ordering to the last tie. The endgame classifier
+``_classify_shortest_distance_clients`` deliberately stays scalar: with one or
+two Clients left its arrays are too short to pay numpy's per-call overhead
+(measured 2x slower vectorized, ticket 07 Comments).
+
+Ticket 13 (neural-policy, ADR-0011): ``_select_vehicle_possible_actions`` and
+those two collaborators move to :mod:`~stdvrp.policies.action_set` — a
+stateless module both this Policy and the transformer one (ticket 14) call, so
+"identical candidate set" means one definition rather than two that can drift.
+This method stays, as a thin delegate: the name is referenced by this
+docstring's own change log, by ADR-0001's change log and by tickets 06/08/09.
+No behaviour changed by the move — see ``action_set``'s module docstring for
+the preserved quirks, which are unchanged from below.
 
 Ticket 05 moves the feature arithmetic itself out to
 :class:`~stdvrp.policies.feature_extraction.FeatureExtractor` (a concrete
@@ -53,55 +62,68 @@ earliness bins) are part of the feature definition and stay literal; only the va
 the legacy read from argv or hardcoded as *experiment* knobs (horizon end, action
 pool size, epsilon) are injected.
 
+**The update-time feature clip** (:data:`UPDATE_FEATURE_CEILING`). The legacy's
+``actualize_W`` clips the assembled feature vector at 3 before it computes
+``Q_pred`` or the gradient, and *only* there — the argmin in
+``generate_best_Q_pred_for_1_vehicle`` prices candidates raw. That asymmetry is
+load-bearing, not incidental: it is what the reference script is named for
+("Con_Clip"), and dropping it during the port is what made this Policy stop
+learning. See the constant's own comment for the measurement.
+
 Preserved legacy quirks (do not fix before Phase 2; ADR-0001) — the feature-side
-ones now live in ``feature_extraction`` and are documented there:
+ones now live in ``feature_extraction`` and the candidate-set ones now live in
+``action_set``, and are documented there:
 
 - ``clients_left`` normalizes by a hardcoded 150 regardless of the episode's actual
   client count; ``late_count`` divides by 13.
 - The candidate action set is deduplicated via ``list(set(...))`` — CPython set
   iteration order for these int node ids is deterministic and preserved in-process.
 - Depot-idle cutoffs are inconsistent literals that ignore the configured horizon:
-  ``tau > 350`` in ``_select_vehicle_possible_actions`` vs ``tau > 310`` in the
+  ``tau > 350`` in ``select_vehicle_possible_actions`` vs ``tau > 310`` in the
   delayed/shortest-distance classifiers.
 """
 
 from __future__ import annotations
 
-import heapq
-from collections import defaultdict
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
 from stdvrp.network.episode_geometry import EpisodeGeometry
+from stdvrp.policies.action_set import select_vehicle_possible_actions
 from stdvrp.policies.base import Policy
 from stdvrp.policies.feature_extraction import (
     FeatureExtractor,
+    NodeCoordinates,
     StateFeatures,
     TimeWindows,
+    TravelData,
 )
 from stdvrp.simulation.state import is_parked_at_depot
 
 if TYPE_CHECKING:
+    from stdvrp.network.shortest_path_cache import ShortestPathCache
     from stdvrp.simulation.state import State, TrainingSnapshot
 
-__all__ = ["MonteCarloPolicy", "TimeWindows"]
+__all__ = ["UPDATE_FEATURE_CEILING", "MonteCarloPolicy", "TimeWindows"]
 
-
-class _RemainingClients(NamedTuple):
-    """``clients_not_visited`` as the arrays candidate selection sorts over.
-
-    All three are aligned index-for-index: ``clients`` is a *copy* of the State's
-    list (which the Model mutates in place, and whose Python ints the selected
-    actions are taken from, unchanged), ``client_ids`` is that list as an array
-    for the tie-break sort key, and ``column_positions`` locates each Client in
-    the EpisodeGeometry's columns.
-    """
-
-    clients: list[int]
-    client_ids: NDArray[np.integer]
-    column_positions: NDArray[np.intp]
+# The legacy's ``actualize_W`` clips the assembled feature vector at 3 before it
+# computes ``Q_pred`` or the gradient (``Main_Chengdu_Sirve_Con_Clip.py`` line
+# 4374, the "Con_Clip" the file is named for) and nowhere else -- decisions are
+# taken on raw features. Dropping it during the port is what made this Policy
+# stop learning: several components are unbounded by construction, so an
+# unclipped update multiplies a residual of thousands by a feature of tens and W
+# walks away. Measured over 1312 real update rows, the ceiling binds on two
+# components, not one -- ``X[22] = norm_future**2`` (max 11.2, over the ceiling
+# on 12.4% of rows) and ``X[16] = late_count / 13`` (max 3.85, 8.5%), with
+# ``X[21] = norm_future`` a distant third (0.2%). Dropping ``X[22]`` alone would
+# therefore not have restored learning; the clip itself is what does.
+#
+# Measured on the real Chengdu data, 25 training Episodes at lr 1e-3:
+# ||W|| = 16_104_725 without the clip, 4_375 with it; evaluation mean cost
+# 57_357 without, 6_940 with, and falling to 4_311 by episode 150.
+UPDATE_FEATURE_CEILING = 3
 
 
 class MonteCarloPolicy(Policy):
@@ -122,6 +144,10 @@ class MonteCarloPolicy(Policy):
         W: NDArray[np.float64] | None,
         *,
         exploration_rng: np.random.Generator,
+        node_coordinates: NodeCoordinates | None = None,
+        travel_data: TravelData | None = None,
+        shortest_path_cache: ShortestPathCache | None = None,
+        congestion_upper_bound: float | None = None,
         number_actions_train: int | None = None,
         learning_rate: float = 0.0,
     ) -> None:
@@ -162,8 +188,11 @@ class MonteCarloPolicy(Policy):
             delay_cost_factor=self.delay_cost_factor,
             earliness_cost_factor=self.earliness_cost_factor,
             overtime_cost_factor=self.overtime_cost,
+            node_coordinates=node_coordinates,
+            travel_data=travel_data,
+            shortest_path_cache=shortest_path_cache,
+            congestion_upper_bound=congestion_upper_bound,
         )
-        self._remaining_clients_cache: _RemainingClients | None = None
 
         # Legacy constructor behavior: a random initial action (one
         # exploration_rng choice per vehicle), then one full greedy decision pass.
@@ -246,6 +275,7 @@ class MonteCarloPolicy(Policy):
             X = self.feature_extractor.action_features(
                 self.feature_extractor.state_features(snapshot), actions[t]
             )
+            X = np.clip(X, a_min=None, a_max=UPDATE_FEATURE_CEILING)
             assert self.W is not None
 
             Q_pred = np.dot(X, self.W)
@@ -297,193 +327,22 @@ class MonteCarloPolicy(Policy):
     def _select_vehicle_possible_actions(
         self, number_of_actions: int, vehicle: int, features: StateFeatures
     ) -> list[int]:
-        """Ports the live ``select_vehicle_possible_actions`` (per-vehicle) definition."""
-        possible_actions: list[int] = []
-        forbidden_actions = []
+        """Ports the live ``select_vehicle_possible_actions`` (per-vehicle) definition.
 
-        for v in range(self.number_vehicles):
-            if v == vehicle:
-                continue
-            else:
-                forbidden_actions.append(self.action[v])
-
-        # This 350 and the 310 in _classify_shortest_distance_clients below disagree
-        # by 40 minutes (module docstring, "Depot-idle cutoffs"); ticket 05 leaves
-        # both literals as-is (spec.md decision 3: fix what crashes or
-        # misclassifies, never re-tune what is tuned) and only added the fallback
-        # in the 310 branch for the window this gap otherwise leaves uncovered.
-        # Ticket 04 (B1a, ADR-0005): the ``vehicle_standing`` guard is the fix —
-        # without it, a vehicle merely last seen at the depot while mid-arc past
-        # it (an interior waypoint on 6.8% of cached shortest paths) read as
-        # "idle at the depot" and was offered only the depot as an action,
-        # taking it out of service. The literal 350 is untouched; only what it
-        # applies to changes.
-        if (
-            is_parked_at_depot(
-                self.state.last_node_reached[vehicle], self.state.vehicle_standing[vehicle], self.depot
-            )
-            and self.state.tau_episode > 350
-        ) or len(self.state.clients_not_visited) == 0:
-            possible_actions.append(self.depot)
-
-        elif len(self.state.clients_not_visited) < 3:
-            # B11: filter forbidden_actions here too, matching the normal branch
-            # below — otherwise two vehicles can both be offered (and both pick)
-            # the same Client this classifier assigns to more than one of them.
-            shortest_distance_clients = self._classify_shortest_distance_clients()
-            for _distance, client in shortest_distance_clients[vehicle]:
-                if client not in forbidden_actions:
-                    possible_actions.append(client)
-            if not possible_actions:
-                possible_actions.append(self.depot)
-
-        else:
-            possible_actions = self._closest_allowed_clients(
-                self.state.last_node_reached[vehicle], number_of_actions, forbidden_actions
-            )
-
-            possible_actions = list(set(possible_actions))
-
-            if (
-                self.geometry.average_minutes(self.state.last_node_reached[vehicle], self.depot)
-                + self.state.tau_episode
-                > self.end_of_horizon
-            ):
-                possible_actions.append(self.depot)
-
-            for delayed_client in features.delayed_clients[vehicle]:
-                if (
-                    delayed_client not in possible_actions
-                    and delayed_client not in forbidden_actions
-                ):
-                    possible_actions.append(delayed_client)
-
-            if len(possible_actions) == 0:
-                possible_actions.append(self.depot)
-
-        return possible_actions
-
-    def _closest_allowed_clients(
-        self, position: float, number_of_actions: int, forbidden_actions: list[int]
-    ) -> list[int]:
-        """The unvisited Clients closest to ``position``, nearest first, at most k of them.
-
-        Ticket 07 (simulation-performance, ADR-0003): one geometry row slice plus
-        one ``np.lexsort`` replace the per-Client ``average_minutes`` lookups and
-        the ``heapq.nsmallest`` over ``(travel time, Client)`` tuples this ports.
-        The ordering is identical, not merely equivalent: lexsort's primary key
-        is the travel time and its secondary the Client id, exactly how tuple
-        comparison broke float ties, and ``nsmallest(k, xs) == sorted(xs)[:k]``.
-
-        Forbidden Clients (the other vehicles' current actions) are dropped
-        *after* the sort: the ``k + len(forbidden)`` nearest contain at least
-        ``k`` allowed ones whenever the filtered set has that many, so the first
-        ``k`` survivors are the same list filtering first would give.
-
-        The returned ids are the State's own Python ints, never numpy scalars:
-        they flow into ``self.action`` and from there into the Model.
+        Ticket 13 (neural-policy): delegates to the shared, stateless
+        :func:`~stdvrp.policies.action_set.select_vehicle_possible_actions` —
+        see that module's docstring for the full definition and its preserved
+        quirks. This method stays only because its name is load-bearing
+        elsewhere (this file's own module docstring, ADR-0001, tickets 06/08/09).
         """
-        remaining = self._remaining_clients()
-        travel_times = self.geometry.average_minutes_at(position, remaining.column_positions)
-        nearest = np.lexsort((remaining.client_ids, travel_times))[
-            : number_of_actions + len(forbidden_actions)
-        ]
-
-        clients = remaining.clients
-        closest: list[int] = []
-        for index in nearest:
-            if len(closest) == number_of_actions:
-                break
-            client = clients[index]
-            if client not in forbidden_actions:
-                closest.append(client)
-        return closest
-
-    def _remaining_clients(self) -> _RemainingClients:
-        """``clients_not_visited`` as sortable arrays, rebuilt only when it changes.
-
-        Every vehicle of a decision pass selects candidates out of the same
-        unvisited-Client list, which only the Model's transition function changes
-        (in place — hence the copy in :class:`_RemainingClients`, and the
-        content comparison here rather than an identity check).
-        """
-        clients = self.state.clients_not_visited
-        cached = self._remaining_clients_cache
-        if cached is not None and cached.clients == clients:
-            return cached
-
-        fresh = _RemainingClients(
-            clients=list(clients),
-            client_ids=np.asarray(clients),
-            column_positions=self.geometry.column_positions(clients),
+        return select_vehicle_possible_actions(
+            number_of_actions,
+            vehicle,
+            features,
+            self.state,
+            self.action,
+            self.geometry,
+            self.depot,
+            self.number_vehicles,
+            self.end_of_horizon,
         )
-        self._remaining_clients_cache = fresh
-        return fresh
-
-    def _classify_shortest_distance_clients(self) -> defaultdict[int, list[tuple[float, int]]]:
-        """Ports ``clasify_shortest_distance_clients`` (endgame with < 3 Clients left).
-
-        Stays scalar on purpose (ticket 07 Comments): with one or two Clients left
-        its arrays are two elements wide, where numpy's per-call overhead measured
-        2x slower than these loops.
-        """
-        shortest_distance_clients: defaultdict[int, list[tuple[float, int]]] = defaultdict(list)
-
-        clients_remaining = len(self.state.clients_not_visited)
-        last_node_reached = self.state.last_node_reached
-        vehicle_standing = self.state.vehicle_standing
-
-        if clients_remaining == 2:
-            # 310 here, 350 in _select_vehicle_possible_actions above — the
-            # disagreement documented there. heapq.nsmallest(2, []) == [] below
-            # if this filters out every vehicle, so this branch never hits B5's
-            # empty-min() crash (that's the one-Client branch just below).
-            # Ticket 04 (ADR-0005): ``vehicle_standing`` guards the same
-            # depot-idle predicate as B1a — a vehicle mid-arc past the depot
-            # must stay eligible.
-            vehicle_distances = []
-            for vehicle_idx, node in enumerate(last_node_reached):
-                if (
-                    is_parked_at_depot(node, vehicle_standing[vehicle_idx], self.depot)
-                    and self.state.tau_episode > 310
-                ):
-                    continue
-
-                total_distance = sum(
-                    self.geometry.average_minutes(node, client)
-                    for client in self.state.clients_not_visited
-                )
-                vehicle_distances.append((total_distance, vehicle_idx))
-
-            closest_two_vehicles = heapq.nsmallest(2, vehicle_distances)
-
-            for _, vehicle_idx in closest_two_vehicles:
-                for client in self.state.clients_not_visited:
-                    travel_time = self.geometry.average_minutes(
-                        last_node_reached[vehicle_idx], client
-                    )
-                    shortest_distance_clients[vehicle_idx].append((travel_time, client))
-
-        elif clients_remaining == 1:
-            client = next(iter(self.state.clients_not_visited))
-            distances = []
-            for vehicle_idx, node in enumerate(last_node_reached):
-                if (
-                    is_parked_at_depot(node, vehicle_standing[vehicle_idx], self.depot)
-                    and self.state.tau_episode > 310
-                ):
-                    continue
-
-                travel_time = self.geometry.average_minutes(node, client)
-                distances.append((travel_time, vehicle_idx))
-
-            # B5: every vehicle can read position == depot with tau in (310, 350]
-            # (see the disagreement noted in _select_vehicle_possible_actions above),
-            # leaving `distances` empty. Fall back to the depot, exactly as the
-            # two-Client branch above already does via heapq.nsmallest(2, []) == [].
-            if distances:
-                closest_vehicle = min(distances)
-                assigned_vehicle_idx = closest_vehicle[1]
-                shortest_distance_clients[assigned_vehicle_idx].append((closest_vehicle[0], client))
-
-        return shortest_distance_clients

@@ -6,7 +6,7 @@ Monte Carlo return. Writes **ADR-0007**.
 
 **Blocked by:** 02, 05
 
-**Status:** open
+**Status:** resolved
 
 ## `decide` — greedy, all feasible actions
 
@@ -81,10 +81,77 @@ count, giving the opponent its best shot.
 
 ## Acceptance
 
-- [ ] Every existing invariant that applies to any Policy still passes, in
+- [x] Every existing invariant that applies to any Policy still passes, in
       particular B11 (no double booking) and B5 (a legal action for every
       vehicle at every tau under every valid config).
-- [ ] One encoder pass per decision epoch, asserted — not `m`.
-- [ ] Predicted self-golden diff: **zero.** `monte_carlo.py` is not touched.
+- [x] One encoder pass per decision epoch, asserted — not `m`.
+- [x] Predicted self-golden diff: **zero.** `monte_carlo.py` is not touched.
 
 ## Comments
+
+Implemented as `TransformerMonteCarloPolicy`
+(`src/stdvrp/policies/transformer_policy.py`) + ADR-0007
+(`docs/adr/0007-the-action-set-is-feasibility-not-heuristic.md`).
+
+**The depot needed its own Q value, which the ticket's pseudocode didn't
+spell out.** `QHead` only scores `Embeddings.clients` — one row per pending
+Client — but the action rule says the depot is always feasible too. Resolved
+by synthesizing a depot "candidate" row the same way every real candidate's
+arc half is built: `encoder.arc_embed([minutes_to_depot, length_to_depot] /
+horizon_length)` (computed directly from `EpisodeGeometry`, permitted under
+the observability rule) concatenated with the vehicle's own context embedding
+(the depot has no client-like context of its own). Verified numerically, not
+just by construction: at initialization `Q(v, depot) ==
+minutes_to_depot / horizon_length` exactly (`TestDepotWarmStart`, Hypothesis
+over 30 random worlds, `atol=1e-4`) — the myopic warm start (ticket 05) now
+covers "should I go home" on the same footing as "which Client is nearest",
+not as an unscored fallback. Full reasoning and rejected alternatives in
+ADR-0007.
+
+**`_already_acquired_cost` is duplicated from `MonteCarloPolicy`, not
+shared** — ten lines of arithmetic over two hardcoded legacy cost factors,
+reimplemented here rather than imported so `monte_carlo.py` stays completely
+untouched (checked structurally: `TestDoesNotDependOnMonteCarlo` AST-parses
+this module's own imports, not its prose, since the module docstring names
+`monte_carlo.py` freely to explain why it isn't imported).
+
+**Feasibility is enforced as a hard mask on the argmin, not trusted to the
+network's `claimed` input** — at initialization `claimed` is provably
+init-inert (ticket 05's `TestClaimedIsWired`), so relying on it alone to keep
+B11 would fail on the very first decisions of a fresh Policy. `_sweep` tracks
+claimed pending Clients directly and excludes them from the candidate set
+before computing any argmin; `claimed` still flows into the network as an
+ordinary feature so a trained network's predictions can account for
+contention.
+
+**Learning-time inefficiency, acknowledged, not fixed here:** `learn` does
+not attempt to share one encoder pass across a decision epoch's `m`
+vehicle-samples during replay (unlike the acting path's asserted "one encoder
+pass per decision epoch, not `m`") — shuffled minibatches routinely split
+those samples apart. Every training sample re-tokenizes and re-encodes its
+snapshot from scratch: correct, not maximally efficient, recorded as a future
+measurement rather than the default (mirrors spec.md decision 9's own
+treatment of the replay-buffer question).
+
+New `ExperimentConfig` fields (not anticipated by the ticket text, needed to
+drive `learn`): `neural_learning_rate` (seeds Adam — a different scale from
+the linear baseline's SGD `learning_rate`, and what ticket 07's patience-based
+convergence stopping will multiply by 0.3), `neural_learn_passes` (`K`,
+ticket 03's compute-budget measurement used 4), `neural_batch_size`.
+
+Verified: 11 new tests (`tests/unit/test_transformer_policy.py`) — B11 and B5
+as Hypothesis properties over 0..8 pending Clients and 1..5 vehicles (60
+examples each), one-encoder-pass-per-decision-epoch via a call-counting
+monkeypatch on `TokenEncoder.transformer.forward`, the depot warm start,
+`decide_train`'s epsilon=1.0 exploration still respecting B11 over 20 trials,
+`learn` moving weights / staying finite / being a no-op on an empty episode /
+being bit-reproducible given the same `learn_rng` seed. Full suite (excluding
+`golden`) after landing: 4115 passed, 3 deselected — the 14-test delta from
+`tests/unit/test_trainer.py`'s and `test_experiment_config.py`'s own new
+`neural_*` cases, plus this ticket's 11. `mypy`/`ruff check`/`ruff format
+--check` clean on every file this ticket touched (four pre-existing E501
+violations elsewhere, documented in `simulator-correctness` ticket 10's own
+Comments, untouched by this ticket). Self-golden not re-run: this ticket
+predicted and structurally guarantees a zero diff (`monte_carlo.py` untouched,
+confirmed by `TestDoesNotDependOnMonteCarlo`), so there is nothing for it to
+measure.

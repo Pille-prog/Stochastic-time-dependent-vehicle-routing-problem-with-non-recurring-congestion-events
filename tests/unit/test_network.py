@@ -1,13 +1,19 @@
-"""Unit tests for :mod:`stdvrp.policies.network` (ticket 05, neural-policy).
+"""Unit tests for :mod:`stdvrp.policies.network` (ticket 05, extended by
+ticket 15, neural-policy).
 
-``TestWarmStart`` is the ticket's real deliverable: the untrained network's
-greedy policy must be nearest-feasible-Client, checked directly against the
-geometry (spec.md, "The warm start"). ``TestReproducibility``/``TestDeterminism``
-pin the injected-generator discipline and the bit-for-bit forward-pass claim.
-``TestIdentityAtInit`` and ``TestQHeadBackgroundUnitsAreTrainable`` pin the two
-non-obvious mechanisms the module docstring documents at length: a
-zero-initialised residual branch is an exact identity, and QHead's un-warm-
-started hidden units must not be frozen at zero forever.
+``TestUntrainedQEqualsMyopicBase`` is ticket 15's real deliverable: the
+untrained network's ``Q`` must equal the myopic base ``c`` exactly, for every
+candidate including the depot, checked against ``tokens.arc_tokens`` directly
+(module docstring, "The myopic base"). ``TestQHeadResidualIsZeroAtInit`` pins
+the more fundamental claim underneath it: ``QHead``'s own output —
+independent of any embeddings, any world, any geometry — is exactly zero at
+construction. ``TestReproducibility``/``TestDeterminism`` pin the
+injected-generator discipline and the bit-for-bit forward-pass claim.
+``TestRealAttentionAtInit`` and ``TestQHeadBackgroundUnitsAreTrainable`` pin
+two non-obvious mechanisms the module docstring documents at length: the
+encoder is *not* an identity map any more (ticket 15 retired that
+construction), and QHead's Xavier-random hidden units must not be frozen at
+zero forever.
 """
 
 from __future__ import annotations
@@ -22,12 +28,12 @@ from hypothesis import strategies as st
 import stdvrp.simulation  # noqa: F401
 from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPath, ShortestPathCache
-from stdvrp.policies.tokenizer import tokenize
+from stdvrp.policies.tokenizer import WARM_START_WEIGHTS, tokenize
 from stdvrp.simulation.state import TrainingSnapshot
 
 torch = pytest.importorskip("torch")
 
-from stdvrp.policies.network import QHead, TokenEncoder  # noqa: E402
+from stdvrp.policies.network import DEPOT_WARM_START_PENALTY, QHead, TokenEncoder  # noqa: E402
 
 pytestmark = pytest.mark.neural
 
@@ -82,6 +88,9 @@ def make_dense_world(
         vehicle_standing=standing,
         observed_velocity=observed_velocity,
         vehicle_completing_service=completing_service,
+        # Irrelevant to tokenize()/the network (neither reads this field) --
+        # same value as last_node_reached is a shape-correct, neutral filler.
+        vehicle_destination=positions,
     )
     return geometry, time_windows, snapshot
 
@@ -104,6 +113,7 @@ def build_network(
     n_layers: int = 3,
     n_heads: int = 4,
     n_obs: int = 3,
+    device: torch.device | None = None,
 ):
     rng = np.random.default_rng(seed)
     encoder = TokenEncoder(
@@ -112,8 +122,9 @@ def build_network(
         n_heads=n_heads,
         n_observed_velocities=n_obs,
         init_rng=rng,
+        device=device,
     )
-    head = QHead(d_model=d_model, init_rng=rng)
+    head = QHead(d_model=d_model, init_rng=rng, device=device)
     return encoder, head
 
 
@@ -134,41 +145,187 @@ def worlds(draw: st.DrawFn) -> tuple[EpisodeGeometry, dict, TrainingSnapshot]:
 _ENCODER, _HEAD = build_network(seed=1234, n_obs=N_OBS)
 
 
-class TestWarmStart:
-    """spec.md's load-bearing requirement: untrained Q ~= minutes_from_vehicle,
-    so the untrained greedy policy is nearest-feasible-Client -- checked
-    directly against ``EpisodeGeometry``, independently of the tokenizer's own
-    output (a bug shared between ``tokenizer.py`` and ``network.py``, e.g. both
-    transposing the same field, would not be caught by comparing against
-    ``tokens.client_tokens`` alone)."""
+class TestQHeadResidualIsZeroAtInit:
+    """Ticket 15's structural guarantee, at its most fundamental: ``QHead``'s
+    own output -- ``W · φ(s, v, a)``, never the final ``Q`` any more -- is
+    exactly zero at construction, for *any* input, not just ones built from a
+    real tokenized world (``network.py``, "The myopic base"). Independent of
+    ``TestUntrainedQEqualsMyopicBase`` below, which checks the sum this
+    combines with; this class checks ``QHead`` in isolation."""
+
+    @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
+    def test_residual_is_exactly_zero_for_arbitrary_input(self, seed: int) -> None:
+        _, head = build_network(seed=seed, n_obs=N_OBS, d_model=8)
+        n_candidates = 12
+        vehicle_embedding = torch.randn(8)
+        client_embeddings = torch.randn(n_candidates, 16)
+        claimed = torch.rand(n_candidates)
+        is_depot = torch.zeros(n_candidates)
+        is_depot[0] = 1.0
+
+        with torch.no_grad():
+            residual = head(vehicle_embedding, client_embeddings, claimed, is_depot)
+
+        torch.testing.assert_close(residual, torch.zeros(n_candidates), atol=0.0, rtol=0.0)
+
+
+class TestUntrainedQEqualsMyopicBase:
+    """Ticket 15's real deliverable: at init, ``Q(s, v, a) == c(s, v, a)``
+    exactly, for every pending Client and the synthetic depot candidate --
+    checked against ``tokens.arc_tokens``/``depot_arc_tokens`` directly
+    (module docstring, "The myopic base"), combining ``Embeddings.cost``/
+    ``depot_cost`` with ``QHead``'s (zero) residual exactly as
+    ``transformer_policy.py``'s ``_score`` does."""
 
     @settings(max_examples=50, deadline=None, derandomize=True)
     @given(world=worlds())
-    def test_q_matches_minutes_from_vehicle_and_argmin_is_nearest_client(self, world) -> None:
+    def test_q_equals_c_and_argmin_is_cost_greedy(self, world) -> None:
         geometry, time_windows, snapshot = world
         tokens = call_tokenize(geometry, time_windows, snapshot)
         embeddings = _ENCODER(tokens)
 
-        # Independently recomputed from EpisodeGeometry -- not read off tokens.
-        pending = list(snapshot.clients_not_visited)
-        vehicle_minutes = geometry.average_minutes_rows(snapshot.last_node_reached)
-        columns = geometry.column_positions(pending)
-        minutes_from_vehicle = vehicle_minutes[:, columns]  # [number_vehicles, n_pending]
-
         n_pending = tokens.client_tokens.shape[0]
         number_vehicles = tokens.vehicle_tokens.shape[0]
         claimed = torch.zeros(n_pending)
+        is_depot = torch.zeros(n_pending)
+
+        weights = np.array(WARM_START_WEIGHTS["cost"])
+        expected_client_cost = tokens.arc_tokens @ weights  # [n_pending, number_vehicles]
+        expected_depot_cost = (
+            tokens.depot_arc_tokens @ weights + DEPOT_WARM_START_PENALTY
+        )  # [number_vehicles]
 
         for v in range(number_vehicles):
             with torch.no_grad():
-                q = _HEAD(embeddings.vehicles[v], embeddings.clients[:, v, :], claimed)
-            # Q is in the tokenizer's normalized units (raw minutes / horizon_length);
-            # a positive constant scale, so exactness and argmin both still hold.
-            horizon_length = float(SHIFT_END - HORIZON_START)
-            expected = minutes_from_vehicle[v] / horizon_length
+                residual = _HEAD(
+                    embeddings.vehicles[v], embeddings.clients[:, v, :], claimed, is_depot
+                )
+                q = embeddings.cost[:, v] + residual
+                depot_q = embeddings.depot_cost[v] + _HEAD(
+                    embeddings.vehicles[v],
+                    embeddings.depot[v].unsqueeze(0),
+                    torch.zeros(1),
+                    torch.ones(1),
+                )
 
-            np.testing.assert_allclose(q.numpy(), expected, atol=1e-5, rtol=1e-5)
-            assert int(torch.argmin(q).item()) == int(np.argmin(minutes_from_vehicle[v]))
+            np.testing.assert_allclose(q.numpy(), expected_client_cost[:, v], atol=1e-5, rtol=1e-5)
+            np.testing.assert_allclose(
+                depot_q.numpy(), expected_depot_cost[v : v + 1], atol=1e-5, rtol=1e-5
+            )
+
+            augmented = torch.cat([q, depot_q])
+            expected_augmented = np.concatenate(
+                [expected_client_cost[:, v], expected_depot_cost[v : v + 1]]
+            )
+            assert int(torch.argmin(augmented).item()) == int(np.argmin(expected_augmented))
+
+
+class TestLevelGain:
+    """Ticket 08: ``level_gain`` scales how far one optimizer step moves ``Q``'s
+    overall level (``network.py``, "The level term, and why it needs a gain").
+
+    Two properties carry the whole design. It must be **invisible to every
+    argmin** — otherwise it is the dueling mistake again, a level correction
+    landing on the ranking — and the default must be **bit-identical** to the
+    term not existing, so the frozen null model and every prior measurement
+    stand unchanged."""
+
+    def head_with(self, gain: float):
+        return QHead(d_model=16, init_rng=np.random.default_rng(4), level_gain=gain)
+
+    def score(self, head, world):
+        geometry, time_windows, snapshot = world
+        encoder, _ = build_network(seed=4, n_obs=N_OBS)
+        tokens = call_tokenize(geometry, time_windows, snapshot)
+        embeddings = encoder(tokens)
+        n_pending = tokens.client_tokens.shape[0]
+        return head(
+            embeddings.vehicles[0],
+            embeddings.clients[:, 0, :],
+            torch.zeros(n_pending),
+            torch.zeros(n_pending),
+        )
+
+    def test_the_default_gain_is_bit_identical_to_no_level_term(self) -> None:
+        world = make_dense_world(6, 2, N_OBS, seed=44)
+        with torch.no_grad():
+            plain = self.score(self.head_with(1.0), world)
+            head = self.head_with(1.0)
+            head.linear.bias.copy_(torch.full_like(head.linear.bias, 0.25))
+            biased = self.score(head, world)
+        # A nonzero bias still lands exactly once, not twice.
+        torch.testing.assert_close(biased, plain + 0.25, atol=0.0, rtol=0.0)
+
+    @settings(max_examples=25, deadline=None, derandomize=True)
+    @given(world=worlds())
+    def test_the_gain_shifts_every_candidate_equally(self, world) -> None:
+        head = self.head_with(100.0)
+        with torch.no_grad():
+            before = self.score(head, world).clone()
+            head.linear.bias.copy_(torch.full_like(head.linear.bias, -0.01))
+            after = self.score(head, world)
+
+        shift = (after - before).numpy()
+        np.testing.assert_allclose(shift, np.full_like(shift, shift[0]), atol=1e-6, rtol=0)
+        assert int(torch.argmin(after).item()) == int(torch.argmin(before).item())
+
+    def test_the_gain_multiplies_the_bias_gradient(self) -> None:
+        """The mechanism: one step moves the level ``gain`` times as far,
+        because the bias's gradient is multiplied by exactly ``gain``."""
+        world = make_dense_world(6, 2, N_OBS, seed=44)
+        grads = []
+        for gain in (1.0, 100.0):
+            head = self.head_with(gain)
+            self.score(head, world).sum().backward()
+            assert head.linear.bias.grad is not None
+            grads.append(float(head.linear.bias.grad.item()))
+        assert grads[1] == pytest.approx(100.0 * grads[0], rel=1e-5)
+
+    def test_a_nonpositive_gain_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="level_gain must be positive"):
+            QHead(d_model=16, init_rng=np.random.default_rng(0), level_gain=0.0)
+
+
+class TestMyopicBaseMatchesTheToken:
+    """Ticket 15: ``Embeddings.cost``/``depot_cost`` are read straight off the
+    arc token, bypassing ``arc_embed`` -- pinned in isolation from ``QHead``
+    here (``TestUntrainedQEqualsMyopicBase`` above pins the combined ``Q``)."""
+
+    def test_cost_prices_the_projected_cost_components(self) -> None:
+        geometry, time_windows, snapshot = make_dense_world(6, 2, N_OBS, seed=17)
+        encoder, _ = build_network(seed=21, n_obs=N_OBS)
+        tokens = call_tokenize(geometry, time_windows, snapshot)
+
+        with torch.no_grad():
+            embeddings = encoder(tokens)
+
+        # minutes + earliness + delay + overtime (fields 0, 2, 3, 5), all
+        # already in 1/horizon_length units. future_delay (field 4) is
+        # deliberately not priced.
+        arc = tokens.arc_tokens
+        expected_cost = arc[:, :, 0] + arc[:, :, 2] + arc[:, :, 3] + arc[:, :, 5]
+        np.testing.assert_allclose(embeddings.cost.numpy(), expected_cost, atol=1e-5, rtol=1e-5)
+
+        depot_arc = tokens.depot_arc_tokens
+        expected_depot_cost = (
+            depot_arc[:, 0] + depot_arc[:, 2] + depot_arc[:, 3] + depot_arc[:, 5]
+        ) + DEPOT_WARM_START_PENALTY
+        np.testing.assert_allclose(
+            embeddings.depot_cost.numpy(), expected_depot_cost, atol=1e-5, rtol=1e-5
+        )
+
+    def test_cost_carries_no_gradient(self) -> None:
+        """Not a ``Parameter``, no gradient path -- the structural claim
+        ``network.py``'s "The myopic base" makes, checked directly rather
+        than inferred from a backward pass never reaching it."""
+        geometry, time_windows, snapshot = make_dense_world(4, 2, N_OBS, seed=18)
+        encoder, _ = build_network(seed=22, n_obs=N_OBS)
+        tokens = call_tokenize(geometry, time_windows, snapshot)
+
+        embeddings = encoder(tokens)
+
+        assert embeddings.cost.requires_grad is False
+        assert embeddings.depot_cost.requires_grad is False
 
 
 class TestReproducibility:
@@ -199,17 +356,19 @@ class TestReproducibility:
             emb_a = encoder_a(tokens)
             emb_b = encoder_b(tokens)
             claimed = torch.zeros(tokens.client_tokens.shape[0])
-            q_a = head_a(emb_a.vehicles[0], emb_a.clients[:, 0, :], claimed)
-            q_b = head_b(emb_b.vehicles[0], emb_b.clients[:, 0, :], claimed)
+            is_depot = torch.zeros(tokens.client_tokens.shape[0])
+            q_a = head_a(emb_a.vehicles[0], emb_a.clients[:, 0, :], claimed, is_depot)
+            q_b = head_b(emb_b.vehicles[0], emb_b.clients[:, 0, :], claimed, is_depot)
         torch.testing.assert_close(q_a, q_b, atol=0.0, rtol=0.0)
 
     def test_different_seeds_give_different_parameters(self) -> None:
         encoder_a, _ = build_network(seed=1, n_obs=N_OBS)
         encoder_b, _ = build_network(seed=2, n_obs=N_OBS)
 
-        # arc_embed's row 0 and every zero-initialised weight are identical by
+        # Every zero-initialised weight (QHead.linear/layer2) is identical by
         # construction regardless of seed; client_base_embed's Xavier-random
-        # weight is not, so it is the discriminating parameter.
+        # weight is not (ticket 15: neither is arc_embed's, but this parameter
+        # alone is enough to discriminate), so it is the discriminating one.
         assert not torch.equal(
             encoder_a.client_base_embed.weight, encoder_b.client_base_embed.weight
         )
@@ -229,9 +388,10 @@ class TestDeterminism:
         torch.testing.assert_close(emb_1.vehicles, emb_2.vehicles, atol=0.0, rtol=0.0)
 
         claimed = torch.zeros(tokens.client_tokens.shape[0])
+        is_depot = torch.zeros(tokens.client_tokens.shape[0])
         with torch.no_grad():
-            q_1 = _HEAD(emb_1.vehicles[0], emb_1.clients[:, 0, :], claimed)
-            q_2 = _HEAD(emb_2.vehicles[0], emb_2.clients[:, 0, :], claimed)
+            q_1 = _HEAD(emb_1.vehicles[0], emb_1.clients[:, 0, :], claimed, is_depot)
+            q_2 = _HEAD(emb_2.vehicles[0], emb_2.clients[:, 0, :], claimed, is_depot)
         torch.testing.assert_close(q_1, q_2, atol=0.0, rtol=0.0)
 
 
@@ -248,32 +408,44 @@ class TestShapes:
 
         assert embeddings.clients.shape == (n_clients, n_vehicles, 2 * _ENCODER.d_model)
         assert embeddings.vehicles.shape == (n_vehicles, _ENCODER.d_model)
+        assert embeddings.depot.shape == (n_vehicles, 2 * _ENCODER.d_model)
+        assert embeddings.cost.shape == (n_clients, n_vehicles)
+        assert embeddings.depot_cost.shape == (n_vehicles,)
         assert torch.isfinite(embeddings.clients).all()
         assert torch.isfinite(embeddings.vehicles).all()
+        assert torch.isfinite(embeddings.depot).all()
+        assert torch.isfinite(embeddings.cost).all()
+        assert torch.isfinite(embeddings.depot_cost).all()
 
 
-class TestIdentityAtInit:
-    """Pins the mechanism the module docstring relies on: a zero-initialised
-    residual branch makes nn.TransformerEncoder an exact identity at init."""
+class TestRealAttentionAtInit:
+    """Ticket 15 retired the identity-at-init construction ``TestIdentityAtInit``
+    used to pin (module docstring, "Real attention at initialization"): nothing
+    downstream needs the encoder to be an identity map any more, so
+    ``out_proj``/``linear2`` are ordinary Xavier-random like every other
+    weight, and the transformer performs real, nontrivial attention from the
+    first forward pass."""
 
-    def test_transformer_is_identity_for_arbitrary_input(self) -> None:
+    def test_transformer_is_not_identity_for_arbitrary_input(self) -> None:
         d_model = _ENCODER.d_model
         sequence = torch.randn(1, 9, d_model)
         with torch.no_grad():
             output = _ENCODER.transformer(sequence)
-        torch.testing.assert_close(output, sequence, atol=0.0, rtol=0.0)
+        assert not torch.allclose(output, sequence), (
+            "the transformer reproduced its input exactly -- has the "
+            "identity-at-init construction ticket 15 retired come back?"
+        )
 
 
 class TestQHeadBackgroundUnitsAreTrainable:
     """Regression guard for the deadlock the module docstring calls out: if a
-    future edit zeroes QHead.layer1's background rows (not just row 0), those
-    units would receive zero gradient forever. Verified over several seeds
-    since a single dead ReLU unit on one batch is expected/normal -- the
-    invariant is that background gradient exists *somewhere*, not everywhere
-    on every batch."""
+    future edit zeroes QHead.layer1 too (not just layer2), those units would
+    receive zero gradient forever. Verified over several seeds since a single
+    dead ReLU unit on one batch is expected/normal -- the invariant is that
+    gradient exists *somewhere*, not everywhere on every batch."""
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
-    def test_layer2_background_columns_receive_gradient(self, seed: int) -> None:
+    def test_layer2_columns_receive_gradient(self, seed: int) -> None:
         _, head = build_network(seed=seed, n_obs=N_OBS, d_model=8)
         n_pending = 20
         x = torch.randn(n_pending, head.layer1.in_features, requires_grad=False)
@@ -283,26 +455,83 @@ class TestQHeadBackgroundUnitsAreTrainable:
         loss.backward()
 
         assert head.layer2.weight.grad is not None
-        background_grad = head.layer2.weight.grad[0, 1:]
-        assert (background_grad.abs() > 0).any(), (
-            "no background hidden unit received gradient -- QHead's background "
-            "rows may have been accidentally zero-initialised (see module docstring)"
+        assert (head.layer2.weight.grad.abs() > 0).any(), (
+            "no hidden unit received gradient -- QHead's layer1 may have been "
+            "accidentally zero-initialised (see module docstring)"
+        )
+
+
+class TestEncoderGradientAtInit:
+    """Ticket 15's version of the old "is the myopic prior reachable" concern
+    (formerly ``TestWarmStartIsNotBehindAnActivation``/``TestCostFeaturesAreWired``
+    -- both pinned mechanisms specific to a warm start that no longer exists).
+    ``c`` cannot be gated off by a dead ReLU any more because it is not routed
+    through ``QHead`` at all (module docstring, "Why a dead ReLU can no longer
+    touch `c`"); what is worth pinning instead is the residual's own gradient
+    shape: with ``linear``/``layer2`` both exactly zero at init, gradient
+    cannot flow *back* through them into the encoder on the first backward
+    pass (their own gradient depends on their input, not the reverse -- the
+    same "safe zero" pattern as ``layer1``/``layer2``'s deadlock, now covering
+    every encoder parameter, not just ``layer1``'s rows) -- but it does, once
+    one optimizer step moves them off zero."""
+
+    def _one_vehicle_q(self, encoder, head, tokens):
+        embeddings = encoder(tokens)
+        claimed = torch.zeros(tokens.client_tokens.shape[0])
+        is_depot = torch.zeros(tokens.client_tokens.shape[0])
+        residual = head(embeddings.vehicles[0], embeddings.clients[:, 0, :], claimed, is_depot)
+        return embeddings.cost[:, 0] + residual
+
+    def test_no_gradient_reaches_the_encoder_on_the_first_backward_pass(self) -> None:
+        encoder, head = build_network(seed=13, n_obs=N_OBS)
+        geometry, time_windows, snapshot = make_dense_world(6, 2, N_OBS, seed=901)
+        tokens = call_tokenize(geometry, time_windows, snapshot)
+
+        q = self._one_vehicle_q(encoder, head, tokens)
+        q.sum().backward()
+
+        grad = encoder.arc_embed.weight.grad
+        assert grad is not None
+        assert float(grad.abs().max()) == 0.0, (
+            "the encoder received nonzero gradient on the first backward pass -- "
+            "has QHead.linear/layer2 stopped being exactly zero at init?"
+        )
+
+    def test_gradient_reaches_the_encoder_after_one_optimizer_step(self) -> None:
+        encoder, head = build_network(seed=13, n_obs=N_OBS)
+        geometry, time_windows, snapshot = make_dense_world(6, 2, N_OBS, seed=901)
+        tokens = call_tokenize(geometry, time_windows, snapshot)
+        optimizer = torch.optim.SGD(head.parameters(), lr=0.1)
+
+        optimizer.zero_grad()
+        self._one_vehicle_q(encoder, head, tokens).sum().backward()
+        optimizer.step()
+
+        encoder.zero_grad()
+        self._one_vehicle_q(encoder, head, tokens).sum().backward()
+
+        grad = encoder.arc_embed.weight.grad
+        assert grad is not None
+        assert (grad.abs() > 0).any(), (
+            "the encoder still receives no gradient after an optimizer step -- "
+            "layer2's columns may not have moved off zero"
         )
 
 
 class TestClaimedIsWired:
-    """``claimed`` is deliberately init-inert for the warm start (row 0 -- the
-    only hidden unit read by ``layer2`` at init -- has a zero weight on the
-    ``claimed`` column, same as ``vehicle_embedding``/``client_context``, so Q
-    exactly equals ``minutes_from_vehicle`` regardless of ``claimed``'s value).
-    That must not mean ``claimed`` is a dead argument: the background rows
-    (Xavier-random, per ``QHead._init_weights``) do read it -- but, exactly
+    """``claimed`` is deliberately init-inert: ``QHead``'s residual is exactly
+    zero at init regardless of any input (``TestQHeadResidualIsZeroAtInit``),
+    ``claimed`` included. That must not mean ``claimed`` is a dead argument:
+    the background rows (Xavier-random, per ``QHead._init_weights``) do read
+    it -- but, exactly
     like ``layer1``'s background-row *weight* gradient (see the module
     docstring's deadlock note), the *input*-side gradient through those rows
     is also zero on the very first backward pass, since it is scaled by
-    ``layer2``'s still-exactly-zero background columns. One optimizer step
-    unlocks those columns; only from the second backward pass does gradient
-    reach ``claimed``."""
+    ``layer2``'s still-exactly-zero background columns (and, since ticket 15,
+    ``linear``'s too -- see ``TestEncoderGradientAtInit`` above for the same
+    mechanism pinned on the encoder side). One optimizer step unlocks those
+    columns; only from the second backward pass does gradient reach
+    ``claimed``."""
 
     def test_claimed_gradient_is_zero_at_init_and_nonzero_after_one_step(self) -> None:
         _, head = build_network(seed=3, n_obs=N_OBS, d_model=8)
@@ -310,22 +539,168 @@ class TestClaimedIsWired:
         vehicle_embedding = torch.randn(8)
         client_embeddings = torch.randn(10, 16)
 
+        is_depot = torch.zeros(10)
+
         claimed_1 = torch.zeros(10, requires_grad=True)
-        q_1 = head(vehicle_embedding, client_embeddings, claimed_1)
+        q_1 = head(vehicle_embedding, client_embeddings, claimed_1, is_depot)
         q_1.sum().backward()
         assert claimed_1.grad is not None
         assert torch.equal(claimed_1.grad, torch.zeros_like(claimed_1.grad)), (
             "claimed's gradient should be exactly zero on the first backward pass "
-            "at init (see this class's docstring) -- if this now fails, the warm "
-            "start's background-column zero-init may have changed"
+            "at init (see this class's docstring) -- if this now fails, QHead's "
+            "zero-init (linear/layer2, ticket 15) may have changed"
         )
         optimizer.step()
 
         claimed_2 = torch.zeros(10, requires_grad=True)
-        q_2 = head(vehicle_embedding, client_embeddings, claimed_2)
+        q_2 = head(vehicle_embedding, client_embeddings, claimed_2, is_depot)
         q_2.sum().backward()
         assert claimed_2.grad is not None
         assert (claimed_2.grad.abs() > 0).any(), (
             "claimed never affects Q's gradient even after an optimizer step -- "
             "it may have been dropped from QHead's forward pass"
         )
+
+
+class TestFeaturesAndWVector:
+    """Ticket 16: ``QHead.features``/``w_vector``/``load_w_vector`` -- the
+    decomposition :class:`~stdvrp.policies.ridge_estimator.RidgeAccumulator`
+    regresses onto. The load-bearing claim is
+    ``forward(...) == features(...) @ w_vector()``; everything else here is in
+    service of that identity actually holding, both at init and after the
+    weights it reads have moved.
+    """
+
+    def test_feature_dim_matches_the_head_shape(self) -> None:
+        _, head = build_network(seed=1, n_obs=N_OBS, d_model=16)
+        assert head.feature_dim == head.linear.in_features + head.layer1.out_features + 1
+
+    def test_forward_equals_features_dot_w_vector_at_init(self) -> None:
+        _, head = build_network(seed=2, n_obs=N_OBS, d_model=8)
+        vehicle_embedding = torch.randn(8)
+        client_embeddings = torch.randn(5, 16)
+        claimed = torch.rand(5)
+        is_depot = torch.zeros(5)
+
+        with torch.no_grad():
+            forward_output = head(vehicle_embedding, client_embeddings, claimed, is_depot)
+            phi = head.features(vehicle_embedding, client_embeddings, claimed, is_depot)
+            w = head.w_vector()
+
+        assert phi.shape == (5, head.feature_dim)
+        torch.testing.assert_close(forward_output, phi @ w, atol=1e-6, rtol=1e-6)
+
+    def test_forward_equals_features_dot_w_vector_after_load_w_vector(self) -> None:
+        _, head = build_network(seed=3, n_obs=N_OBS, d_model=8)
+        rng = np.random.default_rng(3)
+        w = torch.from_numpy(rng.normal(size=head.feature_dim).astype(np.float32))
+        head.load_w_vector(w)
+
+        vehicle_embedding = torch.randn(8)
+        client_embeddings = torch.randn(6, 16)
+        claimed = torch.rand(6)
+        is_depot = torch.zeros(6)
+        is_depot[0] = 1.0
+
+        with torch.no_grad():
+            forward_output = head(vehicle_embedding, client_embeddings, claimed, is_depot)
+            phi = head.features(vehicle_embedding, client_embeddings, claimed, is_depot)
+
+        torch.testing.assert_close(forward_output, phi @ w, atol=1e-5, rtol=1e-5)
+
+    def test_load_w_vector_round_trips_through_w_vector(self) -> None:
+        _, head = build_network(seed=4, n_obs=N_OBS, d_model=8)
+        rng = np.random.default_rng(4)
+        w = torch.from_numpy(rng.normal(size=head.feature_dim).astype(np.float32))
+
+        head.load_w_vector(w)
+
+        torch.testing.assert_close(head.w_vector(), w, atol=1e-6, rtol=1e-6)
+
+    def test_load_w_vector_rejects_the_wrong_shape(self) -> None:
+        _, head = build_network(seed=5, n_obs=N_OBS, d_model=8)
+        with pytest.raises(ValueError, match="must have shape"):
+            head.load_w_vector(torch.zeros(head.feature_dim + 1))
+
+    def test_w_vector_is_zero_at_init(self) -> None:
+        """``linear``/``layer2`` are exactly zero at construction (ticket 15) --
+        the combined vector this reads off them must be too."""
+        _, head = build_network(seed=6, n_obs=N_OBS, d_model=8)
+        torch.testing.assert_close(
+            head.w_vector(), torch.zeros(head.feature_dim), atol=0.0, rtol=0.0
+        )
+
+    def test_features_carries_no_gradient_requirement(self) -> None:
+        """The ridge estimator never backpropagates through this -- a plain
+        numeric readout, not part of an autograd graph the caller must
+        remember to detach."""
+        _, head = build_network(seed=7, n_obs=N_OBS, d_model=8)
+        vehicle_embedding = torch.randn(8)
+        client_embeddings = torch.randn(4, 16)
+        claimed = torch.zeros(4)
+        is_depot = torch.zeros(4)
+
+        with torch.no_grad():
+            phi = head.features(vehicle_embedding, client_embeddings, claimed, is_depot)
+
+        assert phi.shape == (4, head.feature_dim)
+        assert torch.isfinite(phi).all()
+
+
+class TestDeviceParity:
+    """Ticket 12: one forward, two devices -- the only cross-device equivalence
+    this effort asserts. Full-trajectory equivalence is explicitly NOT asserted
+    (a 1e-7 rounding difference flips the discrete argmin the decision rule
+    takes elsewhere, and episodes diverge from there -- see
+    transformer_policy.py's module docstring); this pins only that identical
+    weights and identical input still produce the same numbers on CPU and CUDA
+    for a single, isolated forward pass.
+
+    Ticket 15: ``QHead``'s own output is exactly zero at init on every device
+    trivially (nothing to compare), so ``embeddings.clients``/``vehicles``/
+    ``depot`` -- now the output of *real* attention, not an identity map --
+    carry the numerically meaningful cross-device comparison; ``q_cpu``/
+    ``q_cuda`` (``embeddings.cost``/``depot_cost`` plus the residual) stays as
+    the end-to-end check ``_score`` actually performs."""
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA GPU on this machine")
+    def test_identical_weights_and_input_give_allclose_q_on_cpu_and_cuda(self) -> None:
+        geometry, time_windows, snapshot = make_dense_world(5, 3, N_OBS, seed=77)
+        tokens = call_tokenize(geometry, time_windows, snapshot)
+
+        cpu_encoder, cpu_head = build_network(seed=55, n_obs=N_OBS, device=torch.device("cpu"))
+        cuda_encoder, cuda_head = build_network(seed=55, n_obs=N_OBS, device=torch.device("cuda"))
+
+        with torch.no_grad():
+            cpu_embeddings = cpu_encoder(tokens)
+            cuda_embeddings = cuda_encoder(tokens)
+
+            torch.testing.assert_close(
+                cpu_embeddings.clients, cuda_embeddings.clients.cpu(), atol=1e-4, rtol=1e-4
+            )
+            torch.testing.assert_close(
+                cpu_embeddings.vehicles, cuda_embeddings.vehicles.cpu(), atol=1e-4, rtol=1e-4
+            )
+            torch.testing.assert_close(
+                cpu_embeddings.depot, cuda_embeddings.depot.cpu(), atol=1e-4, rtol=1e-4
+            )
+            torch.testing.assert_close(
+                cpu_embeddings.cost, cuda_embeddings.cost.cpu(), atol=1e-4, rtol=1e-4
+            )
+            torch.testing.assert_close(
+                cpu_embeddings.depot_cost, cuda_embeddings.depot_cost.cpu(), atol=1e-4, rtol=1e-4
+            )
+
+            claimed = torch.zeros(tokens.client_tokens.shape[0])
+            is_depot = torch.zeros(tokens.client_tokens.shape[0])
+            q_cpu = cpu_embeddings.cost[:, 0] + cpu_head(
+                cpu_embeddings.vehicles[0], cpu_embeddings.clients[:, 0, :], claimed, is_depot
+            )
+            q_cuda = cuda_embeddings.cost[:, 0] + cuda_head(
+                cuda_embeddings.vehicles[0],
+                cuda_embeddings.clients[:, 0, :],
+                claimed.to("cuda"),
+                is_depot.to("cuda"),
+            )
+
+        torch.testing.assert_close(q_cpu, q_cuda.cpu(), atol=1e-4, rtol=1e-4)

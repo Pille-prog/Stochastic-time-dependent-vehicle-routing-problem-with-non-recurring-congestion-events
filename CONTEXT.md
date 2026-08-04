@@ -22,6 +22,26 @@ _Avoid_: environment (reserved by RL literature for this very concept — never 
 Runs training and evaluation episodes over the Model to fit and compare Policies.
 _Avoid_: training_and_testing, runner
 
+**Reference card**:
+A completed Policy's frozen per-seed costs — the fixed opponent every later run in an effort is compared against, seed by seed (ticket 01, neural-policy). Never recomputed once frozen: a moving comparison target would make "did it improve" unanswerable. Carries two disjoint seed sets for two disjoint purposes — `evaluation_seeds` (what a training run's live report reads from, ticket 07) select checkpoints and hyperparameters and are therefore contaminated for a verdict by construction; `test_seeds` are the held-out verdict set, touched only when an effort is ready to answer "does it win".
+_Avoid_: baseline (ambiguous with the Policy it was captured from — the card is the frozen *measurement*, not the Policy itself); benchmark
+
+**Approximator**:
+What maps an observation to a decision's value. The variation point *inside* a Policy — linear weights or a neural network — with the decision rule unchanged: the Policy still takes the same argmin over the same feasible actions. Two Policies differing only in Approximator are the comparison this lab is built to make.
+_Avoid_: model (reserved for Powell's Model, the simulator); network (only one Approximator is a network); estimator (reserved for how the Approximator is *fitted*, which varies independently)
+
+**Myopic base**:
+The projected cost of assigning one vehicle to one Client, computed from the Episode's time windows and the static EpisodeGeometry prior, and added to the Approximator's output from outside its parameters. It is what a Policy decides with when it has learned nothing at all (ticket 15, neural-policy, ADR-0010).
+_Avoid_: warm start (a warm start is a point training moves away from; nothing moves away from this — the distinction is the whole reason it exists); immediate cost (it is a projection from an offline prior, not what the simulator will charge for the leg); post-decision state (Powell's term, reserved for the state *after* a decision and *before* the exogenous information arrives — this is a cost projection, not a state)
+
+**Residual approximator**:
+The only learned term when a Policy is decomposed into a Myopic base plus a correction: what the Approximator adds on top of the base, rather than the whole value it would otherwise have to reconstruct.
+_Avoid_: correction, delta; advantage (reserved by RL literature for the value of an action minus the value of its state — a different decomposition against a different reference)
+
+**Null policy**:
+The Policy an Approximator produces before anything has been learned — the floor a trained Policy must clear before "it learned" means anything. Not a fixed object: with a Residual approximator the null *is* the Myopic base, a competent dispatcher rather than a random or nearest-Client one, which makes the same phrase a much stronger claim. Every reported improvement therefore names the null it was measured against (ticket 08, neural-policy).
+_Avoid_: random policy (it has never been random here); "the untrained network" without naming which base it sits on — two nulls of the same architecture are not the same opponent
+
 ### Problem data
 
 **RoadNetwork**:

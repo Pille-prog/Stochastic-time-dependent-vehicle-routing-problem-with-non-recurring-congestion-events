@@ -1,5 +1,23 @@
 """The linear MonteCarloPolicy's frozen reference card (ticket 01, neural-policy).
 
+.. warning::
+
+   **The committed ``experiments/chengdu/reference_card.json`` is stale.** It
+   records ``config.time_window_spread: 60``; the Chengdu configs now say 150,
+   which is what the reference runs actually used
+   (``capture_golden_master.py``'s ``diff_TW``, and the ``Tw150`` in the
+   legacy's own result filenames). The mismatch was found by
+   ``.scratch/linear-policy-learning/issues/01-legacy-w-trajectory-diff.md``;
+   at TW 150 the linear Policy's ``|W|`` after 200 episodes is 15 754 against
+   7 502 at TW 60, so the two are not comparable.
+
+   The card is left untouched on purpose: it is a *measurement record*, and
+   editing the config it embeds would misreport what was measured. (Its
+   ``best_w`` is 19 components wide against today's 24 for the same reason —
+   it predates the restored features.) Re-run this script to replace it, and
+   note that every number pinned against it — the neural effort's Gate A and
+   Gate A' results, and everything under ``runs/`` — was measured at TW 60.
+
 The first full training run of the repaired simulator: there is no baseline
 number yet (``.scratch/simulator-correctness/spec.md`` deliberately left it
 out — "the first experiment of the repaired lab, not part of repairing it").

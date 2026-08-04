@@ -1,0 +1,22 @@
+WORLD READY, 50 evaluation_seeds
+  cost @ m+2, penalty=1.0 10/50 running mean 3289.4
+  cost @ m+2, penalty=1.0 20/50 running mean 3070.2
+  cost @ m+2, penalty=1.0 30/50 running mean 3131.9
+  cost @ m+2, penalty=1.0 40/50 running mean 3296.2
+  cost @ m+2, penalty=1.0 50/50 running mean 3365.1
+cost @ m+2, penalty=1.0      mean   3365.09   median   3376.23
+  cost @ m+2, penalty=0.0 10/50 running mean 3289.4
+  cost @ m+2, penalty=0.0 20/50 running mean 3068.8
+  cost @ m+2, penalty=0.0 30/50 running mean 3130.9
+  cost @ m+2, penalty=0.0 40/50 running mean 3295.5
+  cost @ m+2, penalty=0.0 50/50 running mean 3364.5
+cost @ m+2, penalty=0.0      mean   3364.52   median   3376.23
+
+=== TICKET 14, CELL (1): cost-greedy @ m+2, 50 evaluation_seeds ===
+  cost @ m+2, penalty=1.0     3365.09
+  cost @ m+2, penalty=0.0     3364.52
+  cost @ ~151 (warm_start_50.py, already measured)   3693.23
+
+DEPOT_WARM_START_PENALTY at m+2: penalty=0.0 vs penalty=1.0  -0.02%   wins(0.0 < 1.0) 1/50   p=3.17e-01
+
+wrote .scratch\neural-policy\results\action_set_m2_50.json

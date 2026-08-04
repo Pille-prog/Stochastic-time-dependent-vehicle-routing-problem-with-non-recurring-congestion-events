@@ -446,18 +446,39 @@ class Model:
             if fleet.departure_tau[vehicle] > self.state.tau_episode:
                 self.begin_arc(vehicle)
 
-            elif action[vehicle] == self.depot and is_parked_at_depot(
-                self.state.last_node_reached[vehicle], self.state.vehicle_standing[vehicle], self.depot
+            elif (
+                action[vehicle] == self.depot
+                and self.state.last_node_reached[vehicle] == self.depot
+                and fleet.is_at_node(vehicle, self.state.tau_episode)
             ):
-                # Ticket 04 (B1b, ADR-0005): ``is_parked_at_depot`` is the fix
-                # — without it this branch could not tell a vehicle
-                # genuinely parked at the depot from one merely last seen
-                # there while mid-arc past it (the depot is an interior node
-                # on 6.8% of cached shortest paths). Not ``FleetRoutes.park``:
-                # the legacy leaves ``departure_tau`` alone here, unlike the
-                # vehicle that arrives at the depot.
+                # Ticket 04 (B1b, ADR-0005) narrowed this from "last node was
+                # the depot" to "genuinely parked" via ``is_parked_at_depot``
+                # (last node + ``vehicle_standing``) — without it this branch
+                # could not tell a vehicle genuinely parked at the depot from
+                # one merely last seen there while mid-arc past it (the depot
+                # is an interior node on 6.8% of cached shortest paths).
+                #
+                # Ticket 11 (B20, ADR-0008) widened it again:
+                # ``vehicle_standing`` flips to ``False`` the instant
+                # ``begin_arc`` launches a vehicle, at the very same
+                # ``departure_tau == tau`` that also means zero arc progress
+                # — one instant where a vehicle is both "at the node" and
+                # "not standing". ``is_parked_at_depot`` missed it and fell
+                # through to the mid-arc branch below, which routed
+                # depot -> depot and crashed. Positional presence
+                # (``FleetRoutes.is_at_node``) is the fact that actually
+                # answers "can this vehicle park here", not the standing flag.
+                #
+                # Not ``FleetRoutes.park``: the legacy leaves ``departure_tau``
+                # alone here, unlike the vehicle that arrives at the depot.
                 fleet.arrival_tau[vehicle] = PARKED
                 fleet.horizon_change_tau[vehicle] = self.state.tau_episode
+                # The widened branch is now reachable with ``standing ==
+                # False``; downstream ``is_parked_at_depot`` call sites
+                # (overtime accounting, termination) need it ``True`` here,
+                # exactly as ``_vehicle_parks_at_depot`` already sets it on
+                # arrival.
+                self.state.vehicle_standing[vehicle] = True
 
             elif fleet.destination[vehicle] != action[vehicle] and fleet.is_travelling(vehicle):
                 last_node_reached = self.state.last_node_reached[vehicle]
@@ -481,6 +502,10 @@ class Model:
                     fleet.route[vehicle] = shortest_path
 
                 fleet.destination[vehicle] = action[vehicle]
+                # Mirrors onto State (restored legacy ``vehicles_direction``,
+                # ADR-0005) so the Policy's own feature extraction can read its
+                # last routing decision without reaching into FleetRoutes.
+                self.state.vehicle_destination[vehicle] = action[vehicle]
 
     def begin_arc(self, vehicle: int) -> None:
         """Ports ``create_and_actualize_state_velocity``: start travelling the next arc."""

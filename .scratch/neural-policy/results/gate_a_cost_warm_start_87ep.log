@@ -1,0 +1,111 @@
+config: experiments\chengdu\config.yaml
+data_dir: C:\Users\ferna\OneDrive\Documentos\Mega city
+test_seeds: 50 seeds
+init_seeds: (0,)
+checkpoint_dir: runs\gate_a_cost
+Gate A: building the shared untrained (null) network, 50 test seeds
+Gate A: untrained mean cost 3811.2762
+Gate A arm: init_seed=0 -- training to convergence
+device: cpu
+[ep    1] train seed 1000   cost 8061.3   loss 3.2e-01   lr 3.0e-5   20.9s
+[ep    2] train seed 1001   cost 6457.6   loss 3.5e-02   lr 3.0e-5   27.1s
+[ep    3] train seed 1002   cost 6085.8   loss 7.0e-03   lr 3.0e-5   21.9s
+[ep    4] train seed 1003   cost 4548.1   loss 3.9e-03   lr 3.0e-5   15.1s
+[ep    5] train seed 1004   cost 7873.8   loss 4.9e-03   lr 3.0e-5   21.2s
+[ep    6] train seed 1005   cost 5902.9   loss 4.2e-03   lr 3.0e-5   17.8s
+[ep    7] train seed 1006   cost 11034.6   loss 3.2e-03   lr 3.0e-5   29.1s
+[ep    8] train seed 1007   cost 6655.7   loss 2.4e-03   lr 3.0e-5   14.6s
+[ep    9] train seed 1008   cost 11485.4   loss 4.1e-03   lr 3.0e-5   19.0s
+[ep   10] train seed 1009   cost 7803.9   loss 3.5e-03   lr 3.0e-5   36.7s
+[ep   11] train seed 1010   cost 3726.6   loss 1.8e-03   lr 3.0e-5   18.9s
+[ep   12] train seed 1011   cost 5559.9   loss 2.7e-03   lr 3.0e-5   26.0s
+[ep   13] train seed 1012   cost 7439.2   loss 2.5e-03   lr 3.0e-5   30.1s
+[ep   14] train seed 1013   cost 7104.6   loss 2.3e-03   lr 3.0e-5   42.2s
+[ep   15] train seed 1014   cost 11010.8   loss 1.9e-03   lr 3.0e-5   27.4s
+[ep   16] train seed 1015   cost 6096.0   loss 1.2e-03   lr 3.0e-5   19.3s
+[ep   17] train seed 1016   cost 6326.4   loss 2.2e-03   lr 3.0e-5   13.7s
+[ep   18] train seed 1017   cost 7755.9   loss 2.3e-03   lr 3.0e-5   27.3s
+[ep   19] train seed 1018   cost 9966.1   loss 2.5e-03   lr 3.0e-5   28.5s
+[ep   20] train seed 1019   cost 7396.3   loss 1.9e-03   lr 3.0e-5   20.8s
+[ep   21] train seed 1020   cost 11190.6   loss 3.3e-03   lr 3.0e-5   40.9s
+[ep   22] train seed 1021   cost 5595.5   loss 1.5e-03   lr 3.0e-5   38.7s
+[ep   23] train seed 1022   cost 5516.9   loss 1.5e-03   lr 3.0e-5   27.6s
+[ep   24] train seed 1023   cost 9640.2   loss 1.5e-03   lr 3.0e-5   43.6s
+[ep   25] train seed 1024   cost 6875.7   loss 1.2e-03   lr 3.0e-5   22.7s
+[ep   26] train seed 1025   cost 2960.6   loss 4.2e-04   lr 3.0e-5   14.2s
+[ep   27] train seed 1026   cost 5320.8   loss 6.7e-04   lr 3.0e-5   20.6s
+[ep   28] train seed 1027   cost 7620.7   loss 7.7e-04   lr 3.0e-5   25.9s
+[ep   29] train seed 1028   cost 11331.7   loss 1.2e-03   lr 3.0e-5   22.3s
+[ep   30] train seed 1029   cost 5096.0   loss 1.2e-03   lr 3.0e-5   14.6s
+[ep   31] train seed 1030   cost 3334.6   loss 6.0e-04   lr 3.0e-5   9.0s
+[ep   32] train seed 1031   cost 7231.6   loss 1.8e-03   lr 3.0e-5   16.3s
+[ep   33] train seed 1032   cost 7653.5   loss 1.7e-03   lr 3.0e-5   20.0s
+[ep   34] train seed 1033   cost 9071.0   loss 9.1e-04   lr 3.0e-5   41.2s
+[ep   35] train seed 1034   cost 5457.1   loss 1.2e-03   lr 3.0e-5   15.9s
+[ep   36] train seed 1035   cost 6816.7   loss 1.1e-03   lr 3.0e-5   20.6s
+[ep   37] train seed 1036   cost 7903.7   loss 1.8e-03   lr 3.0e-5   22.1s
+[ep   38] train seed 1037   cost 9043.2   loss 2.1e-03   lr 3.0e-5   34.6s
+[ep   39] train seed 1038   cost 7692.3   loss 1.0e-03   lr 3.0e-5   22.8s
+[ep   40] train seed 1039   cost 5040.2   loss 2.1e-03   lr 3.0e-5   18.3s
+[ep   41] train seed 1040   cost 10155.9   loss 1.3e-03   lr 3.0e-5   24.8s
+[ep   42] train seed 1041   cost 9441.3   loss 1.0e-03   lr 3.0e-5   23.3s
+[ep   43] train seed 1042   cost 14464.0   loss 1.5e-03   lr 3.0e-5   45.1s
+[ep   44] train seed 1043   cost 6437.1   loss 3.4e-04   lr 3.0e-5   20.3s
+[ep   45] train seed 1044   cost 6778.4   loss 6.3e-04   lr 3.0e-5   27.4s
+[ep   46] train seed 1045   cost 5502.3   loss 4.2e-04   lr 3.0e-5   16.8s
+[ep   47] train seed 1046   cost 8808.2   loss 4.9e-04   lr 3.0e-5   23.8s
+[ep   48] train seed 1047   cost 6648.3   loss 5.3e-04   lr 3.0e-5   26.2s
+[ep   49] train seed 1048   cost 7616.5   loss 5.9e-04   lr 3.0e-5   34.5s
+[ep   50] train seed 1049   cost 5457.0   loss 3.0e-04   lr 3.0e-5   28.1s
+--------------------------------------------------------------------------
+  eval @50   mean 6168.5  |  MC ref 2483.2  |  delta +3685.3  (+148.4%)
+              wins on 0/50 seeds    Wilcoxon p=0.000
+              best so far: +148.4% @ep50     no improvement: 0/5 blocks
+--------------------------------------------------------------------------
+[ep   51] train seed 1050   cost 13616.6   loss 4.2e-03   lr 3.0e-5   40.0s
+[ep   52] train seed 1051   cost 8639.1   loss 4.9e-04   lr 3.0e-5   18.7s
+[ep   53] train seed 1052   cost 8490.9   loss 5.1e-04   lr 3.0e-5   22.9s
+[ep   54] train seed 1053   cost 10113.2   loss 3.5e-04   lr 3.0e-5   22.2s
+[ep   55] train seed 1054   cost 10612.5   loss 7.2e-04   lr 3.0e-5   22.5s
+[ep   56] train seed 1055   cost 8450.8   loss 8.1e-04   lr 3.0e-5   27.0s
+[ep   57] train seed 1056   cost 12544.0   loss 6.2e-04   lr 3.0e-5   27.0s
+[ep   58] train seed 1057   cost 11103.1   loss 7.8e-04   lr 3.0e-5   23.2s
+[ep   59] train seed 1058   cost 12742.2   loss 1.3e-03   lr 3.0e-5   19.0s
+[ep   60] train seed 1059   cost 5250.9   loss 6.9e-04   lr 3.0e-5   15.8s
+[ep   61] train seed 1060   cost 9417.9   loss 4.8e-04   lr 3.0e-5   29.7s
+[ep   62] train seed 1061   cost 10935.8   loss 3.8e-04   lr 3.0e-5   30.9s
+[ep   63] train seed 1062   cost 9487.4   loss 4.5e-04   lr 3.0e-5   22.6s
+[ep   64] train seed 1063   cost 7962.3   loss 6.4e-04   lr 3.0e-5   27.4s
+[ep   65] train seed 1064   cost 5767.3   loss 3.2e-04   lr 3.0e-5   20.3s
+[ep   66] train seed 1065   cost 6326.9   loss 3.8e-04   lr 3.0e-5   16.8s
+[ep   67] train seed 1066   cost 17172.3   loss 5.2e-04   lr 3.0e-5   15.1s
+[ep   68] train seed 1067   cost 18796.4   loss 6.1e-04   lr 3.0e-5   23.6s
+[ep   69] train seed 1068   cost 15109.6   loss 8.1e-04   lr 3.0e-5   31.0s
+[ep   70] train seed 1069   cost 15792.7   loss 8.0e-04   lr 3.0e-5   31.1s
+[ep   71] train seed 1070   cost 16474.2   loss 1.6e-03   lr 3.0e-5   10.2s
+[ep   72] train seed 1071   cost 26873.8   loss 2.3e-03   lr 3.0e-5   27.3s
+[ep   73] train seed 1072   cost 21801.2   loss 2.7e-04   lr 3.0e-5   18.7s
+[ep   74] train seed 1073   cost 23561.8   loss 6.0e-04   lr 3.0e-5   15.6s
+[ep   75] train seed 1074   cost 23235.8   loss 2.1e-03   lr 3.0e-5   33.7s
+[ep   76] train seed 1075   cost 29909.2   loss 9.0e-04   lr 3.0e-5   19.8s
+[ep   77] train seed 1076   cost 25646.0   loss 8.3e-04   lr 3.0e-5   27.7s
+[ep   78] train seed 1077   cost 21648.2   loss 8.2e-04   lr 3.0e-5   13.8s
+[ep   79] train seed 1078   cost 17344.4   loss 7.7e-04   lr 3.0e-5   20.1s
+[ep   80] train seed 1079   cost 38056.7   loss 4.5e-04   lr 3.0e-5   36.3s
+[ep   81] train seed 1080   cost 43953.1   loss 4.1e-03   lr 3.0e-5   13.2s
+[ep   82] train seed 1081   cost 22397.2   loss 5.7e-03   lr 3.0e-5   27.2s
+[ep   83] train seed 1082   cost 22794.7   loss 6.7e-04   lr 3.0e-5   24.7s
+[ep   84] train seed 1083   cost 30242.0   loss 8.8e-04   lr 3.0e-5   21.2s
+[ep   85] train seed 1084   cost 23909.9   loss 5.9e-04   lr 3.0e-5   12.7s
+[ep   86] train seed 1085   cost 25735.0   loss 1.7e-03   lr 3.0e-5   28.1s
+[ep   87] train seed 1086   cost 50184.3   loss 1.9e-03   lr 3.0e-5   21.0s
+[ep   88] train seed 1087   cost 32416.6   loss 2.4e-03   lr 3.0e-5   32.0s
+[ep   89] train seed 1088   cost 34758.0   loss 3.6e-04   lr 3.0e-5   23.6s
+[ep   90] train seed 1089   cost 10390.2   loss 2.2e-04   lr 3.0e-5   9.5s
+[ep   91] train seed 1090   cost 26111.2   loss 6.7e-04   lr 3.0e-5   18.4s
+[ep   92] train seed 1091   cost 25336.5   loss 6.1e-04   lr 3.0e-5   15.6s
+[ep   93] train seed 1092   cost 44013.8   loss 1.5e-03   lr 3.0e-5   15.8s
+[ep   94] train seed 1093   cost 57593.0   loss 8.9e-04   lr 3.0e-5   25.2s
+[ep   95] train seed 1094   cost 38932.9   loss 1.6e-03   lr 3.0e-5   14.0s
+[ep   96] train seed 1095   cost 34632.7   loss 5.4e-03   lr 3.0e-5   29.5s
+[ep   97] train seed 1096   cost 81272.5   loss 5.8e-03   lr 3.0e-5   17.7s

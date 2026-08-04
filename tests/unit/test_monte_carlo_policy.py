@@ -1,7 +1,7 @@
 """Unit tests for MonteCarloPolicy's W update, epsilon-greedy and candidate selection.
 
 These pin the pure computations on a world small enough to verify by hand: the
-19-component feature/weight dimensions, one hand-computed SGD step, the backward
+24-component feature/weight dimensions, one hand-computed SGD step, the backward
 accumulation of the Monte Carlo return, and the two epsilon extremes (0 = pure
 greedy, 1 = pure random from the injected exploration Generator, ticket 13).
 
@@ -26,8 +26,13 @@ from hypothesis import strategies as st
 
 from stdvrp.network.episode_geometry import EpisodeGeometry
 from stdvrp.network.shortest_path_cache import ShortestPath, ShortestPathCache
+from stdvrp.policies import action_set
 from stdvrp.policies.feature_extraction import StateFeatures
-from stdvrp.policies.monte_carlo import MonteCarloPolicy, TimeWindows
+from stdvrp.policies.monte_carlo import (
+    UPDATE_FEATURE_CEILING,
+    MonteCarloPolicy,
+    TimeWindows,
+)
 from stdvrp.simulation.state import State, TrainingSnapshot
 
 DEPOT = 0
@@ -131,19 +136,25 @@ def make_update_world():
 
 
 def hand_computed_features() -> np.ndarray:
-    """The 19 features of the update world for action [1], derived on paper.
+    """The 24 features of the update world for action [1], derived on paper.
 
-    General state (12): polynomial terms of clients-left and normalized time.
-    Bin 1 holds Client 2 (window start 450 in [400, 500), tau < 500). Bin 0
-    would hold Client 1 (window start 350 < 400), but tau == 400 already gates
-    it shut (``tau < 400`` is false) — so Client 1 falls into bin 3 instead
-    (B10: the fourth bin is whatever the first three leave uncounted, keeping
-    the four bins a partition of the two pending Clients). The mean-earliness
-    diff is 0 because mean earliness == tau == 400.
-    State-action (7) for sending the vehicle from the depot to Client 1: distance
+    General state (16): polynomial terms of clients-left and normalized time,
+    then the three depot-distance features — 0 here because ``make_policy``
+    passes no ``node_coordinates`` (module docstring, "Restored, not
+    preserved" in ``feature_extraction.py``: the two restored features read
+    as zero, not crash, when their sources are not supplied). Bin 1 holds
+    Client 2 (window start 450 in [400, 500), tau < 500). Bin 0 would hold
+    Client 1 (window start 350 < 400), but tau == 400 already gates it shut
+    (``tau < 400`` is false) — so Client 1 falls into bin 3 instead (B10: the
+    fourth bin is whatever the first three leave uncounted, keeping the four
+    bins a partition of the two pending Clients). The mean-earliness diff is 0
+    because mean earliness == tau == 400. The realised-congestion feature is
+    0 for the same no-``shortest_path_cache`` reason as the distance features.
+    State-action (8) for sending the vehicle from the depot to Client 1: distance
     5 km; arrival 400 + 10 breaches Client 1's due time 400 by 10 minutes; no
     earliness, future delay or overtime; the second feature is the preserved
-    always-zero quirk.
+    always-zero quirk; the squared future-delay term is 0 because future delay
+    itself is 0 here.
     """
     clients_left = 2 / 150
     time_left = (1150 - 400) / 850
@@ -157,37 +168,41 @@ def hand_computed_features() -> np.ndarray:
         time**2 * clients_left,
         time**2 * clients_left**2,
         0.0,
+        0.0,
+        0.0,
+        0.0,
         1 / 2,
         0.0,
         1 / 2,
+        0.0,
         0.0,
     ]
-    state_action = [0.0, 0.0, 5 / 100, 0.0, 10 / 60, 0.0, 0.0]
+    state_action = [0.0, 0.0, 5 / 100, 0.0, 10 / 60, 0.0, 0.0, 0.0]
     return np.array(general + state_action)
 
 
 class TestWUpdate:
-    def test_feature_vector_and_created_w_have_19_components(self):
+    def test_feature_vector_and_created_w_have_24_components(self):
         world = make_update_world()
         policy = make_policy(world, W=None)
 
         assert policy.W is not None  # created by the constructor's greedy pass
-        assert policy.W.shape == (19,)
+        assert policy.W.shape == (24,)
         features = state_features(policy)
-        assert features.general.shape == (12,)
-        assert policy.feature_extractor.action_features(features, policy.action).shape == (19,)
+        assert features.general.shape == (16,)
+        assert policy.feature_extractor.action_features(features, policy.action).shape == (24,)
 
     def test_update_preserves_w_dimensions(self):
         world = make_update_world()
-        policy = make_policy(world, W=np.zeros(19), lr=0.5)
+        policy = make_policy(world, W=np.zeros(24), lr=0.5)
 
         policy.update_W([TrainingSnapshot.capture(world.state)], [[1]], [0.0, 20.0])
 
-        assert policy.W.shape == (19,)
+        assert policy.W.shape == (24,)
 
     def test_single_step_matches_hand_computation(self):
         world = make_update_world()
-        policy = make_policy(world, W=np.zeros(19), lr=0.5)
+        policy = make_policy(world, W=np.zeros(24), lr=0.5)
 
         policy.update_W([TrainingSnapshot.capture(world.state)], [[1]], [0.0, 20.0])
 
@@ -197,16 +212,73 @@ class TestWUpdate:
 
     def test_zero_learning_rate_is_a_no_op(self):
         world = make_update_world()
-        initial = np.full(19, 0.3)
+        initial = np.full(24, 0.3)
         policy = make_policy(world, W=initial.copy(), lr=0.0)
 
         policy.update_W([TrainingSnapshot.capture(world.state)], [[1]], [0.0, 20.0])
 
         np.testing.assert_array_equal(policy.W, initial)
 
+    def test_update_clips_features_at_the_legacy_ceiling(self, monkeypatch):
+        """The legacy's ``actualize_W`` clips the assembled X at 3 before Q_pred.
+
+        Several components are unbounded by construction (the squared
+        future-delay term above all), so without this the gradient multiplies a
+        residual of thousands by a feature of tens and W walks away — measured
+        on the real Chengdu data as ||W|| = 1.6e7 after 25 episodes instead of
+        4.4e3. See ``UPDATE_FEATURE_CEILING``.
+        """
+        world = make_update_world()
+        policy = make_policy(world, W=np.zeros(24), lr=0.5)
+
+        raw = np.zeros(24)
+        raw[22] = 10.0  # the unbounded squared future-delay term
+        raw[16] = 1.5  # already under the ceiling: must pass through untouched
+        monkeypatch.setattr(
+            policy.feature_extractor, "action_features", lambda features, action: raw.copy()
+        )
+
+        policy.update_W([TrainingSnapshot.capture(world.state)], [[1]], [0.0, 20.0])
+
+        # W = lr * U_t * clip(X, max=3) = 10 * clip(X, max=3), Q_pred being 0.
+        expected = 10 * np.clip(raw, a_min=None, a_max=UPDATE_FEATURE_CEILING)
+        np.testing.assert_allclose(policy.W, expected, rtol=1e-12)
+        assert policy.W[22] == 10 * UPDATE_FEATURE_CEILING
+        assert policy.W[16] == 10 * 1.5
+
+    def test_decisions_are_taken_on_unclipped_features(self, monkeypatch):
+        """The legacy clips inside the update only — the argmin sees raw features.
+
+        ``generate_best_Q_pred_for_1_vehicle`` (legacy 2285-2308) prices its
+        candidates from the unclipped vector, so pushing this clip down into
+        ``FeatureExtractor`` would change *which action is chosen*, not just
+        how W moves. The two candidates below are built so that the clipped and
+        unclipped argmins disagree.
+        """
+        world = make_update_world()
+        policy = make_policy(world, W=np.zeros(24), lr=0.5)
+
+        rows = np.zeros((2, 24))
+        rows[0, 22] = 10.0  # clips to 3
+        rows[1, 16] = 3.5  # clips to 3
+        monkeypatch.setattr(
+            policy.feature_extractor,
+            "candidate_features",
+            lambda features, action, vehicle, candidates: rows.copy(),
+        )
+        policy.W = np.zeros(24)
+        policy.W[22] = -1.0
+        policy.W[16] = -2.0
+        # raw:     Q = [-10.0, -7.0] -> candidate 0 wins
+        # clipped: Q = [ -3.0, -6.0] -> candidate 1 would win
+
+        chosen = policy._best_q_action(state_features(policy), 0, [11, 22])
+
+        assert chosen == 11
+
     def test_return_accumulates_rewards_newest_first(self):
         world = make_update_world()
-        policy = make_policy(world, W=np.zeros(19), lr=0.5)
+        policy = make_policy(world, W=np.zeros(24), lr=0.5)
 
         snapshot = TrainingSnapshot.capture(world.state)
         policy.update_W([snapshot, snapshot], [[1], [1]], [0.0, 5.0, 7.0])
@@ -214,7 +286,7 @@ class TestWUpdate:
         # Epochs replay newest-first: U_t is 7 for t=1, then 7 + 5 = 12 for t=0,
         # each stepping W against the Q predicted by the weights so far.
         x = hand_computed_features()
-        expected = np.zeros(19)
+        expected = np.zeros(24)
         for u_t in (7.0, 12.0):
             expected = expected + 0.5 * ((u_t - np.dot(x, expected)) * x)
         np.testing.assert_allclose(policy.W, expected, rtol=1e-12)
@@ -258,8 +330,8 @@ def make_selection_world():
 
 
 def distance_only_w() -> np.ndarray:
-    w = np.zeros(19)
-    w[14] = 1.0  # the total-distance feature
+    w = np.zeros(24)
+    w[18] = 1.0  # the total-distance feature
     return w
 
 
@@ -325,7 +397,7 @@ class TestEpsilonGreedy:
             number_actions_test=2,
             shift_end_minute=HORIZON_END,
             episode_end_minute=EPISODE_END,
-            W=np.zeros(19),
+            W=np.zeros(24),
             exploration_rng=np.random.default_rng(0),
         )
 
@@ -345,7 +417,7 @@ class TestBatchedQEvaluation:
         # ``<`` against a running best, which leaves the *first* winner standing;
         # np.argmin over the batch must break the tie the same way.
         world = make_fleet_world({}, clients=[7, 3, 5], vehicles=1)
-        policy = make_policy(world, W=np.ones(19))
+        policy = make_policy(world, W=np.ones(24))
         features = state_features(policy)
 
         for candidates in ([7, 3, 5], [5, 3, 7], [3, 7]):
@@ -376,7 +448,7 @@ class TestBatchedQEvaluation:
 
         assert policy._best_q_action(state_features(policy), 0, [1, 2]) == 1
         assert policy.W is not None
-        np.testing.assert_array_equal(policy.W, np.zeros(19))
+        np.testing.assert_array_equal(policy.W, np.zeros(24))
 
 
 # --- Candidate action selection (ticket 07, simulation-performance) ------------
@@ -413,7 +485,9 @@ def reference_possible_actions(
         # ticket 05 (B11): filtered here too, to stay in lockstep with the fix in
         # _select_vehicle_possible_actions — this oracle pins ticket 07's
         # vectorization, not the pre-ticket-05 duplicate-booking bug.
-        shortest_distance_clients = policy._classify_shortest_distance_clients()
+        shortest_distance_clients = action_set._classify_shortest_distance_clients(
+            state, policy.geometry, policy.depot
+        )
         for _distance, client in shortest_distance_clients[vehicle]:
             if client not in forbidden_actions:
                 possible_actions.append(client)
@@ -478,7 +552,7 @@ class TestCandidateSelection:
         # list: the tuple sort the vectorized top-k replaces broke the tie on the
         # id, so a merely *stable* sort on the times is not enough.
         world = make_fleet_world({(0, 3): 7.0, (0, 5): 7.0}, clients=[5, 3, 7, 9], vehicles=1)
-        policy = make_policy(world, W=np.zeros(19))
+        policy = make_policy(world, W=np.zeros(24))
         features = state_features(policy)
 
         assert policy._select_vehicle_possible_actions(1, 0, features) == [3]
@@ -509,7 +583,7 @@ class TestCandidateSelection:
             depot=DEPOT,
         )
         world = World(cache, {client: (400, 900) for client in clients}, state)
-        policy = make_policy(world, W=np.zeros(19))
+        policy = make_policy(world, W=np.zeros(24))
 
         state.last_node_reached[0] = 9
 
@@ -524,7 +598,7 @@ class TestCandidateSelection:
             clients=[1, 2, 3, 4],
             vehicles=3,
         )
-        policy = make_policy(world, W=np.zeros(19), vehicles=3)
+        policy = make_policy(world, W=np.zeros(24), vehicles=3)
         policy.action = [4, 1, 2]  # vehicle 0's two nearest Clients are taken
 
         # The k nearest are 1 and 2; both forbidden, so selection reaches deeper.
@@ -534,7 +608,7 @@ class TestCandidateSelection:
         world = make_fleet_world(
             {(0, 1): 1.0, (0, 2): 2.0, (0, 3): 3.0}, clients=[1, 2, 3], vehicles=3
         )
-        policy = make_policy(world, W=np.zeros(19), vehicles=3)
+        policy = make_policy(world, W=np.zeros(24), vehicles=3)
         policy.action = [0, 1, 2]
 
         assert policy._select_vehicle_possible_actions(5, 0, state_features(policy)) == [3]
@@ -546,7 +620,7 @@ class TestCandidateSelection:
         world = make_fleet_world(
             {(0, 1): 1.0, (0, 2): 2.0, (0, 3): 3.0}, clients=[1, 2, 3, 4], vehicles=1
         )
-        policy = make_policy(world, W=np.zeros(19))
+        policy = make_policy(world, W=np.zeros(24))
 
         actions = policy._select_vehicle_possible_actions(3, 0, state_features(policy))
 
@@ -561,7 +635,7 @@ class TestCandidateSelection:
             clients=[1, 2, 3, 4],
             vehicles=1,
         )
-        policy = make_policy(world, W=np.zeros(19))
+        policy = make_policy(world, W=np.zeros(24))
         assert policy._select_vehicle_possible_actions(2, 0, state_features(policy)) == [1, 2]
 
         world.state.clients_not_visited.remove(1)
@@ -583,7 +657,7 @@ class TestCandidateSelection:
             (node, column): float(rng.integers(2, 12)) / 2 for node in nodes for column in columns
         }
         world = make_fleet_world(minutes, clients=clients, vehicles=3, nodes=nodes)
-        policy = make_policy(world, W=np.zeros(19), vehicles=3)
+        policy = make_policy(world, W=np.zeros(24), vehicles=3)
 
         for _ in range(200):
             remaining = rng.choice(clients, size=rng.integers(0, len(clients) + 1), replace=False)
@@ -672,7 +746,7 @@ class TestEndgameInvariants:
     def test_b5_never_raises_and_always_returns_a_legal_action(self, config: dict[str, Any]):
         vehicle_count = config["vehicle_count"]
         world = make_endgame_world(vehicle_count)
-        policy = make_policy(world, W=np.zeros(19), vehicles=vehicle_count)
+        policy = make_policy(world, W=np.zeros(24), vehicles=vehicle_count)
 
         _apply_endgame_config(world, config)
         features = state_features(policy)
@@ -688,7 +762,7 @@ class TestEndgameInvariants:
         if vehicle_count < 2:
             return  # a duplicate booking needs at least two vehicles to collide
         world = make_endgame_world(vehicle_count)
-        policy = make_policy(world, W=np.zeros(19), vehicles=vehicle_count)
+        policy = make_policy(world, W=np.zeros(24), vehicles=vehicle_count)
 
         _apply_endgame_config(world, config)
         actions = policy.decide(world.state)
@@ -709,7 +783,7 @@ class TestB1aDepotIdleGuard:
 
     def test_a_vehicle_that_only_crossed_the_depot_is_not_limited_to_it(self):
         world = make_endgame_world(1)
-        policy = make_policy(world, W=np.zeros(19))
+        policy = make_policy(world, W=np.zeros(24))
         world.state.clients_not_visited[:] = [1, 2]
         world.state.tau_episode = 351.0  # past the depot-idle literal (350)
         world.state.last_node_reached[:] = [DEPOT]
@@ -723,7 +797,7 @@ class TestB1aDepotIdleGuard:
     def test_a_vehicle_genuinely_parked_past_350_is_still_limited_to_the_depot(self):
         """The branch's intended, frequent case: unaffected by the fix."""
         world = make_endgame_world(1)
-        policy = make_policy(world, W=np.zeros(19))
+        policy = make_policy(world, W=np.zeros(24))
         world.state.clients_not_visited[:] = [1, 2]
         world.state.tau_episode = 351.0
         world.state.last_node_reached[:] = [DEPOT]

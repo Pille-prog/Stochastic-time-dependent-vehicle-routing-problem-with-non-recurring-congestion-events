@@ -1,0 +1,31 @@
+card: budget 100 action_count 40
+WORLD READY, 50 evaluation_seeds
+  W=0 @ m+2 10/50 running mean 25018.9
+  W=0 @ m+2 20/50 running mean 24503.0
+  W=0 @ m+2 30/50 running mean 28694.8
+  W=0 @ m+2 40/50 running mean 29751.0
+  W=0 @ m+2 50/50 running mean 30791.4
+W=0 @ m+2                mean  30791.43   median  30627.72
+  best_w @ m+2 10/50 running mean 2201.8
+  best_w @ m+2 20/50 running mean 2221.6
+  best_w @ m+2 30/50 running mean 2328.4
+  best_w @ m+2 40/50 running mean 2498.9
+  best_w @ m+2 50/50 running mean 2483.2
+best_w @ m+2             mean   2483.24   median   2390.14
+  best_w @ m+40 10/50 running mean 1959.4
+  best_w @ m+40 20/50 running mean 2049.8
+  best_w @ m+40 30/50 running mean 2060.2
+  best_w @ m+40 40/50 running mean 2168.2
+  best_w @ m+40 50/50 running mean 2168.4
+best_w @ m+40            mean   2168.39   median   2036.78
+
+=== BASELINE NULL, 50 evaluation_seeds ===
+  W=0    @ m+2    30791.43
+  best_w @ m+2     2483.24
+  best_w @ m+40    2168.39
+
+What learning is worth, and what the action count is worth:
+  learning @ m+2 (best_w vs W=0)      -91.94%   wins 50/50   p=1.78e-15
+  action count (m+40 vs m+2)          -12.68%   wins 36/50   p=8.24e-05
+
+wrote .scratch\neural-policy\results\baseline_null_50.json

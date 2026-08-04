@@ -29,7 +29,8 @@ mean_number_clients: 150
 client_count_stddev: 30.0
 min_number_clients: 60
 clients_per_vehicle: 28
-time_window_spread: 60
+# The legacy's ``diff_TW``; see config.yaml for why this is 150 and not 60.
+time_window_spread: 150
 client_universe_seed: 0
 client_universe_size: 150
 client_universe_node_range: [1, 1900]
@@ -63,3 +64,8 @@ neural_d_model: 128
 neural_n_layers: 3
 neural_n_heads: 4
 device: cpu
+
+# Ticket 06: see experiments/chengdu/config.yaml's comment.
+neural_learning_rate: 3.0e-4
+neural_learn_passes: 4
+neural_batch_size: 32

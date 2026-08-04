@@ -103,6 +103,27 @@ An operator who wants CUDA on this class of hardware can pass `device: cuda`
 explicitly; whether to change the *default* is a question for whoever
 measures the worker+CUDA interaction below, not this ticket.
 
+> **Superseded 2026-07-31 by ticket 12** — two paragraphs of this ticket no
+> longer describe the project, and are kept only so the reasoning is legible.
+>
+> 1. **The default is now `"auto"`, not `"cpu"`.** The worker+CUDA question
+>    this ticket deferred to never became live: ticket 07's neural path is
+>    single-process (evaluation blocks run serially; `EpisodePool` appears
+>    nowhere in `trainer.py`), so no worker ever asks for a CUDA context. The
+>    deferral was correct when written and was answered by the path not
+>    existing rather than by a measurement.
+> 2. **The dependency spec now pins the `neural` extra to PyTorch's cu128
+>    index** on Linux and Windows, reversing the "stays portable, never
+>    requires a non-default index" choice recorded under *"Reproducing the
+>    CUDA numbers"* below. The `auto` default forces it: on PyPI's CPU-only
+>    wheel, `torch.cuda.is_available()` is `False` even on a GPU machine, so
+>    `auto` would resolve to `cpu` for everyone and the default would be
+>    cosmetic. The manual `--index-url` step described below is therefore no
+>    longer needed to reproduce the CUDA numbers.
+>
+> Everything else here — the measured table, the parameter count, the circular
+> import, the corrected prediction — stands.
+
 **`EpisodePool` interaction (documented per the ticket, not itself measured
 here):** each spawned worker holds its own 8.0 GB resident world (ticket 08,
 simulation-performance), so this machine's 32 GB RAM caps `worker_count` at

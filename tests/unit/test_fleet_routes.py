@@ -96,3 +96,29 @@ class TestRouteProgress:
         assert fleet.route[0] == [6.0, 7.0]
         assert fleet.current_arc(0) == (6.0, 7.0)
         assert fleet.nodes_left(0) == 2
+
+
+class TestIsAtNode:
+    """Ticket 11 (simulator-correctness, B20, ADR-0008): the missing fact.
+
+    Positional presence -- zero progress into the next arc -- not
+    ``vehicle_standing``, which can already be ``False`` at this exact instant
+    (``begin_arc`` flips it the moment it launches the vehicle, before any
+    distance is covered).
+    """
+
+    def test_true_the_instant_departure_equals_tau(self):
+        fleet = make_fleet()
+        fleet.departure_tau[0] = 360.0
+        assert fleet.is_at_node(0, 360.0)
+
+    def test_true_while_still_awaiting_departure(self):
+        """A future ``departure_tau`` (mid-service) is at-a-node too."""
+        fleet = make_fleet()
+        fleet.departure_tau[0] = 365.0
+        assert fleet.is_at_node(0, 360.0)
+
+    def test_false_once_arc_progress_is_nonzero(self):
+        fleet = make_fleet()
+        fleet.departure_tau[0] = 340.0
+        assert not fleet.is_at_node(0, 360.0)

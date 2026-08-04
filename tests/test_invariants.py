@@ -23,7 +23,12 @@ fixture and regardless of policy quality:
   mid-arc is simultaneously "``PARKED`` while travelling" and "the recorded
   node changed with the remaining arc's distance never charged" — the review
   measured these as the same event, never separately (``docs/simulator-review.md``,
-  B1b).
+  B1b);
+- every still-travelling vehicle's route has at least two nodes after every
+  reroute (ticket 11, simulator-correctness, B20, ADR-0008) — the general net
+  for "an action must be executable"; the catch itself needs correlated fleet
+  behaviour this suite's random Policies do not reproduce, so it is a
+  hand-built unit test instead (``tests/unit/test_model_reroute.py``).
 
 Randomness comes from real gauss draws: the module fixture builds a multi-day
 traffic world by deterministically perturbing the fixture day's speeds, giving
@@ -64,8 +69,8 @@ HORIZON_START, HORIZON_END = 300, 780
 EMERGENCY_HORIZON = 1150
 # The generator draws event durations from ``uniform(30, max_congestion_duration)``.
 MIN_EVENT_DURATION = 30
-# 12 general-state + 7 state-action features (see the MonteCarloPolicy docstring).
-FEATURE_COUNT = 19
+# 16 general-state + 8 state-action features (see the MonteCarloPolicy docstring).
+FEATURE_COUNT = 24
 
 FIXTURE_DEMAND = dict(
     mean_number_clients=20,
@@ -178,6 +183,16 @@ class RecordingModel(Model):
         rows (see the module docstring): a violation here is simultaneously
         "``PARKED`` while travelling" and "the recorded node changed with the
         remaining arc's distance never charged".
+
+        Ticket 11 (B20, ADR-0008) adds route well-formedness at every reroute
+        point: every still-travelling vehicle's route must have at least two
+        nodes (current + next), scoped to travelling vehicles the same way the
+        review scoped its own measurement (0/600 for the linear Policy). This
+        is the net, not the catch — the trigger needs *correlated* fleet
+        behaviour a uniform-random or Hypothesis-drawn Policy does not
+        reproduce (see the ticket), so this stays green under the linear
+        Policy both before and after the fix; the catch was a hand-built unit
+        test (``tests/unit/test_model_reroute.py``).
         """
         fleet = self.fleet
         state = self.state
@@ -195,6 +210,12 @@ class RecordingModel(Model):
                 f"vehicle {vehicle} became PARKED while mid-arc at tau={tau} "
                 f"(departure_tau={fleet.departure_tau[vehicle]})"
             )
+        for vehicle in range(self.number_vehicles):
+            if fleet.is_travelling(vehicle):
+                assert len(fleet.route[vehicle]) >= 2, (
+                    f"vehicle {vehicle} has a degenerate route {fleet.route[vehicle]} "
+                    f"after rerouting at tau={tau}"
+                )
 
 
 class RecordingCongestionGenerator(CongestionGenerator):

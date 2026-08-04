@@ -48,6 +48,16 @@ def valid_values() -> dict:
         "neural_d_model": 128,
         "neural_n_layers": 3,
         "neural_n_heads": 4,
+        "neural_learning_rate": 3.0e-4,
+        "neural_learn_passes": 4,
+        "neural_batch_size": 8,
+        "neural_grad_clip_norm": None,
+        "neural_warm_start": "minutes",
+        "neural_huber_delta": 1.0,
+        "neural_level_gain": 1.0,
+        "neural_ridge_gamma": 0.98,
+        "neural_ridge_lambda": 10.0,
+        "neural_solve_cadence": 1,
         "device": "cpu",
     }
 
@@ -128,6 +138,132 @@ def test_cuda_device_is_accepted(tmp_path: Path) -> None:
     assert config.device == "cuda"
 
 
+def test_auto_device_is_accepted(tmp_path: Path) -> None:
+    """Ticket 12: "auto" resolves once at run start (torch_support.resolve_device),
+    not here -- ExperimentConfig only has to accept the string."""
+    values = valid_values() | {"device": "auto"}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.device == "auto"
+
+
+def test_auto_is_the_dataclass_default() -> None:
+    """Ticket 12 amends spec.md decision 7: "auto", not "cpu", is now the default --
+    every shipped YAML still pins an explicit value (a defaulted key *may* be
+    omitted since ticket 08's neural_grad_clip_norm, but the shipped configs
+    stay explicit), so this mostly matters for direct ExperimentConfig(...)
+    construction."""
+    device_field = next(f for f in dataclasses.fields(ExperimentConfig) if f.name == "device")
+    assert device_field.default == "auto"
+
+
+def test_omitted_defaulted_keys_take_their_defaults(tmp_path: Path) -> None:
+    """A field with a dataclass default may be left out of the YAML (ticket 08:
+    a new optional knob must not invalidate every existing config file);
+    defaultless fields stay required (test_missing_key_is_rejected)."""
+    values = valid_values()
+    del values["device"]
+    del values["neural_grad_clip_norm"]
+    del values["neural_warm_start"]
+    del values["neural_huber_delta"]
+    del values["neural_level_gain"]
+    del values["neural_ridge_gamma"]
+    del values["neural_ridge_lambda"]
+    del values["neural_solve_cadence"]
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.device == "auto"
+    assert config.neural_grad_clip_norm is None
+    # The frozen Gate A null model (spec.md): a defaulted config is the
+    # nearest-feasible-Client warm start and torch's own Huber delta.
+    assert config.neural_warm_start == "minutes"
+    assert config.neural_huber_delta == 1.0
+    assert config.neural_level_gain == 1.0
+    assert config.neural_ridge_gamma == 0.99
+    assert config.neural_ridge_lambda == 1.0
+    assert config.neural_solve_cadence == 50
+
+
+def test_grad_clip_norm_value_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_grad_clip_norm": 0.5}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_grad_clip_norm == 0.5
+
+
+def test_nonpositive_grad_clip_norm_is_rejected(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_grad_clip_norm": 0}
+    with pytest.raises(ValueError, match=r"neural_grad_clip_norm must be positive or null"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
+def test_cost_warm_start_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_warm_start": "cost"}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_warm_start == "cost"
+
+
+def test_unknown_warm_start_is_rejected(tmp_path: Path) -> None:
+    """Caught at config load, not at the first ``TokenEncoder`` construction —
+    a Gate A run that fails four hours in because of a typo in a YAML has
+    burned four hours."""
+    values = valid_values() | {"neural_warm_start": "distance"}
+    with pytest.raises(ValueError, match=r"neural_warm_start must be one of"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
+def test_huber_delta_value_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_huber_delta": 0.02}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_huber_delta == 0.02
+
+
+def test_nonpositive_huber_delta_is_rejected(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_huber_delta": 0}
+    with pytest.raises(ValueError, match=r"neural_huber_delta must be positive"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
+def test_ridge_gamma_value_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_ridge_gamma": 0.5}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_ridge_gamma == 0.5
+
+
+def test_ridge_gamma_of_exactly_one_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_ridge_gamma": 1.0}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_ridge_gamma == 1.0
+
+
+@pytest.mark.parametrize("gamma", [0.0, -0.1, 1.1])
+def test_ridge_gamma_out_of_range_is_rejected(tmp_path: Path, gamma: float) -> None:
+    values = valid_values() | {"neural_ridge_gamma": gamma}
+    with pytest.raises(ValueError, match=r"neural_ridge_gamma must be in \(0, 1\]"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
+def test_ridge_lambda_value_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_ridge_lambda": 25.0}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_ridge_lambda == 25.0
+
+
+def test_nonpositive_ridge_lambda_is_rejected(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_ridge_lambda": 0}
+    with pytest.raises(ValueError, match=r"neural_ridge_lambda must be positive"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
+def test_solve_cadence_value_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_solve_cadence": 10}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_solve_cadence == 10
+
+
+def test_nonpositive_solve_cadence_is_rejected(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_solve_cadence": 0}
+    with pytest.raises(ValueError, match=r"neural_solve_cadence must be positive"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
 def test_shift_end_minute_equal_to_episode_end_minute_is_accepted(tmp_path: Path) -> None:
     # Ticket 02 (simulator-correctness, B15): the boundary itself is valid —
     # only shift_end_minute > episode_end_minute is rejected.
@@ -166,6 +302,10 @@ def test_shift_end_minute_equal_to_episode_end_minute_is_accepted(tmp_path: Path
         ({"neural_n_layers": 0}, "neural_n_layers"),
         ({"neural_n_heads": 0}, "neural_n_heads"),
         ({"neural_d_model": 130, "neural_n_heads": 4}, "divisible"),
+        ({"neural_learning_rate": 0}, "neural_learning_rate"),
+        ({"neural_learning_rate": -1.0}, "neural_learning_rate"),
+        ({"neural_learn_passes": 0}, "neural_learn_passes"),
+        ({"neural_batch_size": 0}, "neural_batch_size"),
         ({"device": "tpu"}, "device"),
         ({"device": ""}, "device"),
     ],
@@ -182,3 +322,29 @@ def test_type_errors_are_rejected(tmp_path: Path) -> None:
         ExperimentConfig.from_yaml(
             write_config(tmp_path, valid_values() | {"epsilon": "not a number"})
         )
+
+
+def test_level_gain_value_is_accepted(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_level_gain": 100.0}
+    config = ExperimentConfig.from_yaml(write_config(tmp_path, values))
+    assert config.neural_level_gain == 100.0
+
+
+def test_nonpositive_level_gain_is_rejected(tmp_path: Path) -> None:
+    values = valid_values() | {"neural_level_gain": 0}
+    with pytest.raises(ValueError, match=r"neural_level_gain must be positive"):
+        ExperimentConfig.from_yaml(write_config(tmp_path, values))
+
+
+def test_warm_start_names_stay_in_sync_with_the_weight_vectors() -> None:
+    """``config.NEURAL_WARM_STARTS`` duplicates ``tokenizer``'s keys on purpose
+    (importing them would make config depend on stdvrp.policies, which
+    circularly imports the simulator -- a failure that only appears when config
+    is imported first). This is the pin that stops the two drifting."""
+    # The same landmine, from the other side: stdvrp.simulation has to finish
+    # initializing before stdvrp.policies is importable (see test_tokenizer.py).
+    import stdvrp.simulation  # noqa: F401
+    from stdvrp.config import NEURAL_WARM_STARTS
+    from stdvrp.policies.tokenizer import WARM_START_WEIGHTS
+
+    assert set(NEURAL_WARM_STARTS) == set(WARM_START_WEIGHTS)

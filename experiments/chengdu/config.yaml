@@ -24,7 +24,13 @@ mean_number_clients: 150
 client_count_stddev: 30.0
 min_number_clients: 60
 clients_per_vehicle: 28
-time_window_spread: 60
+# The legacy's ``diff_TW``: the width of every Client's time window, and the
+# gap between the horizon end and the latest window a Client can open at
+# (``randint(300, 780 - diff_TW)``). 150 is what the reference runs used --
+# ``capture_golden_master.py``'s protocol, and the Tw150 in the legacy's own
+# result filenames. This said 60 until the linear-policy-learning effort found
+# the mismatch (issues/01); measurements taken at 60 are not comparable.
+time_window_spread: 150
 client_universe_seed: 0
 client_universe_size: 150
 client_universe_node_range: [1, 1900]
@@ -63,4 +69,156 @@ test_vehicle_counts: [6, 5, 5, 7, 7, 6, 6, 5, 6, 5,
 neural_d_model: 128
 neural_n_layers: 3
 neural_n_heads: 4
-device: cpu
+# Ticket 12: "auto" resolves once per run to whichever device is faster
+# locally -- measured against the real network, CUDA was *not* faster than
+# CPU on the reference laptop (see spec.md's compute-budget section), so this
+# does not assume CUDA; it just avoids hardcoding a choice that is
+# machine-specific and may differ on whatever machine actually runs this.
+device: auto
+
+# Ticket 06: the Policy's own learning rule. neural_learning_rate seeds Adam
+# (spec.md's live-report example); neural_learn_passes is K (ticket 03's
+# compute-budget measurement); neural_batch_size is the minibatch size within
+# one episode's ~400 decision epochs.
+#
+# 3.0e-4 (spec.md's illustrative value) was measured to diverge. On the mini
+# fixture, paired against the untrained null over ten held-out seeds, it
+# improves to -6.3% by episode 30 and then blows up -- +17% at ep 90, +91% at
+# ep 100, +255% at ep 130 -- while 3.0e-5 stays in the -2%..-5.7% band for the
+# full 200 episodes. Adam's steps are the same size whatever the gradient
+# magnitude, and what separates one candidate from another in Q is ~0.03 in
+# normalized units, so too large a step is pure noise on exactly the quantity
+# the argmin reads.
+#
+# Tuned on the MINI FIXTURE, not on evaluation_seeds: it is a default that
+# does not diverge, not a tuned optimum. spec.md puts hyperparameter search on
+# evaluation_seeds (never on test_seeds) -- that search has not been run.
+neural_learning_rate: 3.0e-5
+neural_learn_passes: 4
+neural_batch_size: 32
+# Ticket 08 (Gate A stability): optional max L2 gradient norm per minibatch
+# step, over encoder+head jointly; null disables clipping. The other lever of
+# the lr/clipping stability sweep (evaluation_seeds only) -- not a frozen
+# acceptance parameter. RETIRED since ticket 16: no gradient exists to clip.
+neural_grad_clip_norm: null
+
+# Ticket 16. The ridge estimator's own knobs (config.py's own docstring has
+# the fuller version of this note). Chosen on evaluation_seeds, on this exact
+# dataset, over four rounds
+# (.scratch/neural-policy/results/ridge_sweep*.{py,json,log}).
+#
+# *** NO CELL TESTED BEAT THE UNTRAINED NULL (3365.09). *** Rounds 1-2:
+# gamma=0.98, lambda in {1, 10, 100, 1e3, 1e4, 1e5} at N=50 (60 training
+# episodes) -- every cell scored 2.7x-10.7x the null, non-monotonically in
+# lambda (worst around 100-1,000). Round 3: lambda=1 at N=150 (150 episodes)
+# essentially matched N=50 (9039.89 vs 9152.26) -- ruling out "not enough
+# data accumulated yet" as the explanation, directly contradicting this
+# ticket's own "50 episodes ~= 20,000 samples should be enough" framing.
+# Round 4: lambda=1, N=50, gamma in {0.90, 0.95, 0.99} -- monotonic and
+# sensible, unlike lambda: 13476.03, 9622.48, 6978.45. gamma=0.99 (the
+# largest tried) is the best cell measured across all four rounds.
+# (Rounds 1-3 ran before code review found and fixed a scale-decay bug in
+# RidgeAccumulator -- raw_sum_sq not decaying like effective_n, its own
+# denominator -- inflating the frozen scale by an estimated ~26% at
+# N=50/gamma=0.98; round 4 already reflects the fix. That is far short of
+# explaining a 170%+ gap from the null, so the qualitative finding stands,
+# but rounds 1-3's absolute numbers are approximate.)
+#
+# lambda=1, gamma=0.99, N=50 is the least-bad cell measured, not a
+# validated-good one. Ticket 16's Comments carry the full numbers and a
+# working hypothesis (near-zero-variance feature columns can carry a
+# disproportionate physical-unit coefficient after standardization,
+# regardless of lambda). Ticket 17's Gate A' inherits this open question
+# directly -- its own lambda/gamma/N pass needs to either explain this or
+# search past it (gamma above 0.99 is the obvious next point on this round's
+# trend) before "does training add value" can be answered on this arm.
+neural_ridge_gamma: 0.99
+neural_ridge_lambda: 1.0
+neural_solve_cadence: 50
+
+# Ticket 08. The myopic warm start (network.py, "The warm start"; the weight
+# vectors are tokenizer.WARM_START_WEIGHTS). "minutes" is the bare
+# nearest-feasible-Client initialization; "cost" additionally prices each leg
+# by the three single-Client projected cost components the arc token already
+# carries, in the same 1/horizon_length currency and with no free parameter.
+#
+# Measured over all 50 evaluation_seeds, never test_seeds: "minutes" 5484.25,
+# "cost" 3693.23 -- -32.7%, winning on 47/50 seeds, Wilcoxon p = 2.5e-14. For
+# scale, the best block of 650 training episodes of the "minutes" network on
+# the same seed set was 4150: the initialization beats the training. Adding
+# future_delay to the weight vector is worse (an 8-seed screen put it at 5185
+# at full weight and 3778 at a tenth, against 3421 for this vector).
+#
+# *** SET TO "minutes", DELIBERATELY, DESPITE THE ABOVE. ***
+#
+# Gate A's null is "the same architecture untrained", so all three arms must
+# share one architecture. Arm 0 has already run and converged on "minutes"
+# (runs/gate_a_v2/results_init0.json: null 5299.48 -> trained 4423.73, +15.5%,
+# p=6.2e-05, calibration rho 0.543 -- parts 1 and 3 PASS). Arms 1 and 2 are all
+# that is left to close the ticket, and flipping this key would silently make
+# them incomparable to arm 0 and void the gate.
+#
+# Flip it to "cost" for Gate B and for anything that ships: on the same 50
+# test_seeds the untrained "cost" network costs 3811.28 against the fully
+# trained "minutes" network's 4423.73 -- 13.8% cheaper, with no training at all.
+# That is a real result and it belongs to Gate B's question, not Gate A's.
+#
+# DEAD since ticket 15 (config.py, ExperimentConfig.neural_warm_start): the
+# myopic base is now always "cost" (network.py, "The myopic base"), computed
+# outside the network and unreachable by this key. Left at its Gate-A value
+# for the historical record above; changing it now changes nothing.
+neural_warm_start: minutes
+
+# Ticket 08. Huber's quadratic/linear knee, and a MEASURED NEGATIVE RESULT --
+# left at torch's default, which the knob exists to make visible rather than
+# to change.
+#
+# The observation that motivated it stands: at delta=1.0 every residual this
+# regression produces (~1e-2) is in the quadratic branch, so the loss is
+# exactly 0.5 * MSE and a truncated episode's terminal penalty (research note
+# F10) enters squared on all ~400 of that episode's decision epochs. The
+# inference from it did not: on the mini fixture, delta=0.02 -- chosen to sit
+# between a normal residual and an outlier's -- was far *worse*, +90% over the
+# null by episode 90 and +129% by 140, against +0.3% for the same run at 1.0.
+#
+# Why, in hindsight: shrinking delta does not only bound outliers, it makes
+# the loss near-linear for *ordinary* samples too, so their gradients become
+# sign-like and constant-magnitude. Under Adam that is a much larger effective
+# step on exactly the quantity the argmin reads. A useful knee here would have
+# to be well above the normal residual and well below the outlier -- those two
+# scales are ~1e-2 and ~3e-1, so the window is real but narrow, and nothing
+# has measured a value inside it. Do not set this without one.
+#
+# MOOT since ticket 15, retired by ticket 16: the historical finding above
+# stands, but ticket 16 replaces this file's per-episode Huber-loss SGD with
+# a closed-form least-squares solve, at which point this key stops mattering.
+neural_huber_delta: 1.0
+
+# Ticket 08. How much faster QHead's level term -- linear's bias, the one
+# weight added identically to every candidate and therefore the only one no
+# argmin can see -- moves per optimizer step (network.py, "The level term, and
+# why it needs a gain").
+#
+# The problem it addresses is real and measured: at init Q_joint is 0.3-0.9
+# while the standardized return is ~0.03, so the first thing training does is
+# walk that gap down with same-signed steps for ~100 episodes, dragging every
+# ranking weight along. On the real dataset with warm start "cost", 50 episodes
+# took the policy from its untrained 3811 to 6169 on test_seeds -- +62% worse
+# than its own null (runs/gate_a_cost/log.txt).
+#
+# But the fix is conditional, so it stays off HERE. Mini fixture, gain 100:
+#   warm start "minutes":  mean over blocks -2.42% -> -2.79%, best -5.68% ->
+#                          -7.44%, blocks worse than null 3/20 -> 2/20.  Better
+#                          on every column, and the best learning measured.
+#   warm start "cost":     mean +2.57% -> +5.31%, worse 14/20 -> 16/20. Worse.
+# The gain does not make the ranking signal less noisy; it removes what was
+# throttling the optimizer. From a poor ranking that helps, from a good one it
+# just spends it faster. This config runs "cost", so: 1.0.
+#
+# A Gate A run asking "does it learn" should use minutes + 100 instead.
+#
+# MOOT since ticket 15: the 0.3-0.9-vs-0.03 mismatch this section measures was
+# an artifact of the pre-ticket-15 warm start; Q_joint at init is now
+# Sum_v c(s, v, a_v), already on the target's scale, so there is no longer a
+# large same-signed gap for this gain to close (network.py, "The level term").
+neural_level_gain: 1.0

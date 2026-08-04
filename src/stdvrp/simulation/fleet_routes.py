@@ -92,6 +92,18 @@ class FleetRoutes:
         self.horizon_change_tau[vehicle] = tau
         self.arc_distance_travelled[vehicle] = 0
 
+    def is_at_node(self, vehicle: int, tau: float) -> bool:
+        """Zero progress into the next arc: on a node, not merely near one.
+
+        Ticket 11 (simulator-correctness, B20, ADR-0008): positional presence,
+        not ``State.vehicle_standing`` — the two can disagree for one instant.
+        ``begin_arc`` flips ``vehicle_standing`` to ``False`` the moment it
+        launches a vehicle, at the same ``departure_tau == tau`` this checks;
+        a decision landing at exactly that instant needs "is this vehicle
+        still at the node" answered from progress, not from the standing flag.
+        """
+        return self.departure_tau[vehicle] >= tau
+
     def current_arc(self, vehicle: int) -> tuple[float, float]:
         """The arc being traversed: (node departed from, node travelling to)."""
         route = self.route[vehicle]
