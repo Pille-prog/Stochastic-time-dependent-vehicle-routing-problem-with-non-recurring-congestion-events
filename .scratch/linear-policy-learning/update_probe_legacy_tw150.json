@@ -1,0 +1,56 @@
+{
+ "side": "legacy",
+ "episodes": 25,
+ "time_window_spread": null,
+ "final_w_norm": 1657.5105788673488,
+ "summary": {
+  "updates_per_episode": {
+   "n": 25,
+   "mean": 377.8,
+   "median": 368.0,
+   "max": 498.0
+  },
+  "feature_norm": {
+   "n": 9445,
+   "mean": 1.802899788438693,
+   "median": 1.6856757888707918,
+   "max": 5.645961925299464
+  },
+  "nonzero_features": {
+   "n": 9445,
+   "mean": 15.929062996294336,
+   "median": 17.0,
+   "max": 20.0
+  },
+  "earliness_bin3": {
+   "n": 9445,
+   "mean": 0.0,
+   "median": 0.0,
+   "max": 0.0
+  },
+  "abs_residual": {
+   "n": 9445,
+   "mean": 1380.05566713303,
+   "median": 425.2023616583731,
+   "max": 28645.495617427263
+  },
+  "signed_residual": {
+   "n": 9445,
+   "mean": 939.92573731565,
+   "median": -7.657492262030246,
+   "max": 28645.495617427263
+  },
+  "step_coherence": {
+   "n": 25,
+   "mean": 0.8684339184083814,
+   "median": 0.9138565653711233,
+   "max": 0.9448234918524786
+  },
+  "episode_step_norm": {
+   "n": 25,
+   "mean": 300.06973538697923,
+   "median": 192.76652334541322,
+   "max": 1844.2930589892298
+  }
+ }
+}

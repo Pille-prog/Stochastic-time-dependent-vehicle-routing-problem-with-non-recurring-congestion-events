@@ -73,6 +73,16 @@ def measurement_bench_module() -> ModuleType:
     return _load_script_module("measurement_bench")
 
 
+@pytest.fixture(scope="session")
+def compare_w_module() -> ModuleType:
+    """scripts/compare_w_trajectories.py — the W-trajectory diff (linear-policy-learning 01).
+
+    Only the pure analysis is exercised here; the two capture drivers beside it
+    need the full Chengdu dataset and hours of CPU.
+    """
+    return _load_script_module("compare_w_trajectories")
+
+
 # --- Legacy-monolith characterization venue (see characterization_world) ---
 
 

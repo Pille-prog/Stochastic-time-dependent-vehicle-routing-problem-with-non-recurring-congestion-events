@@ -219,11 +219,18 @@ def default_data_dir() -> Path:
     return Path(env) if env else REPO_ROOT.parent
 
 
-def load_legacy() -> ModuleType:
-    """Import the monolith unchanged. Headless matplotlib; no other side effects."""
+def load_legacy(script_path: Path | None = None) -> ModuleType:
+    """Import the monolith unchanged. Headless matplotlib; no other side effects.
+
+    ``script_path`` defaults to the tagged monolith this golden master is of.
+    ``scripts/capture_legacy_w_trajectory.py`` passes a different one — the
+    ``Con_Clip`` variant, which is not in the repo or any tag — so that the shim
+    (the ``__builtins__`` restore and the ``legacy_monolith`` registration the
+    world cache pickles against) has one definition rather than two.
+    """
     os.environ.setdefault("MPLBACKEND", "Agg")
     spec = importlib.util.spec_from_file_location(
-        "legacy_monolith", legacy_source.legacy_script_path()
+        "legacy_monolith", script_path or legacy_source.legacy_script_path()
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -252,14 +259,21 @@ def default_cache_path() -> Path:
     return Path(base) / "stdvrp" / "golden_world_cache.pkl"
 
 
-def world_cache_key(data_dir: Path, protocol: dict[str, Any]) -> dict[str, Any]:
-    """Everything the built world depends on; any change invalidates the cache."""
+def world_cache_key(
+    data_dir: Path, protocol: dict[str, Any], legacy_sha: str | None = None
+) -> dict[str, Any]:
+    """Everything the built world depends on; any change invalidates the cache.
+
+    ``legacy_sha`` defaults to the tagged monolith's. A caller loading a
+    different monolith passes its own, so two scripts never share a cache entry
+    for two different scripts' objects.
+    """
     import numpy
     import pandas
 
     return {
         "cache_format": CACHE_FORMAT,
-        "legacy_sha256": legacy_sha256(),
+        "legacy_sha256": legacy_sha if legacy_sha is not None else legacy_sha256(),
         "data_signature": data_signature(data_dir),
         "world_params": {
             "horizon_start_time": protocol["horizon_start_time"],
@@ -297,7 +311,11 @@ def write_world_cache(path: Path, key: dict[str, Any], world: Any) -> None:
 
 
 def load_world(
-    legacy: ModuleType, data_dir: Path, protocol: dict[str, Any], cache_path: Path | None
+    legacy: ModuleType,
+    data_dir: Path,
+    protocol: dict[str, Any],
+    cache_path: Path | None,
+    legacy_sha: str | None = None,
 ) -> tuple[Any, Any]:
     """Build (data_calculations, spm) exactly as legacy main() does, or reuse the cache.
 
@@ -320,7 +338,7 @@ def load_world(
     clients = random.sample(range(1, 1900), 150)
     clients.insert(0, 0)
 
-    key = world_cache_key(data_dir, protocol)
+    key = world_cache_key(data_dir, protocol, legacy_sha)
     if cache_path is not None:
         cached = read_world_cache(cache_path, key)
         if cached is not None:

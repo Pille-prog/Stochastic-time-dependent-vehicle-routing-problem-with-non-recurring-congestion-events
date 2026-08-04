@@ -29,7 +29,8 @@ mean_number_clients: 150
 client_count_stddev: 30.0
 min_number_clients: 60
 clients_per_vehicle: 28
-time_window_spread: 60
+# The legacy's ``diff_TW``; see config.yaml for why this is 150 and not 60.
+time_window_spread: 150
 client_universe_seed: 0
 client_universe_size: 150
 client_universe_node_range: [1, 1900]

@@ -1,0 +1,101 @@
+# Ad hoc full run of the linear MonteCarloPolicy (the baseline, not the neural
+# effort). Same as config_linear_congestion_10k.yaml but a different point on
+# the thesis's own (alpha, epsilon) sweep grid: epsilon = 0 (pure greedy,
+# no exploration) and alpha = 1e-5, to see whether the divergence seen at
+# alpha=1e-3/epsilon=0.1 is a step-size/exploration instability rather than
+# a simulator-level issue. Deltas from config.yaml:
+#
+#   congestion_lower_bound  0.3   -> 0.1     (range widened to 0.1-0.4)
+#   learning_rate           1e-5  -> 1e-5    (unchanged from config.yaml's own default)
+#   epsilon                 0.1   -> 0       (pure greedy training, no exploration)
+#   total_train_iterations  100   -> 10000
+#   test_frequency          10    -> 50      (10 as-is would cost 50,000 eval
+#                                              episodes -- see spec.md's own
+#                                              "more than the training itself"
+#                                              warning, .scratch/neural-policy/
+#                                              spec.md "The live report")
+#   test_action_counts      [2,10,20,30,40,50] -> [20]  (final eval only at
+#                                              vehicle_count + 20, per request)
+#   data_dir                ../../..  -> absolute path  (the relative path
+#                                              resolves against this repo's
+#                                              nesting, which no longer matches
+#                                              where the Chengdu CSVs live on
+#                                              this machine)
+#
+#   .venv/Scripts/python.exe -u experiments/chengdu/run.py \
+#       --config experiments/chengdu/config_linear_congestion_10k_eps0_lr1e-5.yaml \
+#       --output-dir runs/linear_congestion_0.1-0.4_10k_eps0_lr1e-5
+
+data_dir: C:/Users/ferna/OneDrive/Documentos/Mega city
+links_file: link.csv
+shortest_paths_file: all_shortest_paths.csv
+instance_day: 601
+traffic_days: [601, 602, 603, 604, 605, 606, 607, 608, 609, 610,
+               611, 612, 613, 614, 615, 616, 617, 618, 619, 620,
+               621, 622, 623, 624, 625, 626, 627, 628, 629, 630,
+               701, 702, 703, 704, 705, 706, 707, 708, 709, 710,
+               711, 712, 713, 714]
+
+horizon_start_minute: 300
+shift_end_minute: 780
+episode_end_minute: 1150
+
+# The legacy ClientGenerator hardcoded gauss stddev 30, a 60-client floor and a
+# vehicle-ratio table (28 clients per vehicle at mean 150, 29 at mean 250).
+mean_number_clients: 150
+client_count_stddev: 30.0
+min_number_clients: 60
+clients_per_vehicle: 28
+# The legacy's ``diff_TW``; see config.yaml for why this is 150 and not 60.
+time_window_spread: 150
+client_universe_seed: 0
+client_universe_size: 150
+client_universe_node_range: [1, 1900]
+
+congestion_lower_bound: 0.1
+congestion_upper_bound: 0.4
+max_congestion_duration: 120
+
+total_train_iterations: 10000
+test_frequency: 50
+learning_rate: 1.0e-5
+warmup_learning_rate: 1.0e-6
+epsilon: 0
+n_observed_velocities: 3
+first_train_seed: 1000
+evaluation_seed_start: 100000
+evaluation_seed_count: 50
+test_episodes: 50
+
+# Final test: only vehicle_count + 20 actions, per request (not the full sweep).
+test_action_counts: [20]
+test_seeds: [100, 101, 102, 103, 104, 105, 106, 107, 108, 109,
+             110, 112, 113, 114, 115, 116, 117, 118, 119, 120,
+             121, 122, 124, 125, 126, 127, 128, 129, 130, 131,
+             132, 133, 135, 136, 137, 138, 139, 140, 141, 143,
+             144, 145, 146, 147, 148, 149, 150, 151, 152, 153]
+test_vehicle_counts: [6, 5, 5, 7, 7, 6, 6, 5, 6, 5,
+                      6, 4, 7, 5, 6, 6, 5, 5, 6, 5,
+                      6, 4, 7, 6, 5, 7, 8, 4, 4, 4,
+                      4, 4, 5, 4, 5, 6, 8, 5, 5, 7,
+                      5, 7, 6, 6, 4, 6, 7, 5, 6, 6]
+
+# Neural policy fields: unused by the linear baseline run.py drives, kept at
+# config.yaml's values only because ExperimentConfig requires them.
+neural_d_model: 128
+neural_n_layers: 3
+neural_n_heads: 4
+device: auto
+
+neural_learning_rate: 3.0e-5
+neural_learn_passes: 4
+neural_batch_size: 32
+neural_grad_clip_norm: null
+
+neural_ridge_gamma: 0.99
+neural_ridge_lambda: 1.0
+neural_solve_cadence: 50
+
+neural_warm_start: minutes
+neural_huber_delta: 1.0
+neural_level_gain: 1.0

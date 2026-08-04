@@ -24,3 +24,7 @@ Training_Graph_Folder/
 runs/
 Results_*.txt
 Results_*.png
+# Crash-recovery checkpoints written per episode by the long capture drivers
+# (scripts/capture_*_w_trajectory.py). The finished run beside them is the
+# artifact; these are a duplicate prefix of it.
+*.partial.json
