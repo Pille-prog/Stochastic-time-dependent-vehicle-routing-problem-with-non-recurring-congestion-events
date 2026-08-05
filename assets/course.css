@@ -1,0 +1,62 @@
+/* Curso STDVRP-Transformer — hoja compartida de lecciones (estilo Tufte-ish) */
+:root {
+  --ink: #1a1a1a; --paper: #fffff8; --accent: #a00000; --soft: #666;
+  --code-bg: #f4f2ec; --ok: #1b6e3c; --bad: #a00000; --rule: #ddd;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --ink: #e8e6e0; --paper: #151413; --accent: #ff7b6b; --soft: #9a968e;
+          --code-bg: #24221f; --ok: #6fd08c; --bad: #ff7b6b; --rule: #3a3733; }
+}
+* { box-sizing: border-box; }
+body {
+  font-family: Georgia, 'Iowan Old Style', 'Palatino Linotype', serif;
+  background: var(--paper); color: var(--ink);
+  max-width: 46rem; margin: 0 auto; padding: 3rem 1.5rem 6rem;
+  line-height: 1.55; font-size: 1.05rem;
+}
+h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 .3rem; font-weight: normal; font-style: italic; }
+h2 { font-size: 1.25rem; margin-top: 2.4rem; font-variant: small-caps; letter-spacing: .03em; font-weight: normal;
+     border-bottom: 1px solid var(--rule); padding-bottom: .2rem; }
+.kicker { color: var(--soft); font-size: .85rem; text-transform: uppercase; letter-spacing: .12em; }
+.lede { font-size: 1.15rem; font-style: italic; color: var(--soft); margin-top: .2rem; }
+a { color: var(--accent); }
+code, pre { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: .85em;
+            background: var(--code-bg); border-radius: 4px; }
+code { padding: .1em .35em; }
+pre { padding: .9rem 1rem; overflow-x: auto; line-height: 1.45; }
+.win { border-left: 3px solid var(--ok); padding: .6rem 1rem; margin: 1.5rem 0; background: var(--code-bg); }
+.note { border-left: 3px solid var(--accent); padding: .6rem 1rem; margin: 1.5rem 0; font-size: .95rem; }
+figure { margin: 2rem 0; }
+figcaption { color: var(--soft); font-size: .85rem; margin-top: .4rem; }
+
+/* Comparación en dos paneles (componente reusable) */
+.twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: stretch; }
+@media (max-width: 640px) { .twocol { grid-template-columns: 1fr; } }
+.panel { border: 1px solid var(--rule); border-radius: 8px; overflow: hidden;
+         display: flex; flex-direction: column; }
+.panel header { padding: .45rem .9rem; font-family: 'SF Mono', Menlo, Consolas, monospace;
+                font-size: .78rem; letter-spacing: .08em; text-transform: uppercase;
+                color: var(--paper); background: var(--soft); }
+.panel.decide header { background: var(--ok); }
+.panel.learn header { background: var(--accent); }
+.panel pre { margin: 0; border-radius: 0; flex: 1; font-size: .72em; line-height: 1.6; }
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: .92rem; }
+th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-variant: small-caps; font-weight: normal; color: var(--soft); }
+
+/* Quiz de recuperación */
+.quiz { margin: 2rem 0; }
+.quiz .q { margin: 1.4rem 0; padding: 1rem 1.2rem; border: 1px solid var(--rule); border-radius: 8px; }
+.quiz .q p { margin: 0 0 .7rem; }
+.quiz button {
+  display: block; width: 100%; text-align: left; margin: .35rem 0; padding: .55rem .8rem;
+  font: inherit; font-size: .95rem; color: var(--ink); background: var(--code-bg);
+  border: 1px solid var(--rule); border-radius: 6px; cursor: pointer;
+}
+.quiz button:hover { border-color: var(--soft); }
+.quiz button.correct { border-color: var(--ok); color: var(--ok); font-weight: bold; }
+.quiz button.wrong { border-color: var(--bad); color: var(--bad); }
+.quiz .expl { display: none; margin-top: .7rem; font-size: .9rem; color: var(--soft); }
+.quiz .q.done .expl { display: block; }
+footer { margin-top: 4rem; padding-top: 1rem; border-top: 1px solid var(--rule);
+         color: var(--soft); font-size: .85rem; }

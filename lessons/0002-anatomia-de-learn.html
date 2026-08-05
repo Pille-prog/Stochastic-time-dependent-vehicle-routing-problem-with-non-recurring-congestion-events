@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lección 0002 — La anatomía de learn()</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<p class="kicker">Curso STDVRP-Transformer · Lección 0002 · ~20 min · requiere <a href="0001-mapa-del-sistema.html">L01</a></p>
+<h1>La anatomía de <code>learn()</code>: dónde se ahoga la señal</h1>
+<p class="lede">En la L01 dibujaste el circuito de aprendizaje. Hoy le ponemos números reales
+del config de Chengdu y vemos, paso a paso, por qué el gradiente que llega a la red puede no
+contener la información que el <code>argmin</code> necesita.</p>
+
+<h2>1 · El target, con números</h2>
+<p>Config real: <code>neural_learning_rate = 3e-4</code> (Adam), <code>K = 4</code> pasadas,
+minibatch <code>32</code>, <code>ε = 0.1</code> fijo. Escala del target:
+<code>esc = n_clients · episode_length ≈ 150 · 1200 ≈ 1.8e5</code>.</p>
+
+<figure>
+<div class="twocol">
+  <div class="panel decide">
+    <header>Lo que el argmin necesita distinguir</header>
+<pre>
+Q(s_t, v, cliente_cercano)   vs.
+Q(s_t, v, cliente_lejano)
+
+diferencia real entre acciones:
+  ~ minutos de viaje + efecto en TW
+  ≈ decenas de unidades de costo
+  ≈ 10 / 1.8e5 ≈ 5e-5 (escalado)
+</pre>
+  </div>
+  <div class="panel learn">
+    <header>Lo que el target trae puesto</header>
+<pre>
+target_t = U_t − costo_hundido(s_t)
+
+U_t = costo restante del episodio
+  ≈ miles de unidades
+  + cola: 40000 − 200·|visitados|
+    si tau llega a 1198 (F10)
+  ≈ 0.03 … 0.25 (escalado)
+  varianza entre episodios: enorme
+</pre>
+  </div>
+</div>
+<figcaption>La aguja (≈5e-5) y el pajar (≈0.1 ± mucho). El cociente señal/ruido es el
+corazón de la divergencia D1.</figcaption>
+</figure>
+
+<p>Y el detalle estructural que lo agrava: en el epoch <code>t</code>, los <code>m</code>
+pares <code>(t, v)</code> se regresan contra <strong>el mismo</strong> <code>target_t</code>.
+El target no sabe qué vehículo eligió bien y cuál mal — no hay contrafactual. La única forma
+de que la red separe acciones es correlación estadística acumulada a través de muchos
+episodios… que el punto 3 se encarga de destruir.</p>
+
+<h2>2 · El baseline de costo hundido: qué arregla y qué no</h2>
+<p><code>costo_hundido(s_t)</code> = delay ya incurrido por clientes atrasados + overtime ya
+incurrido. Depende <em>solo del estado</em>: baja el <em>offset</em> del target (bien, menos
+magnitud absoluta), pero es idéntico para todos los candidatos del epoch — <strong>no puede
+cambiar el ranking</strong> ni reducir la varianza <em>entre acciones</em>. Es un baseline de
+reducción de varianza tipo REINFORCE, no un mecanismo de crédito. Compáralo con las baselines
+que sí discriminan: el greedy-rollout de Kool (¿qué habría costado seguir la policy base?) o
+la media multi-arranque de POMO — ambas <em>por instancia y por decisión</em>.</p>
+
+<h2>3 · Un batch por episodio, y el episodio a la basura</h2>
+<p><code>learn()</code> hace K=4 pasadas sobre las ~<code>T·m</code> muestras del episodio
+recién jugado — todas del mismo grafo de demanda, la misma realización de congestión, la misma
+policy — y luego las descarta. Dos problemas con nombre y apellido:</p>
+<ul>
+  <li><strong>Correlación intra-batch:</strong> las muestras de un episodio comparten casi todo;
+  el gradiente promedio apunta hacia "este episodio", no hacia "el problema".</li>
+  <li><strong>Interferencia catastrófica:</strong> el episodio e+1 (otra instancia, otros
+  clientes) sobrescribe lo ajustado para el episodio e. Es exactamente lo que el experience
+  replay de Mnih 2015 existe para impedir, y lo que Chen/Ulmer/Thomas usan en el SDVRP.</li>
+</ul>
+
+<h2>4 · Adam contra el warm start quirúrgico</h2>
+<p>El warm start pone <em>ceros exactos</em> (residuales del transformer, columnas de fondo de
+<code>layer2</code>) y <em>unos exactos</em> (la vía de los minutos). Pero Adam no respeta
+magnitudes: normaliza cada parámetro por su propia historia de gradientes, así que un parámetro
+con gradiente minúsculo se mueve <em>igual</em> (~lr) que uno con gradiente enorme.</p>
+
+<figure>
+<pre>
+paso de Adam ≈ lr · m̂ / (√v̂ + ε)   →  |paso| ≈ lr = 3e-4, casi sin importar |gradiente|
+
+t=0    Q = minutos/horizon  (policy = vecino más cercano)     ← prior intacto
+t≈10²  out_proj, linear2, layer2[0,1:] ya no son cero:
+       el transformer deja de ser identidad, hidden[0] ya no manda
+t≈10³  Q ≈ media del target (≈ U_t promedio), plano entre acciones
+       argmin ≈ ruido  →  costo ≈ peor que vecino más cercano
+</pre>
+<figcaption>Cronología plausible (hipótesis D4+D1, verificable): el prior muere antes de que
+nazca la señal. Con SGD el paso sería proporcional al gradiente y los ceros se moverían lento;
+con Adam, todos marchan al mismo ritmo.</figcaption>
+</figure>
+
+<h2>5 · Las firmas diagnósticas (esto es lo accionable)</h2>
+<table>
+<tr><th>Observación en el run de Fernando</th><th>Apunta a</th></tr>
+<tr><td><code>last_loss</code> baja, costo greedy plano</td><td>D1: el valor es aprendible, el ranking no está en el target</td></tr>
+<tr><td>Loss oscila sin bajar, episodio a episodio</td><td>D2: interferencia entre instancias (sin replay)</td></tr>
+<tr><td>Costo greedy <em>empeora</em> respecto al episodio 0</td><td>D4: el warm start murió (medir corr(Q, minutos) en checkpoints)</td></tr>
+<tr><td>Calibración de Gate A sube, costo no mejora</td><td>D1/D6: aprende V(s), no discrimina acciones</td></tr>
+<tr><td>Runs con ε=0 mejoran notablemente</td><td>D3: la exploración uniforme contamina los retornos MC</td></tr>
+</table>
+
+<div class="win"><strong>Tu victoria tangible:</strong> ante cualquier gráfico del training de
+Fernando (loss, costo por bloque, calibración), puedes decir cuál de las divergencias D1–D4 es
+consistente con esa firma — y qué medición barata la confirmaría o descartaría.</div>
+
+<h2>Recuperación (sin mirar arriba)</h2>
+<div class="quiz">
+  <div class="q" data-answer="2">
+    <p><strong>P1.</strong> ¿Por qué el baseline de costo hundido no puede arreglar el ranking entre acciones?</p>
+    <button>Porque su magnitud es muy chica frente al retorno U_t</button>
+    <button>Porque solo se aplica al entrenar y no al decidir</button>
+    <button>Porque depende del estado y es igual para todo candidato</button>
+    <p class="expl">Al ser función solo de s_t, resta lo mismo a todos los candidatos del epoch: baja el offset, jamás cambia un argmin ni la varianza entre acciones.</p>
+  </div>
+  <div class="q" data-answer="0">
+    <p><strong>P2.</strong> ¿Qué propiedad de Adam amenaza los ceros exactos del warm start?</p>
+    <button>El paso efectivo es ~lr aunque el gradiente sea diminuto</button>
+    <button>El momento acumulado ignora los pesos inicializados a uno</button>
+    <button>El término ε del denominador anula gradientes pequeños</button>
+    <p class="expl">Adam normaliza por √v̂: parámetros con gradiente minúsculo avanzan casi igual que los de gradiente grande. Los ceros estructurales (out_proj, linear2, layer2 de fondo) se mueven ~3e-4 por paso desde el update 1.</p>
+  </div>
+  <div class="q" data-answer="1">
+    <p><strong>P3.</strong> Ves que last_loss baja sostenidamente pero el costo greedy no mejora. ¿Firma de qué?</p>
+    <button>De D2: las instancias se interfieren y nada converge</button>
+    <button>De D1: aprende el valor pero el ranking no está ahí</button>
+    <button>De D3: la exploración envenena el retorno completo</button>
+    <p class="expl">Loss ↓ + costo plano = el target sí se puede predecir (valor del estado), pero como es común a todas las acciones del epoch, predecirlo bien no ordena candidatos. Es la firma más informativa de todas.</p>
+  </div>
+</div>
+
+<h2>Fuente primaria recomendada</h2>
+<p><a href="https://arxiv.org/abs/1910.11901">Chen, Ulmer &amp; Thomas — «Deep Q-learning for
+same-day delivery»</a>: la receta valor-neuronal más cercana a este problema que <em>sí</em>
+funcionó. Fíjate en las tres decisiones que este repo no tomó: experience replay, ε decayendo
+1.0→0.01, y lr de Adam con decaimiento exponencial. Complemento conceptual: Sutton &amp; Barto
+(2ª ed.) cap. 5 y 9 — varianza Monte Carlo y semi-gradiente
+(<a href="http://incompleteideas.net/book/the-book-2nd.html">libre acceso</a>).</p>
+
+<footer>
+<p>Siguiente lección propuesta: <em>0003 — Cómo diseñaría la literatura el experimento de
+diagnóstico</em> (Gate A, corr(Q, minutos), runs con ε=0, n-step). Referencias:
+<a href="../reference/estudio-dominio-transformer-stdvrp.md">estudio de dominio</a> ·
+<a href="../RESOURCES.md">recursos</a>.</p>
+<p><strong>¿Algo no cerró?</strong> Pregúntale al agente en la sesión — puede abrir
+<code>transformer_policy.py</code> y recorrer <code>learn()</code> línea por línea contigo.</p>
+</footer>
+
+<script>
+document.querySelectorAll('.quiz .q').forEach(q => {
+  const answer = parseInt(q.dataset.answer, 10);
+  q.querySelectorAll('button').forEach((b, i) => {
+    b.addEventListener('click', () => {
+      if (q.classList.contains('done')) return;
+      q.classList.add('done');
+      b.classList.add(i === answer ? 'correct' : 'wrong');
+      if (i !== answer) q.querySelectorAll('button')[answer].classList.add('correct');
+    });
+  });
+});
+</script>
+</body>
+</html>

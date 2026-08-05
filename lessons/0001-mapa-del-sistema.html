@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lección 0001 — El mapa del sistema</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<p class="kicker">Curso STDVRP-Transformer · Lección 0001 · ~15 min</p>
+<h1>El mapa del sistema: de <code>State</code> a acción, de episodio a gradiente</h1>
+<p class="lede">Antes de juzgar por qué el transformer de Fernando no aprende, hay que poder
+recorrer el sistema de memoria. Esta lección construye ese mapa — y nada más.</p>
+
+<h2>La única idea de hoy</h2>
+<p>El sistema tiene <strong>dos circuitos</strong> que comparten la misma red:</p>
+<ol>
+  <li><strong>El circuito de decisión</strong> (cada decision epoch): el estado se tokeniza en
+  tres tipos de tokens de <em>hechos crudos</em>, el <code>TokenEncoder</code> corre
+  <em>una sola vez</em>, y después el <code>QHead</code> barre los vehículos en orden de
+  índice (el <em>sweep</em>) tomando <code>argmin</code> de un <strong>costo</strong> por
+  candidato, con los clientes ya reclamados enmascarados con <code>+inf</code>.</li>
+  <li><strong>El circuito de aprendizaje</strong> (al terminar el episodio): los rewards se
+  suman hacia atrás en retornos Monte Carlo <code>U_t</code>, se les resta el costo hundido, y
+  <em>cada par (epoch, vehículo)</em> se regresa con Huber + Adam contra… <strong>el mismo
+  target por epoch</strong>. Luego el episodio se descarta: no hay replay buffer.</li>
+</ol>
+
+<figure>
+<div class="twocol">
+  <div class="panel decide">
+    <header>Decidir · por decision epoch</header>
+<pre>
+State ──tokenize──▶ tokens
+tokens ──encoder (1 vez)──▶ embeddings
+
+para v = 0..m−1:
+  Q = QHead(veh_v, clientes, claimed)
+  Q[claimed] = +inf
+  a_v = argmin Q   (costo, no reward)
+  claimed[a_v] = True
+</pre>
+  </div>
+  <div class="panel learn">
+    <header>Aprender · por episodio</header>
+<pre>
+rewards r_1..r_T
+U_t = r_(t+1)+...+r_T      (backward)
+target_t = U_t − costo_hundido(s_t)
+
+para cada (t, v):   ← ¡mismo target_t!
+  Huber(Q(s_t,v,a_v)/esc, target_t/esc)
+  Adam.step()
+
+descartar episodio (sin replay)
+</pre>
+  </div>
+</div>
+<figcaption>El mapa completo: dos circuitos que comparten la misma red. Si puedes reproducir
+ambos paneles de memoria, ganaste.</figcaption>
+</figure>
+
+<div class="win"><strong>Tu victoria tangible:</strong> al final de esta lección puedes dibujar
+este mapa sin mirar, y localizar cada flecha en un archivo:
+<code>tokenizer.py → network.py → transformer_policy.py (_sweep / learn) → trainer.py</code>.</div>
+
+<div class="note"><strong>Por qué importa para la misión:</strong> las cinco divergencias serias
+del <a href="../reference/estudio-dominio-transformer-stdvrp.md">estudio de dominio</a> (D1–D5)
+viven todas en el circuito 2 o en la frontera entre ambos. Sin este mapa, la discusión con
+Fernando es humo; con él, cada hallazgo del ultracode review tendrá una dirección donde caer.</div>
+
+<h2>Recuperación (sin mirar arriba)</h2>
+<div class="quiz">
+  <div class="q" data-answer="1">
+    <p><strong>P1.</strong> ¿Cuántas veces corre el <code>TokenEncoder</code> en un decision epoch con m vehículos?</p>
+    <button>m veces, una pasada del encoder por vehículo</button>
+    <button>1 sola vez; el sweep reusa los embeddings</button>
+    <button>2 por vez, una en decide y otra en learn</button>
+    <p class="expl">Una pasada por epoch (decisión 6 del spec); el QHead es lo barato que corre m veces. Ojo: en <code>learn</code> sí se re-encodea cada muestra — ineficiencia documentada, no bug.</p>
+  </div>
+  <div class="q" data-answer="2">
+    <p><strong>P2.</strong> En <code>learn()</code>, ¿qué target recibe el par (epoch t, vehículo v)?</p>
+    <button>El costo inmediato que causó ese vehículo v</button>
+    <button>El retorno n-step con bootstrap del Q siguiente</button>
+    <button>El retorno global U_t menos el costo hundido</button>
+    <p class="expl">El mismo target para los m vehículos del epoch t — no hay crédito por acción individual. Es la divergencia D1 del estudio, la candidata #1 a "no aprende".</p>
+  </div>
+  <div class="q" data-answer="0">
+    <p><strong>P3.</strong> ¿Qué garantiza que un vehículo no elija un cliente ya tomado en el mismo sweep?</p>
+    <button>La máscara claimed con infinito antes del argmin</button>
+    <button>La red aprende a evitarlo vía el input claimed</button>
+    <button>El simulador rechaza la acción y repite el epoch</button>
+    <p class="expl">ADR-0007: factibilidad = restricción dura en el argmin, jamás una esperanza sobre lo que la red aprenda. <code>claimed</code> también entra como input al head, pero eso solo informa la <em>predicción</em>.</p>
+  </div>
+</div>
+
+<h2>Fuente primaria recomendada</h2>
+<p>El survey que define este dominio: <a href="https://arxiv.org/abs/2103.00507">Hildebrandt,
+Thomas &amp; Ulmer — «Opportunities for reinforcement learning in stochastic dynamic vehicle
+routing»</a>. Lee solo las secciones de VFA y de descomposición de acciones (~30 min): nombran
+exactamente el patrón por-vehículo de este código y sus límites. Complemento del propio repo:
+<code>docs/research/rl-methodology-for-stdvrp.md</code>.</p>
+
+<footer>
+<p>Siguiente lección propuesta: <em>0002 — La anatomía de <code>learn()</code>: varianza del
+target, Adam vs. warm start</em>. Referencias: <a href="../reference/estudio-dominio-transformer-stdvrp.md">estudio de dominio</a> · <a href="../RESOURCES.md">recursos</a>.</p>
+<p><strong>¿Algo no cerró?</strong> Pregúntale al agente en la sesión — es tu profesor: puede
+abrir cualquier archivo de la rama de Fernando y explicar cualquier flecha del mapa.</p>
+</footer>
+
+<script>
+document.querySelectorAll('.quiz .q').forEach(q => {
+  const answer = parseInt(q.dataset.answer, 10);
+  q.querySelectorAll('button').forEach((b, i) => {
+    b.addEventListener('click', () => {
+      if (q.classList.contains('done')) return;
+      q.classList.add('done');
+      b.classList.add(i === answer ? 'correct' : 'wrong');
+      if (i !== answer) q.querySelectorAll('button')[answer].classList.add('correct');
+    });
+  });
+});
+</script>
+</body>
+</html>
